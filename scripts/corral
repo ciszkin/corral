@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec java -cp "${CORRAL_JAR:-$HOME/.corral/corral-daemon-all.jar}" dev.corral.CorralCli "$@"

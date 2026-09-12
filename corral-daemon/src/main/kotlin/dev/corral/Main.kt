@@ -1,0 +1,41 @@
+package dev.corral
+
+import io.ktor.server.cio.CIO
+import io.ktor.server.engine.embeddedServer
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import java.nio.file.Files
+import java.nio.file.Path
+
+fun main() {
+    val port = System.getenv("CORRAL_PORT")?.toInt() ?: 8798
+    val dbPath = System.getenv("CORRAL_DB")?.let { Path.of(it) }
+        ?: Path.of(System.getProperty("user.home"), ".corral", "corral.db") // one portable state dir on every OS
+    dbPath.parent?.let { Files.createDirectories(it) }
+    val adb = System.getenv("CORRAL_ADB") ?: "adb"
+    val db = Db(dbPath)
+    val scope = CoroutineScope(Dispatchers.IO)
+
+    val monitor = DeviceMonitor(adb, System.getenv("CORRAL_FAKE_DEVICES"), scope)
+    val leases = LeaseManager({ monitor.devices }, db)
+    leases.recoverPersisted()
+
+    monitor.start()
+
+    // Self-heal the SDK adb shim: an SDK update replaces platform-tools/adb (and the shim
+    // with it); the daemon restores the wrapper, keeping the newer binary as adb.real.
+    val adbPath = Path.of(adb)
+    val wrapperSource = Path.of(System.getProperty("user.home"), "bin", "adb")
+    var lastShimStatus: String? = null
+    fun selfHealSdkShim() {
+        val status = runCatching { SdkShim.ensure(adbPath, wrapperSource) }.getOrNull() ?: return
+        if (status != lastShimStatus) { println("corral: $status"); lastShimStatus = status }
+    }
+    selfHealSdkShim()
+
+    scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; selfHealSdkShim() } } // expiry reaper; queue offers join here in Phase 2
+
+    embeddedServer(CIO, port = port, host = "127.0.0.1") { corralModule(AppEnv({ monitor.devices }, leases)) }.start(wait = true)
+}

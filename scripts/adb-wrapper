@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# corral adb wrapper: enforces leasing at exec time. Complements the Claude PreToolUse hook —
+# the hook catches absolute-path adb calls, this shim catches PATH-resolved ones.
+# Install: cp scripts/adb-wrapper ~/bin/adb && chmod +x ~/bin/adb   (~/bin must precede the SDK dir on PATH)
+set -u
+CORRAL_URL=${CORRAL_URL:-http://127.0.0.1:8798}
+# the real adb: explicit CORRAL_REAL_ADB, else the adb.real sibling when this script is
+# installed as the SDK shim (platform-tools/adb), else the default SDK path.
+REAL_ADB=${CORRAL_REAL_ADB:-}
+if [[ -z "$REAL_ADB" ]]; then
+  if [[ -x "$(dirname "$0")/adb.real" ]]; then REAL_ADB="$(dirname "$0")/adb.real"
+  elif [[ -x "$HOME/Android/Sdk/platform-tools/adb.real" ]]; then REAL_ADB="$HOME/Android/Sdk/platform-tools/adb.real"
+  else REAL_ADB="$HOME/Android/Sdk/platform-tools/adb"; fi
+fi
+# Lease owner identity — per-agent-session, so two sessions on one unix user are distinct
+# principals. Resolution (see agent-session-identity.md):
+#   CORRAL_OWNER > claude:$CLAUDE_CODE_SESSION_ID > opencode:$OPENCODE_PID
+#   > proc:<comm>:<pid>:<starttime> (process ancestry, universal) > user:$USER
+OWNER_SKIP=" bash sh zsh fish dash ksh env nohup timeout xargs sudo setsid stdbuf script "
+
+# Walk up the process tree from $PPID; the first non-shell ancestor is the agent.
+agent_process() {
+  local pid="${1:-$PPID}" comm ppid start
+  while [ "$pid" -gt 1 ]; do
+    read -r comm ppid start < <(
+      awk '{ c = $2; gsub(/[()]/, "", c); print c, $4, $22 }' "/proc/$pid/stat"
+    ) || return 1
+    case "$OWNER_SKIP" in
+      *" $comm "*) ;;                     # a shell or wrapper — keep walking
+      *) echo "$pid $start $comm"; return 0;;
+    esac
+    pid="$ppid"
+  done
+  return 1
+}
+
+if [[ -n ${CORRAL_OWNER:-} ]]; then OWNER=$CORRAL_OWNER
+elif [[ -n ${CLAUDE_CODE_SESSION_ID:-} ]]; then OWNER="claude:$CLAUDE_CODE_SESSION_ID"
+elif [[ -n ${OPENCODE_PID:-} ]]; then OWNER="opencode:$OPENCODE_PID"
+elif read -r apid astart acomm < <(agent_process); then OWNER="proc:$acomm:$apid:$astart"
+else OWNER="user:${USER:-$(id -un)}"; fi
+
+serial=${ANDROID_SERIAL:-}
+# read-only subcommands that touch no device pass through without a pin
+ro=(devices start-server kill-server track-devices version help)
+sub=""; args=("$@")
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    -s) serial=${2:-}; shift $(( $# > 1 ? 2 : 1 ));;
+    -s?*) serial=${1#-s}; shift;;
+    -H|-P|-L|-p|-t) shift $(( $# > 1 ? 2 : 1 ));;   # global flags that take a value
+    -*) shift;;   # global flags (-v, --version, --help, -d, -e...) are not a subcommand
+    *) [[ -z $sub ]] && sub=$1; shift;;
+  esac
+done
+
+deny() { printf 'corral: %s\nLease it first:\n  corral lease -- <cmd>\n  ser=$(corral claim) && ANDROID_SERIAL=$ser <cmd>\nstatus: corral status\n' "$1" >&2; exit 1; }
+
+if [[ -n $serial ]]; then
+  resp=$(curl -sfG --max-time 5 --data-urlencode "serial=$serial" --data-urlencode "owner=$OWNER" "$CORRAL_URL/api/check" 2>/dev/null) \
+    || deny "daemon unreachable at $CORRAL_URL — failing closed (no daemon, no leasing). Start it: systemctl --user status corral"
+  grep -q '"allowed":true' <<<"$resp" || deny "lease check failed for $serial: $resp"
+elif [[ -n $sub ]] && [[ ! " ${ro[*]} " == *" $sub "* ]]; then
+  deny "no device pinned (no -s, no ANDROID_SERIAL)"
+fi
+exec "$REAL_ADB" "${args[@]}"

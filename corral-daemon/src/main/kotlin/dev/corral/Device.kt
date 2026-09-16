@@ -5,7 +5,8 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class Device(val serial: String, val state: String,
                   val transport: String = transportOf(serial),
-                  val model: String? = null, val osVersion: String? = null) {
+                  val model: String? = null, val osVersion: String? = null,
+                  val avd: String? = null) {
     companion object {
         fun transportOf(serial: String) = when {
             serial.startsWith("emulator-") -> "emulator"

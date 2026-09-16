@@ -13,6 +13,7 @@ import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.nio.charset.StandardCharsets
 import java.nio.file.Path
+import java.time.Duration
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import kotlin.system.exitProcess
@@ -29,14 +30,11 @@ object CorralCli {
     private val owner: String by lazy { resolveOwner() }
 
     /**
-     * Lease owner identity — per-agent-session (see agent-session-identity.md):
-     * CORRAL_OWNER > claude:$CLAUDE_CODE_SESSION_ID > opencode:$OPENCODE_PID
-     * > proc:<comm>:<pid>:<starttime> (process ancestry, universal) > user:$USER
+     * Lease owner identity — the declared corral identifier wins, else process ancestry:
+     * CORRAL_OWNER > proc:<comm>:<pid>:<starttime> (universal) > user:$USER
      */
     private fun resolveOwner(): String {
         System.getenv("CORRAL_OWNER")?.takeIf { it.isNotBlank() }?.let { return it }
-        System.getenv("CLAUDE_CODE_SESSION_ID")?.let { return "claude:$it" }
-        System.getenv("OPENCODE_PID")?.let { return "opencode:$it" }
         processOwner()?.let { return it }
         return "user:" + (System.getenv("USER") ?: System.getProperty("user.name"))
     }
@@ -44,6 +42,12 @@ object CorralCli {
     private val shellSkip = setOf(
         "bash", "sh", "zsh", "fish", "dash", "ksh", "env", "nohup",
         "timeout", "xargs", "sudo", "setsid", "stdbuf", "script")
+
+    // The floor of the ancestry walk: the init system is never an agent. An orphaned (reparented)
+    // client's first non-shell ancestor is `systemd --user`, a shared and immortal principal — if
+    // returned, every orphan would own each other's leases and never be reclaimed by pid liveness.
+    // Stop here and fall back to `user:$USER` instead.
+    private val initSkip = setOf("systemd", "init")
 
     // CORRAL_ADB first (the only SDK pointer the daemon unit sets; install.sh computed and
     // trusts it) — it points at the real binary (adb.real), the shim is its sibling "adb".
@@ -65,14 +69,32 @@ object CorralCli {
     // Walk up from the JVM's parent (like the wrapper starts at $PPID); the first
     // non-shell ancestor is the agent. Read /proc/<pid>/stat directly so comm and
     // starttime match the bash wrapper byte for byte.
-    private fun processOwner(): String? {
+    private fun processOwner(): String? = agentAncestor()?.let { "proc:${it.first}:${it.second}:${it.third}" }
+
+    /** The agent's pid from the ancestry walk (see processOwner) — the holder that outlives this CLI. */
+    private fun agentPid(): Long = agentAncestor()?.second ?: 0
+
+    /**
+     * The pid to record on a lease as a liveness hint, or 0 for TTL-bound.
+     * Session id is the identity; a pid is only a valid liveness signal when the process
+     * actually spans the work. A declared `CORRAL_OWNER` is a durable identity — the process
+     * is not the session (Air starts a fresh process per prompt) — so pinning the lease to
+     * the pid would break the hold; send 0 and lean on the TTL. Only `proc:` owners (process
+     * ancestry, no declared identifier) get pid liveness, because there the process is the session.
+     */
+    private fun holderPid(): Long =
+        if (owner.startsWith("proc:")) agentPid() else 0
+
+    /** First non-shell ancestor as (comm, pid, starttime), or null if none found (→ user:$USER). */
+    private fun agentAncestor(): Triple<String, Long, Long>? {
         var p = ProcessHandle.current().parent()
         while (p.isPresent) {
             val h = p.get()
             val pid = h.pid()
-            if (pid <= 1) break
+            if (pid <= 1) return null
             val stat = statOf(pid) ?: return null
-            if (stat.first !in shellSkip) return "proc:${stat.first}:$pid:${stat.second}"
+            if (stat.first in initSkip) return null   // reparented onto init — no agent above us
+            if (stat.first !in shellSkip) return Triple(stat.first, pid, stat.second)
             p = h.parent()
         }
         return null
@@ -97,10 +119,12 @@ object CorralCli {
         HttpRequest.newBuilder(URI.create("$url$path")).GET().build(),
         HttpResponse.BodyHandlers.ofString()).let(::ok).body()
 
-    private fun send(method: String, path: String, body: String) = http.send(
+    private fun send(method: String, path: String, body: String, timeoutSeconds: Long = 0) = http.send(
         HttpRequest.newBuilder(URI.create("$url$path"))
             .method(method, HttpRequest.BodyPublishers.ofString(body))
-            .header("Content-Type", "application/json").build(),
+            .header("Content-Type", "application/json")
+            .let { b -> if (timeoutSeconds > 0) b.timeout(Duration.ofSeconds(timeoutSeconds)) else b }
+            .build(),
         HttpResponse.BodyHandlers.ofString()).let(::ok).body()
 
     private fun trySend(method: String, path: String, body: String) = http.send(
@@ -123,16 +147,30 @@ object CorralCli {
     }
 
     /** Claim one free device; retries on a raced busy (409 {"busy":...}), null when none free. */
-    private fun claimFree(owner: String, pid: Long): String? {
+    private fun claimFree(owner: String, pid: Long, selector: Selector = Selector()): String? {
         repeat(5) {
             val r = trySend("POST", "/api/leases",
-                Json.encodeToString(ClaimRequest(owner = owner, pid = pid, ttlSeconds = 1800)))
+                Json.encodeToString(ClaimRequest(selector = selector, owner = owner, pid = pid, ttlSeconds = 1800)))
             if (r.statusCode() == 200)
                 return Json.parseToJsonElement(r.body()).jsonObject["serial"]!!.jsonPrimitive.content
             if (r.body().contains("\"busy\"")) return@repeat // raced; try again
             return null // 409 no-free-device (or other) -> stop
         }
         return null
+    }
+
+    /** Claim one device now; on 409 print a plain message (not the raw busy JSON) and exit 1. */
+    private fun claimOne(selector: Selector, pid: Long): String {
+        val r = trySend("POST", "/api/leases",
+            Json.encodeToString(ClaimRequest(selector = selector, owner = owner, pid = pid, ttlSeconds = 1800)))
+        if (r.statusCode() == 200)
+            return Json.parseToJsonElement(r.body()).jsonObject["serial"]!!.jsonPrimitive.content
+        val matching = runCatching {
+            Json.parseToJsonElement(r.body()).jsonObject["matching"]!!.jsonPrimitive.content.toInt()
+        }.getOrNull()
+        if (matching == 0) System.err.println("corral: no connected device matches $selector")
+        else System.err.println("corral: no free device matches $selector (${matching ?: "some"} connected, all leased)")
+        exitProcess(1)
     }
 
     private fun String.str(field: String) =
@@ -209,20 +247,20 @@ object CorralCli {
                 }
             }
             "claim" -> {
-                when (args.getOrNull(1)) {
-                    "--all" -> {
+                val (sel, rest) = parseSelector(args.drop(1).toTypedArray())
+                when {
+                    rest.firstOrNull() == "--all" -> {
                         var claimed = 0
                         while (true) {
-                            val s = claimFree(owner, 0) ?: break
-                            println(s)
-                            claimed++
+                            val s = claimFree(owner, holderPid(), selector = sel) ?: break
+                            println(s); claimed++
                         }
                         if (claimed == 0) { System.err.println("corral: no free device"); exitProcess(1) }
                     }
-                    null -> println(send("POST", "/api/leases",
-                        Json.encodeToString(ClaimRequest(owner = owner, ttlSeconds = 1800))).str("serial"))
-                    else -> println(send("POST", "/api/leases",
-                        Json.encodeToString(ClaimRequest(selector = Selector(serial = args[1]), owner = owner, ttlSeconds = 1800))).str("serial"))
+                    else -> {
+                        val selector = rest.firstOrNull()?.let { sel.copy(serial = it) } ?: sel
+                        println(claimOne(selector, holderPid()))
+                    }
                 }
             }
             "free" -> {
@@ -247,15 +285,15 @@ object CorralCli {
                 println("renewed $serial")
             }
             "lease" -> {
-                val all = args.getOrNull(1) == "--all"
-                val cmd = args.drop(if (all) 2 else 1)
-                    .let { if (it.firstOrNull() == "--") it.drop(1) else it }
+                val (sel, rest0) = parseSelector(args.drop(1).toTypedArray())
+                val all = rest0.firstOrNull() == "--all"
+                val cmd = rest0.drop(if (all) 1 else 0).let { if (it.firstOrNull() == "--") it.drop(1) else it }
                 if (cmd.isEmpty()) { System.err.println("usage: corral lease [--all] -- <cmd>"); exitProcess(2) }
                 val isGradle = cmd.firstOrNull()?.let { File(it).name } in setOf("gradle", "gradlew")
                 if (all) {
                     val claimed = mutableListOf<String>()
                     while (true) {
-                        val s = claimFree(owner, pid) ?: break
+                        val s = claimFree(owner, pid, selector = sel) ?: break
                         claimed += s
                     }
                     if (claimed.isEmpty()) { System.err.println("corral: no free device"); exitProcess(1) }
@@ -270,7 +308,7 @@ object CorralCli {
                     exitProcess(rc)
                 } else {
                     val serial = send("POST", "/api/leases",
-                        Json.encodeToString(ClaimRequest(owner = owner, pid = pid, ttlSeconds = 1800))).str("serial")
+                        Json.encodeToString(ClaimRequest(selector = sel, owner = owner, pid = pid, ttlSeconds = 1800))).str("serial")
                     val rc = try {
                         ProcessBuilder(cmd).apply {
                             environment()["ANDROID_SERIAL"] = serial
@@ -282,13 +320,50 @@ object CorralCli {
                     exitProcess(rc)
                 }
             }
+            "wait" -> {
+                val (sel, rest) = parseSelector(args.drop(1).toTypedArray())
+                val i = rest.indexOf("--timeout")
+                val waitSeconds = if (i >= 0) rest.getOrNull(i + 1)?.toLongOrNull() ?: usage(2) else 600L
+                // This CLI's OWN pid: it lives exactly as long as it is queued, so killing the
+                // waiter frees its queue slot at once (the daemon skips dead-pid waiters). The
+                // offered lease itself is TTL-bound — this process exits right after printing, so
+                // the daemon must not pin the accepted device to it. renew = offer acceptance
+                // (clears pendingAccept); without it the 30 s sweep would reclaim the offer.
+                val serial = send("POST", "/api/leases", timeoutSeconds = waitSeconds + 30,
+                    body = Json.encodeToString(ClaimRequest(selector = sel, owner = owner,
+                        pid = pid, ttlSeconds = 1800, waitSeconds = waitSeconds))).str("serial")
+                send("POST", "/api/leases/$serial/renew", Json.encodeToString(RenewRequest(owner = owner)))
+                println(serial)
+            }
+            "queue" -> println(get("/api/queue"))
             "help" -> usage(0)
             else -> usage(2)
         }
     }
 
+    /** Pulls --serial/--model/--os/--type/--avd out of args; returns (selector, remaining positional args). */
+    private fun parseSelector(args: Array<String>): Pair<Selector, List<String>> {
+        var sel = Selector(); val rest = mutableListOf<String>(); var i = 0
+        while (i < args.size) {
+            when (args[i]) {
+                "--serial" -> sel = sel.copy(serial = args.getOrNull(++i) ?: usage(2))
+                "--model" -> sel = sel.copy(model = args.getOrNull(++i) ?: usage(2))
+                "--os" -> sel = sel.copy(minOs = args.getOrNull(++i) ?: usage(2))
+                "--type" -> sel = sel.copy(transport = args.getOrNull(++i) ?: usage(2))
+                "--avd" -> sel = sel.copy(avd = args.getOrNull(++i) ?: usage(2))
+                "--" -> { rest.addAll(args.drop(i)); i = args.size }
+                else -> rest += args[i]
+            }
+            i++
+        }
+        return sel to rest
+    }
+
     private fun usage(code: Int): Nothing {
-        println("usage: corral devices|status|owner|doctor|check [--owner <o>] [<serial>...]|claim [--all|<serial>]|free [--all|<serial>]|renew <serial>|lease [--all] -- <cmd>")
+        println("usage: corral devices|status|queue|owner|doctor|check [--owner <o>] [<serial>...]" +
+            "|claim [--all|<serial>] [selector]|free [--all|<serial>]|renew <serial>" +
+            "|wait [--timeout S] [selector]|lease [--all] [selector] -- <cmd>" +
+            "\n  selector: --serial S --model M --os V(min) --type usb|wifi|emulator --avd A")
         exitProcess(code)
     }
 }

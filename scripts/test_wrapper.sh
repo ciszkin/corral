@@ -17,6 +17,7 @@ check() { # check <name> <cond>
 ./gradlew :corral-daemon:shadowJar >/dev/null 2>&1 || { echo "build failed"; exit 1; }
 
 TMP=$(mktemp -d)
+export TMP
 DAEMON_PID=""
 cleanup() {
   [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
@@ -26,7 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$TMP/bin"
-printf 'dev1 device\ndev2 device\n' > "$TMP/fake-devices"
+printf 'dev1 device Pixel_6 13\ndev2 device SM-S918B 13\n' > "$TMP/fake-devices"
 printf '#!/bin/sh\necho "fake-adb $@"\n' > "$TMP/fake-adb"
 chmod +x "$TMP/fake-adb"
 cp scripts/adb-wrapper "$TMP/bin/adb"
@@ -119,44 +120,53 @@ check "adb install (no pin) denied" bash -c "exit $r"
 out=$(adb -s dev1 install foo.apk 2>&1)
 check "adb -s dev1 install allowed with lease" bash -c "echo '$out' | grep -q fake-adb"
 
-# dev2 is free here (dev1 is leased by tester); env-tier owners are namespaced per agent
-check "claude session owner is namespaced and separates sessions" bash -c '
+# dev2 is free here (dev1 is leased by tester); a declared CORRAL_OWNER is the identity and
+# separates sessions that declare different identifiers
+check "declared corral owner is namespaced and separates sessions" bash -c '
   curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
-    -d "{\"selector\":{\"serial\":\"dev2\"},\"owner\":\"claude:sesA\"}" >/dev/null || exit 1
-  CORRAL_OWNER= OPENCODE_PID= CLAUDE_CODE_SESSION_ID=sesA adb -s dev2 shell ls 2>&1 | grep -q fake-adb || exit 1
-  if CORRAL_OWNER= OPENCODE_PID= CLAUDE_CODE_SESSION_ID=sesB adb -s dev2 shell ls >/dev/null 2>&1; then exit 1; fi
+    -d "{\"selector\":{\"serial\":\"dev2\"},\"owner\":\"sesA\"}" >/dev/null || exit 1
+  CORRAL_OWNER=sesA adb -s dev2 shell ls 2>&1 | grep -q fake-adb || exit 1
+  if CORRAL_OWNER=sesB adb -s dev2 shell ls >/dev/null 2>&1; then exit 1; fi
   curl -sf -X DELETE "$CORRAL_URL/api/leases/dev2" -H "Content-Type: application/json" \
-    -d "{\"owner\":\"claude:sesA\"}" >/dev/null
-  curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
-    -d "{\"selector\":{\"serial\":\"dev2\"},\"owner\":\"opencode:sesA\"}" >/dev/null || exit 1
-  CORRAL_OWNER= CLAUDE_CODE_SESSION_ID= OPENCODE_PID=sesA adb -s dev2 shell ls 2>&1 | grep -q fake-adb || exit 1
-  curl -sf -X DELETE "$CORRAL_URL/api/leases/dev2" -H "Content-Type: application/json" \
-    -d "{\"owner\":\"opencode:sesA\"}" >/dev/null
+    -d "{\"owner\":\"sesA\"}" >/dev/null
   exit 0
 '
 
-# proc ancestry tier: with every agent env var cleared, the CLI and the wrapper must
+# proc ancestry tier: with no declared identifier, the CLI and the wrapper must
 # derive the SAME owner from the process tree, and a different tree must differ.
 proc_owner_check() {
   local serial
-  serial=$(env -u CORRAL_OWNER -u CLAUDE_CODE_SESSION_ID -u OPENCODE_PID corral claim) || return 1
+  serial=$(env -u CORRAL_OWNER corral claim) || return 1
   [ -n "$serial" ] || return 1
-  env -u CORRAL_OWNER -u CLAUDE_CODE_SESSION_ID -u OPENCODE_PID \
+  env -u CORRAL_OWNER \
     "$TMP/bin/adb" -s "$serial" shell ls 2>&1 | grep -q fake-adb || return 1
   # a different process tree (python3 as the direct parent) resolves a different owner
-  if env -u CORRAL_OWNER -u CLAUDE_CODE_SESSION_ID -u OPENCODE_PID \
+  if env -u CORRAL_OWNER \
       python3 -c 'import subprocess,sys; raise SystemExit(subprocess.run(sys.argv[1:]).returncode)' \
       "$TMP/bin/adb" -s "$serial" shell ls >/dev/null 2>&1; then return 1; fi
-  env -u CORRAL_OWNER -u CLAUDE_CODE_SESSION_ID -u OPENCODE_PID corral free "$serial" >/dev/null || return 1
+  env -u CORRAL_OWNER corral free "$serial" >/dev/null || return 1
   return 0
 }
 check "proc ancestry owner: shared cli/wrapper, distinct across trees" proc_owner_check
 
-# identity agreement: for each env tier, the CLI (Kotlin chain) and the wrapper (bash chain)
+# the ancestry walk has a floor: an orphaned (reparented onto init) client must not resolve to
+# systemd — a shared, immortal principal that would let every orphan free every other's leases
+check "orphaned client resolves to user:*, never proc:systemd:*" bash -c '
+  rm -f "$TMP/orphan.owner"
+  bash -c "setsid bash -c \"sleep 0.4; env -u CORRAL_OWNER corral owner > $TMP/orphan.owner 2>&1\" </dev/null >/dev/null 2>&1 &"
+  sleep 2
+  o=$(cat "$TMP/orphan.owner")
+  case "$o" in
+    user:*) exit 0;;
+    *) echo "orphan owner was: $o" >&2; exit 1;;
+  esac
+'
+
+# identity agreement: for each identity source, the CLI (Kotlin chain) and the wrapper (bash chain)
 # must resolve the same owner — a CLI-claimed lease is honored by the wrapper with the same env.
 check "identity agreement: cli and wrapper resolve the same owner" bash -c '
   claim_check_free() {
-    # $@ = env prefix as a command, e.g. "env CORRAL_OWNER=agree1" or "env -u CORRAL_OWNER -u OPENCODE_PID CLAUDE_CODE_SESSION_ID=agree2"
+    # $@ = env prefix as a command, e.g. "env CORRAL_OWNER=agree1" or "env -u CORRAL_OWNER"
     s=$("$@" corral claim 2>/dev/null) || return 1
     [ -n "$s" ] || return 1
     "$@" adb -s "$s" shell ls 2>&1 | grep -q fake-adb || return 1
@@ -164,8 +174,7 @@ check "identity agreement: cli and wrapper resolve the same owner" bash -c '
     return 0
   }
   claim_check_free env CORRAL_OWNER=agree1 || exit 1
-  claim_check_free env -u CORRAL_OWNER -u OPENCODE_PID CLAUDE_CODE_SESSION_ID=agree2 || exit 1
-  claim_check_free env -u CORRAL_OWNER -u CLAUDE_CODE_SESSION_ID OPENCODE_PID=agree3 || exit 1
+  claim_check_free env -u CORRAL_OWNER || exit 1
   exit 0
 '
 
@@ -226,6 +235,72 @@ check "foreign corral free refused" bash -c '
 check "corral lease --all claims all then frees" bash -c '
   corral lease --all -- bash -c "corral check" || exit 1
   if corral check >/dev/null 2>&1; then exit 1; fi
+  exit 0
+'
+
+# --- Phase 2: selector FIFO queue ---
+# check 27's refused-foreign-free leaks a tester lease; clear it so the model
+# checks below start from a known all-free state.
+corral free --all >/dev/null 2>&1
+check "selector claim by model via api" bash -c '
+  s=$(curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
+    -d "{\"selector\":{\"model\":\"Pixel_6\"},\"owner\":\"tester\"}") || exit 1
+  echo "$s" | grep -q "\"serial\":\"dev1\"" || exit 1
+  curl -sf -X DELETE "$CORRAL_URL/api/leases/dev1" -H "Content-Type: application/json" \
+    -d "{\"owner\":\"tester\"}" >/dev/null
+  exit 0
+'
+
+check "corral claim --model and queue listing" bash -c '
+  s=$(corral claim --model SM-S918B) || exit 1
+  [ "$s" = "dev2" ] || exit 1
+  [ "$(corral queue)" = "[]" ] || exit 1         # empty queue serializes as []
+  corral free dev2 >/dev/null || exit 1
+  exit 0
+'
+
+check "FIFO: first waiter gets the freed device" bash -c '
+  corral claim dev1 >/dev/null; corral claim dev2 >/dev/null
+  (corral wait --timeout 30 >"$TMP/w1.out" 2>&1) &
+  sleep 1
+  (CORRAL_OWNER=second corral wait --serial dev2 --timeout 30 >"$TMP/w2.out" 2>&1) &
+  sleep 1
+  curl -sf "$CORRAL_URL/api/queue" | grep -q "\"owner\":\"tester\"" || exit 1
+  curl -sf "$CORRAL_URL/api/queue" | grep -q "\"owner\":\"second\"" || exit 1
+  corral free dev1 >/dev/null
+  sleep 1
+  [ "$(cat "$TMP/w1.out")" = "dev1" ] || exit 1
+  corral free dev2 >/dev/null
+  sleep 1
+  [ "$(cat "$TMP/w2.out")" = "dev2" ] || exit 1
+  wait
+  exit 0
+'
+
+check "corral wait times out with exit 1" bash -c '
+  corral claim dev1 >/dev/null; corral claim dev2 >/dev/null
+  if corral wait --timeout 1 --model Nope >/dev/null 2>&1; then
+    corral free --all >/dev/null; exit 1
+  fi
+  corral free --all >/dev/null
+  exit 0
+'
+
+check "unaccepted offer reclaimed after 30s window" bash -c '
+  corral claim dev1 >/dev/null; corral claim dev2 >/dev/null
+  # raw waiter receives the offer but never touches the daemon again (no acceptance)
+  curl -s --max-time 60 -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
+    -d "{\"selector\":{\"serial\":\"dev1\"},\"owner\":\"ghost\",\"waitSeconds\":50}" >"$TMP/ghost.out" &
+  sleep 1
+  corral free dev1 >/dev/null
+  sleep 2
+  grep -q "\"serial\":\"dev1\"" "$TMP/ghost.out" || exit 1
+  grep -q "\"pendingAccept\":true" "$TMP/ghost.out" || exit 1
+  sleep 31                       # window (30s) + sweep tick (10s) margin
+  s=$(corral claim dev1) || exit 1
+  [ "$s" = "dev1" ] || exit 1
+  corral free dev1 >/dev/null; corral free dev2 >/dev/null
+  wait
   exit 0
 '
 

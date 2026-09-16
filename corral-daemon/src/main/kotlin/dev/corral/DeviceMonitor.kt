@@ -36,6 +36,9 @@ class DeviceMonitor(private val adbPath: String,
                     private val scope: CoroutineScope) {
     @Volatile var devices: List<Device> = emptyList(); private set
 
+    /** Fires (best-effort) after every inventory change — Main wires it to queue dispatch. */
+    var onChange: (suspend () -> Unit)? = null
+
     fun start() = scope.launch {
         var proc: Process? = null
         coroutineContext[Job]?.invokeOnCompletion { proc?.destroy() }
@@ -59,15 +62,21 @@ class DeviceMonitor(private val adbPath: String,
         return (body.length.toString(16).padStart(4, '0') + body).byteInputStream()
     }
 
-    private fun readLoop(stream: InputStream) {
+    private suspend fun readLoop(stream: InputStream) {
         val reader = stream.bufferedReader()
         while (true) {
             val head = reader.read4Hex() ?: break
             val body = reader.readNChars(head) ?: break
             devices = TrackParser.parse(head.toString(16).padStart(4, '0') + body).map { (s, st) ->
-                devices.firstOrNull { it.serial == s }?.copy(state = st) ?: Device(s, st)
+                val cols = st.trim().split(Regex("\\s+"))   // fake seam: [state, model?, os?, avd?]
+                devices.firstOrNull { it.serial == s }?.copy(state = cols[0])
+                    ?: Device(s, cols[0], model = cols.getOrNull(1),
+                              osVersion = cols.getOrNull(2), avd = cols.getOrNull(3))
             }
             devices.filter { it.state == "device" && it.model == null }.forEach { enrich(it.serial) }
+            devices.filter { it.state == "device" && it.transport == "emulator" && it.avd == null }
+                .forEach { enrichAvd(it.serial) }
+            onChange?.let { runCatching { it() } }
         }
     }
 
@@ -77,6 +86,13 @@ class DeviceMonitor(private val adbPath: String,
         val out = p.inputStream.bufferedReader().readText().lines().filter { it.isNotBlank() }
         if (out.size == 2) devices = devices.map {
             if (it.serial == serial) it.copy(model = out[0].trim(), osVersion = out[1].trim()) else it }
+    }
+
+    private fun enrichAvd(serial: String) = runCatching {
+        val p = ProcessBuilder(adbPath, "-s", serial, "emu", "avd", "name").start()
+        p.inputStream.bufferedReader().readLines().firstOrNull { it.isNotBlank() }?.let { name ->
+            devices = devices.map { if (it.serial == serial) it.copy(avd = name.trim()) else it }
+        }
     }
 
     private fun BufferedReader.read4Hex(): Int? {

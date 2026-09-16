@@ -4,9 +4,9 @@ rem ponytail: kept compiling, exercised when Windows use becomes real; generate 
 setlocal EnableDelayedExpansion
 if "%CORRAL_URL%"=="" set CORRAL_URL=http://127.0.0.1:8798
 if defined CORRAL_REAL_ADB (set REAL_ADB=%CORRAL_REAL_ADB%) else set REAL_ADB=%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe
-rem owner: CORRAL_OWNER > claude:$CLAUDE_CODE_SESSION_ID > opencode:$OPENCODE_PID > user:$USERNAME
+rem owner: CORRAL_OWNER > user:$USERNAME
 rem (no proc ancestry tier on Windows; set CORRAL_OWNER explicitly in containers/CI)
-if defined CORRAL_OWNER (set OWNER=%CORRAL_OWNER%) else if defined CLAUDE_CODE_SESSION_ID (set OWNER=claude:%CLAUDE_CODE_SESSION_ID%) else if defined OPENCODE_PID (set OWNER=opencode:%OPENCODE_PID%) else set OWNER=user:%USERNAME%
+if defined CORRAL_OWNER (set OWNER=%CORRAL_OWNER%) else set OWNER=user:%USERNAME%
 
 set SERIAL=%ANDROID_SERIAL%
 set SUB=

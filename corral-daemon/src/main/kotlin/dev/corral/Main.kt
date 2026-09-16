@@ -21,6 +21,7 @@ fun main() {
     val monitor = DeviceMonitor(adb, System.getenv("CORRAL_FAKE_DEVICES"), scope)
     val leases = LeaseManager({ monitor.devices }, db)
     leases.recoverPersisted()
+    monitor.onChange = { leases.dispatchFreeDevices() }
 
     monitor.start()
 
@@ -35,7 +36,7 @@ fun main() {
     }
     selfHealSdkShim()
 
-    scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; selfHealSdkShim() } } // expiry reaper; queue offers join here in Phase 2
+    scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; selfHealSdkShim() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
 
     embeddedServer(CIO, port = port, host = "127.0.0.1") { corralModule(AppEnv({ monitor.devices }, leases)) }.start(wait = true)
 }

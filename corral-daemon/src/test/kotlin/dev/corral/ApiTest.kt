@@ -11,16 +11,24 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlin.coroutines.coroutineContext
 import kotlin.test.*
 
 class ApiTest {
-    private val testDevices = { listOf(Device("dev1", "device"), Device("dev2", "device")) }
+    private val testDevices = {
+        listOf(Device("dev1", "device", model = "Pixel_6", osVersion = "13"),
+               Device("dev2", "device", model = "SM-S918B", osVersion = "13"))
+    }
 
     private fun ApplicationTestBuilder.corral() =
         application { corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null))) }
 
-    private fun withApi(block: suspend (HttpClient) -> Unit) =
-        testApplication { corral(); block(client) }
+    private fun withApi(block: suspend CoroutineScope.(HttpClient) -> Unit) =
+        testApplication { corral(); CoroutineScope(coroutineContext).block(client) }
 
     @Test fun devicesListed() = withApi { c ->
         assertEquals(HttpStatusCode.OK, c.get("/api/devices").status)
@@ -86,9 +94,43 @@ class ApiTest {
         assertTrue(r.bodyAsText().contains("\"serial\":\"dev1\""))
     }
 
-    @Test fun unsupportedSelectorRejected() = withApi { c ->
+    @Test fun modelSelectorClaimsMatchingDevice() = withApi { c ->
         val r = c.post("/api/leases") { contentType(ContentType.Application.Json)
-            setBody("""{"selector":{"model":"Pixel"},"owner":"agentA"}""") }
-        assertEquals(HttpStatusCode.BadRequest, r.status)
+            setBody("""{"selector":{"model":"Pixel_6"},"owner":"agentA"}""") }
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(r.bodyAsText().contains("\"serial\":\"dev1\""))
+    }
+
+    @Test fun noMatchSelectorReportsMatchingZero() = withApi { c ->
+        val r = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"model":"iPhone"},"owner":"agentA"}""") }
+        assertEquals(HttpStatusCode.Conflict, r.status)
+        assertTrue(r.bodyAsText().contains("\"matching\":0"))
+    }
+
+    @Test fun queuedClaimLongPollResolvedByFree() = withApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }
+        launch { delay(500); c.delete("/api/leases/dev1") {
+            contentType(ContentType.Application.Json); setBody("""{"owner":"agentA"}""") } }
+        val r = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentB","waitSeconds":60}""") }
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(r.bodyAsText().contains("\"serial\":\"dev1\""))
+    }
+
+    @Test fun queueListsParkedWaiters() = withApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev2"},"owner":"agentA"}""") }
+        val parked = async { c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{},"owner":"waiter","waitSeconds":60}""") } }
+        delay(100)   // yield: let the parked request reach the queue
+        val q = c.get("/api/queue").bodyAsText()
+        assertTrue(q.contains("\"owner\":\"waiter\"") && q.contains("\"position\":1"))
+        c.delete("/api/leases/dev1") { contentType(ContentType.Application.Json)
+            setBody("""{"owner":"agentA"}""") }   // unblock the parked request
+        assertEquals(HttpStatusCode.OK, parked.await().status)
     }
 }

@@ -48,6 +48,11 @@ the same device.
   (`list_devices`, `queue`, `claim`, `free`, `renew`), with one identity per MCP session:
   `claude mcp add --transport http corral http://127.0.0.1:8798/mcp`. `claim` with
   `waitSeconds > 0` returns a ticket; re-call `claim` with that ticket to pick up the device.
+  Each ticket carries a poll cadence (MCP advertises 5 s; a client may propose its own,
+  clamped to 1–10 s) and the accepted value comes back in `retryAfterMs`.
+- **Loopback only** — the daemon binds `127.0.0.1` and refuses any non-local `Host`
+  header with `403 corral: local only`, which also covers `/mcp`. A browser on the host
+  cannot be tricked by DNS rebinding into driving the daemon.
 
 ## Shape of it
 

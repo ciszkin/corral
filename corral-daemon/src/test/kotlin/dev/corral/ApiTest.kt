@@ -12,9 +12,7 @@ import io.ktor.http.contentType
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.async
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 import kotlin.test.*
 
@@ -24,11 +22,14 @@ class ApiTest {
                Device("dev2", "device", model = "SM-S918B", osVersion = "13"))
     }
 
-    private fun ApplicationTestBuilder.corral() =
-        application { corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null))) }
+    private fun ApplicationTestBuilder.corral(leases: LeaseManager = LeaseManager(testDevices, db = null)) =
+        application { corralModule(AppEnv(testDevices, leases)) }
 
     private fun withApi(block: suspend CoroutineScope.(HttpClient) -> Unit) =
         testApplication { corral(); CoroutineScope(coroutineContext).block(client) }
+
+    private fun withApi(leases: LeaseManager, block: suspend CoroutineScope.(HttpClient) -> Unit) =
+        testApplication { corral(leases); CoroutineScope(coroutineContext).block(client) }
 
     @Test fun devicesListed() = withApi { c ->
         assertEquals(HttpStatusCode.OK, c.get("/api/devices").status)
@@ -108,29 +109,153 @@ class ApiTest {
         assertTrue(r.bodyAsText().contains("\"matching\":0"))
     }
 
-    @Test fun queuedClaimLongPollResolvedByFree() = withApi { c ->
-        c.post("/api/leases") { contentType(ContentType.Application.Json)
-            setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }
-        launch { delay(500); c.delete("/api/leases/dev1") {
-            contentType(ContentType.Application.Json); setBody("""{"owner":"agentA"}""") } }
-        val r = c.post("/api/leases") { contentType(ContentType.Application.Json)
-            setBody("""{"selector":{"serial":"dev1"},"owner":"agentB","waitSeconds":60}""") }
-        assertEquals(HttpStatusCode.OK, r.status)
-        assertTrue(r.bodyAsText().contains("\"serial\":\"dev1\""))
+    @Test fun waitEnqueuesTicketAndPollOffers() = withApi { c ->
+        val enq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentA","waitSeconds":60}""") }
+        assertEquals(HttpStatusCode.Accepted, enq.status)
+        assertTrue(enq.bodyAsText().contains("\"retryAfterMs\":1000"))
+        val ticket = enq.bodyAsText().ticketOf()
+        val poll = c.post("/api/leases/tickets/$ticket/poll") { contentType(ContentType.Application.Json)
+            setBody("""{"owner":"agentA","pid":1234}""") }
+        assertEquals(HttpStatusCode.OK, poll.status)
+        assertTrue(poll.bodyAsText().contains("\"serial\":\"dev1\""))
+        assertTrue(poll.bodyAsText().contains("\"owner\":\"agentA\""))
+        assertTrue(poll.bodyAsText().contains("\"pid\":1234"))
     }
 
-    @Test fun queueListsParkedWaiters() = withApi { c ->
+    @Test fun claimTicketEchoesClampedClientCadence() = withApi { c ->
+        suspend fun enqueue(body: String) = c.post("/api/leases") {
+            contentType(ContentType.Application.Json); setBody(body) }
+
+        val small = enqueue("""{"selector":{"serial":"dev1"},"owner":"agentA","waitSeconds":60,"retryAfterMs":500}""")
+        assertTrue(small.bodyAsText().contains("\"retryAfterMs\":1000"))
+        val big = enqueue("""{"selector":{"serial":"dev1"},"owner":"agentB","waitSeconds":60,"retryAfterMs":999999}""")
+        assertTrue(big.bodyAsText().contains("\"retryAfterMs\":10000"))
+        val absent = enqueue("""{"selector":{"serial":"dev1"},"owner":"agentC","waitSeconds":60}""")
+        assertTrue(absent.bodyAsText().contains("\"retryAfterMs\":1000"))
+    }
+
+    @Test fun queuedTicketResolvedByFree() = withApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }
+        val enq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentB","waitSeconds":60}""") }
+        assertEquals(HttpStatusCode.Accepted, enq.status)
+        val ticket = enq.bodyAsText().ticketOf()
+
+        val queued = c.post("/api/leases/tickets/$ticket/poll") { contentType(ContentType.Application.Json)
+            setBody("""{"owner":"agentB"}""") }
+        assertEquals(HttpStatusCode.Accepted, queued.status)
+        assertTrue(queued.bodyAsText().contains("\"state\":\"queued\""))
+        assertTrue(queued.bodyAsText().contains("\"retryAfterMs\":1000"))
+
+        c.delete("/api/leases/dev1") { contentType(ContentType.Application.Json)
+            setBody("""{"owner":"agentA"}""") }
+        val offered = c.post("/api/leases/tickets/$ticket/poll") { contentType(ContentType.Application.Json)
+            setBody("""{"owner":"agentB"}""") }
+        assertEquals(HttpStatusCode.OK, offered.status)
+        assertTrue(offered.bodyAsText().contains("\"serial\":\"dev1\""))
+        assertTrue(offered.bodyAsText().contains("\"owner\":\"agentB\""))
+    }
+
+    @Test fun unknownOrExpiredTicketPollGone() {
+        val now = AtomicLong(1500)
+        val leases = LeaseManager(testDevices, db = null, clock = { now.get() })
+        withApi(leases) { c ->
+            val unknown = c.post("/api/leases/tickets/nope/poll") { contentType(ContentType.Application.Json)
+                setBody("""{"owner":"agentA"}""") }
+            assertEquals(HttpStatusCode.Gone, unknown.status)
+            assertTrue(unknown.bodyAsText().contains("ticket expired or unknown"))
+
+            val expiredEnq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+                setBody("""{"selector":{"serial":"dev1"},"owner":"agentA","waitSeconds":5}""") }
+            val expiredTicket = expiredEnq.bodyAsText().ticketOf()
+            now.addAndGet(6)
+            val expired = c.post("/api/leases/tickets/$expiredTicket/poll") { contentType(ContentType.Application.Json)
+                setBody("""{"owner":"agentA"}""") }
+            assertEquals(HttpStatusCode.Gone, expired.status)
+            assertTrue(expired.bodyAsText().contains("ticket deadline expired"))
+
+            val silentEnq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+                setBody("""{"selector":{"serial":"dev1"},"owner":"agentA","waitSeconds":600}""") }
+            val silentTicket = silentEnq.bodyAsText().ticketOf()
+            now.addAndGet(POLL_SILENCE_S + 1)
+            val silent = c.post("/api/leases/tickets/$silentTicket/poll") { contentType(ContentType.Application.Json)
+                setBody("""{"owner":"agentA"}""") }
+            assertEquals(HttpStatusCode.Gone, silent.status)
+            assertTrue(silent.bodyAsText().contains("ticket dropped: not polled in time"))
+
+            val ghostEnq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+                setBody("""{"selector":{"serial":"dev2"},"owner":"ghost","pid":2000000000,"waitSeconds":60}""") }
+            val ghostTicket = ghostEnq.bodyAsText().ticketOf()
+            val swept = c.post("/api/leases/tickets/$ghostTicket/poll") { contentType(ContentType.Application.Json)
+                setBody("""{"owner":"ghost"}""") }
+            assertEquals(HttpStatusCode.Gone, swept.status)
+            assertTrue(swept.bodyAsText().contains("ticket expired or unknown"))
+        }
+    }
+
+    @Test fun cancelTicketRemovesIt() = withApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }
+        val enq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentB","waitSeconds":60}""") }
+        val ticket = enq.bodyAsText().ticketOf()
+
+        val cancelled = c.delete("/api/leases/tickets/$ticket") {
+            contentType(ContentType.Application.Json); setBody("""{"owner":"agentB"}""") }
+        assertEquals(HttpStatusCode.OK, cancelled.status)
+        assertTrue(cancelled.bodyAsText().contains("\"cancelled\":true"))
+        val gone = c.post("/api/leases/tickets/$ticket/poll") {
+            contentType(ContentType.Application.Json); setBody("""{"owner":"agentB"}""") }
+        assertEquals(HttpStatusCode.Gone, gone.status)
+        assertTrue(gone.bodyAsText().contains("ticket expired or unknown"))
+    }
+
+    @Test fun cancelTicketWithWrongOwnerForbidden() = withApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }
+        val enq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentB","waitSeconds":60}""") }
+        val ticket = enq.bodyAsText().ticketOf()
+
+        val r = c.delete("/api/leases/tickets/$ticket") {
+            contentType(ContentType.Application.Json); setBody("""{"owner":"agentC"}""") }
+        assertEquals(HttpStatusCode.Forbidden, r.status)
+    }
+
+    @Test fun cancelUnknownTicketNotFound() = withApi { c ->
+        val r = c.delete("/api/leases/tickets/nope") {
+            contentType(ContentType.Application.Json); setBody("""{"owner":"agentA"}""") }
+        assertEquals(HttpStatusCode.NotFound, r.status)
+    }
+
+    @Test fun cancelTicketQueryFallbackStillWorks() = withApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }
+        val enq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"agentB","waitSeconds":60}""") }
+        val ticket = enq.bodyAsText().ticketOf()
+
+        assertEquals(HttpStatusCode.OK, c.delete("/api/leases/tickets/$ticket?owner=agentB").status)
+    }
+
+    @Test fun cancelTicketWithoutOwnerBadRequest() = withApi { c ->
+        val r = c.delete("/api/leases/tickets/nope") {
+            contentType(ContentType.Application.Json); setBody("""{"notOwner":true}""") }
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+    }
+
+    @Test fun waitReturnsTicketWithoutParkingWaiter() = withApi { c ->
         c.post("/api/leases") { contentType(ContentType.Application.Json)
             setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }
         c.post("/api/leases") { contentType(ContentType.Application.Json)
             setBody("""{"selector":{"serial":"dev2"},"owner":"agentA"}""") }
-        val parked = async { c.post("/api/leases") { contentType(ContentType.Application.Json)
-            setBody("""{"selector":{},"owner":"waiter","waitSeconds":60}""") } }
-        delay(100)   // yield: let the parked request reach the queue
-        val q = c.get("/api/queue").bodyAsText()
-        assertTrue(q.contains("\"owner\":\"waiter\"") && q.contains("\"position\":1"))
-        c.delete("/api/leases/dev1") { contentType(ContentType.Application.Json)
-            setBody("""{"owner":"agentA"}""") }   // unblock the parked request
-        assertEquals(HttpStatusCode.OK, parked.await().status)
+        val enq = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{},"owner":"waiter","waitSeconds":60}""") }
+        assertEquals(HttpStatusCode.Accepted, enq.status)
+        assertTrue(c.get("/api/queue").bodyAsText().contains("\"owner\":\"waiter\""))
     }
+
+    private fun String.ticketOf() = substringAfter("\"ticket\":\"").substringBefore("\"")
 }

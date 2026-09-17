@@ -169,7 +169,7 @@ object CorralCli {
             Json.parseToJsonElement(r.body()).jsonObject["matching"]!!.jsonPrimitive.content.toInt()
         }.getOrNull()
         if (matching == 0) System.err.println("corral: no connected device matches $selector")
-        else System.err.println("corral: no free device matches $selector (${matching ?: "some"} connected, all leased)")
+        else System.err.println("corral: no free device matches $selector (${matching ?: "some"} connected, all leased) — corral wait to queue, corral status for holders")
         exitProcess(1)
     }
 
@@ -324,16 +324,30 @@ object CorralCli {
                 val (sel, rest) = parseSelector(args.drop(1).toTypedArray())
                 val i = rest.indexOf("--timeout")
                 val waitSeconds = if (i >= 0) rest.getOrNull(i + 1)?.toLongOrNull() ?: usage(2) else 600L
-                // This CLI's OWN pid: it lives exactly as long as it is queued, so killing the
-                // waiter frees its queue slot at once (the daemon skips dead-pid waiters). The
-                // offered lease itself is TTL-bound — this process exits right after printing, so
-                // the daemon must not pin the accepted device to it. renew = offer acceptance
-                // (clears pendingAccept); without it the 30 s sweep would reclaim the offer.
-                val serial = send("POST", "/api/leases", timeoutSeconds = waitSeconds + 30,
-                    body = Json.encodeToString(ClaimRequest(selector = sel, owner = owner,
-                        pid = pid, ttlSeconds = 1800, waitSeconds = waitSeconds))).str("serial")
-                send("POST", "/api/leases/$serial/renew", Json.encodeToString(RenewRequest(owner = owner)))
-                println(serial)
+                if (waitSeconds <= 0) { println(claimOne(sel, holderPid())); return }
+                // Own pid: killing this CLI frees the ticket at once (the daemon skips dead pids).
+                val ticket = send("POST", "/api/leases",
+                    Json.encodeToString(ClaimRequest(selector = sel, owner = owner,
+                        pid = pid, ttlSeconds = 1800, waitSeconds = waitSeconds))).str("ticket")
+                Runtime.getRuntime().addShutdownHook(Thread {
+                    runCatching {
+                        http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/tickets/$ticket"))
+                            .timeout(Duration.ofSeconds(2))
+                            .method("DELETE", HttpRequest.BodyPublishers.ofString(
+                                Json.encodeToString(TicketCancelRequest(owner = owner))))
+                            .header("Content-Type", "application/json")
+                            .build(), HttpResponse.BodyHandlers.ofString())
+                    }
+                })
+                while (true) {
+                    val r = trySend("POST", "/api/leases/tickets/$ticket/poll",
+                        Json.encodeToString(TicketPollRequest(owner = owner, pid = holderPid())))
+                    when (r.statusCode()) {
+                        200 -> { println(r.body().str("serial")); return }
+                        202 -> Thread.sleep(runCatching { r.body().str("retryAfterMs").toLong() }.getOrDefault(1000L))
+                        else -> { System.err.println("corral: no free device matches $sel"); exitProcess(1) }
+                    }
+                }
             }
             "queue" -> println(get("/api/queue"))
             "help" -> usage(0)
@@ -362,7 +376,7 @@ object CorralCli {
     private fun usage(code: Int): Nothing {
         println("usage: corral devices|status|queue|owner|doctor|check [--owner <o>] [<serial>...]" +
             "|claim [--all|<serial>] [selector]|free [--all|<serial>]|renew <serial>" +
-            "|wait [--timeout S] [selector]|lease [--all] [selector] -- <cmd>" +
+            "|wait [--timeout S (max 600)] [selector]|lease [--all] [selector] -- <cmd>" +
             "\n  selector: --serial S --model M --os V(min) --type usb|wifi|emulator --avd A")
         exitProcess(code)
     }

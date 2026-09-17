@@ -268,10 +268,10 @@ check "FIFO: first waiter gets the freed device" bash -c '
   curl -sf "$CORRAL_URL/api/queue" | grep -q "\"owner\":\"tester\"" || exit 1
   curl -sf "$CORRAL_URL/api/queue" | grep -q "\"owner\":\"second\"" || exit 1
   corral free dev1 >/dev/null
-  sleep 1
+  sleep 2
   [ "$(cat "$TMP/w1.out")" = "dev1" ] || exit 1
   corral free dev2 >/dev/null
-  sleep 1
+  sleep 2
   [ "$(cat "$TMP/w2.out")" = "dev2" ] || exit 1
   wait
   exit 0
@@ -286,20 +286,21 @@ check "corral wait times out with exit 1" bash -c '
   exit 0
 '
 
-check "unaccepted offer reclaimed after 30s window" bash -c '
+check "lapsed unpolled ticket is dropped and the next waiter is served" bash -c '
   corral claim dev1 >/dev/null; corral claim dev2 >/dev/null
-  # raw waiter receives the offer but never touches the daemon again (no acceptance)
-  curl -s --max-time 60 -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
-    -d "{\"selector\":{\"serial\":\"dev1\"},\"owner\":\"ghost\",\"waitSeconds\":50}" >"$TMP/ghost.out" &
+  # ghost ticket for dev1 is never polled; its offer must lapse and be dropped, not rotate
+  curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
+    -d "{\"selector\":{\"serial\":\"dev1\"},\"owner\":\"ghost\",\"waitSeconds\":60}" >/dev/null
+  (CORRAL_OWNER=second corral wait --serial dev1 --timeout 30 >"$TMP/w2.out" 2>&1) &
   sleep 1
   corral free dev1 >/dev/null
-  sleep 2
-  grep -q "\"serial\":\"dev1\"" "$TMP/ghost.out" || exit 1
-  grep -q "\"pendingAccept\":true" "$TMP/ghost.out" || exit 1
-  sleep 31                       # window (30s) + sweep tick (10s) margin
-  s=$(corral claim dev1) || exit 1
-  [ "$s" = "dev1" ] || exit 1
-  corral free dev1 >/dev/null; corral free dev2 >/dev/null
+  for i in $(seq 1 25); do
+    [ -s "$TMP/w2.out" ] && break
+    sleep 1
+  done
+  [ "$(cat "$TMP/w2.out")" = "dev1" ] || exit 1
+  CORRAL_OWNER=second corral free dev1 >/dev/null 2>&1
+  corral free --all >/dev/null
   wait
   exit 0
 '

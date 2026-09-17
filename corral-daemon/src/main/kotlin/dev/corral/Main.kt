@@ -38,5 +38,10 @@ fun main() {
 
     scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; selfHealSdkShim() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
 
-    embeddedServer(CIO, port = port, host = "127.0.0.1") { corralModule(AppEnv({ monitor.devices }, leases)) }.start(wait = true)
+    val env = AppEnv({ monitor.devices }, leases)
+    embeddedServer(CIO, port = port, host = "127.0.0.1") {
+        guardLocalHost()
+        corralModule(env)
+        installMcp(env)
+    }.start(wait = true)
 }

@@ -1,10 +1,7 @@
 package dev.corral
 
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
@@ -15,70 +12,142 @@ class LeaseBusyException(val busy: List<BusyInfo>, val matching: Int = 0, val ti
 @Serializable data class BusyInfo(val serial: String, val owner: String, val ttlLeft: Long)
 @Serializable data class CheckResult(val allowed: Boolean, val reason: String)
 
-/** Offer window: a queued claimant must touch its lease (check/renew) within this, or lose it. */
-const val ACCEPT_WINDOW_S = 30L
+/** Upper bound on a ticket wait, enforced for every caller. */
+const val MAX_WAIT_S = 600L
 
-/** A parked claim. The offerer sets [offered] then completes [deferred]; the parker reads [offered]. */
-class Waiter(val selector: Selector, val owner: String, val pid: Long, val ttl: Long,
-             val enqueuedAt: Long, val deadline: Long) {
-    val deferred = CompletableDeferred<Unit>()
-    var offered: Lease? = null
+/** Reservation window: an offered ticket that is not polled within this loses the device. */
+const val OFFER_HOLD_S = 10L
+
+/** A live client polls on a cadence; a ticket silent this long is treated as abandoned. */
+const val POLL_SILENCE_S = 30L
+
+/** Missed poll cadences before a quiet-but-live ticket is skipped by dispatch. */
+const val STALE_POLLS = 3L
+
+/** Poll cadence advertised to a ticket that does not name its own. */
+const val DEFAULT_RETRY_AFTER_MS = 1000L
+
+/** Smallest poll cadence a client may propose. */
+const val MIN_RETRY_AFTER_MS = 1000L
+
+/** Largest cadence a client may propose: the stale window must not exceed the silence drop. */
+const val MAX_RETRY_AFTER_MS = POLL_SILENCE_S * 1000 / STALE_POLLS
+
+fun clampRetryAfterMs(ms: Long): Long = ms.coerceIn(MIN_RETRY_AFTER_MS, MAX_RETRY_AFTER_MS)
+
+/** How long a removed ticket's end reason is remembered so a late poll can report it. */
+private const val ENDED_TTL_S = 60L
+
+enum class TicketState { QUEUED, OFFERED, EXPIRED }
+
+enum class TicketEnd { DEADLINE, SILENCE }
+
+enum class CancelResult { CANCELLED, NOT_FOUND, FORBIDDEN }
+
+sealed interface Poll {
+    data class Offered(val lease: Lease) : Poll
+    data class Queued(val position: Int, val retryAfterMs: Long,
+                      val state: TicketState = TicketState.QUEUED) : Poll
+    data class Expired(val reason: TicketEnd) : Poll
+    data object Unknown : Poll
 }
+
+/** A client-polled claim. The client holds [id] and polls until offered or past [deadline]. */
+class Ticket internal constructor(
+    val id: String, val selector: Selector, val owner: String, val pid: Long,
+    val ttl: Long, val enqueuedAt: Long, val deadline: Long, internal var lastPolledAt: Long,
+    val pollCadenceMs: Long,
+) { internal var offered: Lease? = null; internal var offeredAt: Long = 0 }
 
 @Serializable data class QueueEntry(val position: Int, val owner: String, val selector: String,
     val waitedSeconds: Long, val deadlineIn: Long)
 
 /**
- * Mutex-guarded lease map + FIFO waiter queue. SQLite mirrors leases for restart recovery;
- * the queue is in-memory only (a parked HTTP connection cannot outlive the daemon).
+ * Mutex-guarded lease map + FIFO ticket queue. SQLite mirrors leases for restart recovery;
+ * the queue is in-memory only (a parked client cannot outlive the daemon).
  * ponytail: single mutex — fine at bench scale; per-serial locks if contention ever logs.
  */
 class LeaseManager(private val devices: () -> List<Device>,
                    private val db: Db?,
-                   private val clock: () -> Long = { System.currentTimeMillis() / 1000 }) {
+                   private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
+                   private val offerHold: Long = OFFER_HOLD_S) {
     private val mutex = Mutex()
     private val leases = ConcurrentHashMap<String, Lease>()
-    private val queue = ArrayDeque<Waiter>()
+    private val tickets = LinkedHashMap<String, Ticket>()
+    private val ended = LinkedHashMap<String, Pair<TicketEnd, Long>>()
 
     val snapshot: Map<String, Lease> get() = leases.toMap()
 
     suspend fun queueSnapshot(): List<QueueEntry> = mutex.withLock {
-        queue.mapIndexed { i, w -> QueueEntry(i + 1, w.owner, w.selector.toString(),
-            clock() - w.enqueuedAt, w.deadline - clock()) }
+        tickets.values.filter {
+            !isDeadPid(it.pid) && it.deadline > clock() && clock() - it.lastPolledAt <= POLL_SILENCE_S
+        }.mapIndexed { i, t ->
+                QueueEntry(i + 1, t.owner, t.selector.toString(), clock() - t.enqueuedAt, t.deadline - clock())
+            }
     }
 
-    /** Long-poll claim: free match now, else park FIFO until offered or waitSeconds elapse. */
+    /** Immediate claim: hand over a free match now, else fail fast. Waiting is ticket-based ([enqueue]/[poll]). */
     suspend fun requestClaim(selector: Selector, owner: String, pid: Long = 0,
-                             ttl: Long = 1800, waitSeconds: Long = 0): Lease {
-        val waiter = mutex.withLock {
-            sweepLocked()
-            takeFree(selector)?.let { return createLeaseLocked(it.serial, owner, pid, ttl, "claim") }
-            if (waitSeconds <= 0) throw busyFor(selector)
-            Waiter(selector, owner, pid, ttl, clock(), clock() + waitSeconds)
-                .also { queue.addLast(it); db?.log("enqueue", null, owner, selector.toString()) }
+                             ttl: Long = 1800): Lease = mutex.withLock {
+        sweepLocked()
+        takeFree(selector)?.let { return createLeaseLocked(it.serial, owner, pid, ttl, "claim") }
+        throw busyFor(selector)
+    }
+
+    /** Register a ticket and return at once; the client polls [poll] for its outcome. */
+    suspend fun enqueue(selector: Selector, owner: String, pid: Long, ttl: Long,
+                        waitSeconds: Long, retryAfterMs: Long = DEFAULT_RETRY_AFTER_MS): Ticket = mutex.withLock {
+        sweepLocked()
+        val now = clock()
+        val t = Ticket(UUID.randomUUID().toString(), selector, owner, pid, ttl,
+            now, now + waitSeconds.coerceIn(0, MAX_WAIT_S), now, clampRetryAfterMs(retryAfterMs))
+        takeFree(selector)?.let { d ->                       // immediate match: hand straight over
+            t.offered = createLeaseLocked(d.serial, owner, 0, ttl, "claim")
         }
-        var consumed = false
-        try {
-            withTimeoutOrNull(waitSeconds * 1000) { waiter.deferred.await() }
-                ?: throw busyFor(selector, timedOut = true)
-            consumed = true
-            return waiter.offered!!
-        } finally {
-            if (!consumed) withContext(NonCancellable) { mutex.withLock {
-                if (queue.remove(waiter)) db?.log("dequeue", null, owner, "timeout/cancel")
-                waiter.offered?.let { orphan ->   // offer raced our exit: give the device back
-                    leases.remove(orphan.serial); db?.deleteLease(orphan.serial)
-                    db?.log("dequeue", orphan.serial, owner, "orphan-offer")
-                    dispatchOffersLocked()
-                }
-            } }
+        tickets[t.id] = t; db?.log("enqueue", null, owner, selector.toString()); t
+    }
+
+    /** Poll a ticket: the offer is accepted here (the polling client is present now). */
+    suspend fun poll(ticketId: String, owner: String, holderPid: Long = 0): Poll = mutex.withLock {
+        sweepTicketsLocked()
+        val t = tickets[ticketId]
+        if (t == null) return ended[ticketId]?.let { Poll.Expired(it.first) } ?: Poll.Unknown
+        if (t.owner != owner) return Poll.Unknown
+        t.lastPolledAt = clock()
+        dispatchTicketsLocked()
+        val lease = t.offered
+        if (lease != null && t.hasLiveOffer()) {
+            t.offered = null
+            val accepted = lease.copy(pendingAccept = false, pid = holderPid)
+                .also { leases[it.serial] = it; db?.upsertLease(it) }
+            tickets.remove(ticketId)
+            Poll.Offered(accepted)
+        } else {
+            t.offered = null
+            Poll.Queued(tickets.values.indexOf(t) + 1, t.pollCadenceMs)
         }
+    }
+
+    suspend fun cancelTicket(ticketId: String, owner: String): CancelResult = mutex.withLock {
+        val t = tickets[ticketId] ?: return CancelResult.NOT_FOUND
+        if (t.owner != owner) return CancelResult.FORBIDDEN
+        releaseOfferLocked(t); tickets.remove(ticketId)
+        db?.log("dequeue", null, owner, "ticket-cancel")
+        dispatchTicketsLocked(); CancelResult.CANCELLED
+    }
+
+    /** Drop every queued ticket for a principal (its MCP session/process is gone), releasing offers. */
+    suspend fun cancelTickets(owner: String): Int = mutex.withLock {
+        val mine = tickets.values.filter { it.owner == owner }
+        for (t in mine) { releaseOfferLocked(t); tickets.remove(t.id); db?.log("dequeue", null, owner, "owner-gone") }
+        if (mine.isNotEmpty()) dispatchTicketsLocked()
+        mine.size
     }
 
     suspend fun claim(serial: String, owner: String, pid: Long = 0, ttl: Long = 1800): Lease? {
         if (devices().none { it.serial == serial && it.state == "device" }) return null
         return mutex.withLock {
-            sweepLocked()   // expiry/dead-pid/stale-offer reclaim + queue dispatch happen first
+            sweepLocked()   // expiry/dead-pid reclaim + ticket dispatch happen first
             if (leases.containsKey(serial)) throw busyFor(Selector(serial = serial))
             createLeaseLocked(serial, owner, pid, ttl, "claim")
         }
@@ -93,7 +162,7 @@ class LeaseManager(private val devices: () -> List<Device>,
         if (l.owner != owner && !force)
             throw IllegalStateException("lease on $serial is not yours (owner=${l.owner}); force=true overrides")
         leases.remove(serial); db?.deleteLease(serial); db?.log("free", serial, owner, "force=$force")
-        dispatchOffersLocked()
+        dispatchTicketsLocked()
         Unit
     }
 
@@ -120,7 +189,7 @@ class LeaseManager(private val devices: () -> List<Device>,
 
     suspend fun sweep() = mutex.withLock { sweepLocked() }
 
-    /** Inventory changed (hot-plug, emulator start): sweep and hand free devices to waiters. */
+    /** Inventory changed (hot-plug, emulator start): sweep and hand free devices to tickets. */
     suspend fun dispatchFreeDevices() = mutex.withLock { sweepLocked() }
 
     fun recoverPersisted() {
@@ -132,33 +201,59 @@ class LeaseManager(private val devices: () -> List<Device>,
     }
 
     private fun sweepLocked() {
-        leases.values.filter { it.expiresAt <= clock() || isDead(it) || staleOffer(it) }.forEach {
+        leases.values.filter { it.expiresAt <= clock() || isDead(it) }.forEach {
             leases.remove(it.serial); db?.deleteLease(it.serial); db?.log("expire", it.serial, it.owner, null)
         }
-        queue.toList().filter { it.deadline <= clock() }.forEach {
-            queue.remove(it); db?.log("dequeue", null, it.owner, "deadline")
-        }
-        dispatchOffersLocked()
+        dispatchTicketsLocked()
+        sweepTicketsLocked()
     }
 
-    /** Waiters in arrival order; the first matching waiter gets the device (30 s acceptance window). */
-    private fun dispatchOffersLocked() {
+    /** First live ticket that matches a free device gets a short, reclaimable reservation. */
+    private fun dispatchTicketsLocked() {
         for (d in devices()) {
             if (leases.containsKey(d.serial)) continue
-            while (true) {
-                val w = queue.firstOrNull { it.selector.matches(d) } ?: break
-                queue.remove(w)
-                if (w.deadline <= clock() || isDeadPid(w.pid)) continue   // stale/dead waiter; try the next one
-                // w.pid tracks the QUEUED CLIENT (dead-waiter skip above), not the holder: a
-                // long-polling CLI exits on accept, so pinning the lease to it would reclaim the
-                // device the moment it is handed over. Offers start TTL-bound; the holder renews.
-                val lease = createLeaseLocked(d.serial, w.owner, 0, w.ttl, "offer", pending = true)
-                w.offered = lease
-                if (w.deferred.complete(Unit)) break
-                // waiter vanished mid-offer: roll back and offer to the next waiter
-                leases.remove(d.serial); db?.deleteLease(d.serial)
-            }
+            val t = tickets.values.firstOrNull {
+                it.offered == null && it.deadline > clock() && !isDeadPid(it.pid) &&
+                    it.selector.matches(d) && clock() - it.lastPolledAt <= POLL_SILENCE_S &&
+                    clock() - it.lastPolledAt <= it.staleAfterS()
+            } ?: continue
+            t.offered = createLeaseLocked(d.serial, t.owner, 0, t.ttl, "offer", pending = true); t.offeredAt = clock()
         }
+    }
+
+    private fun sweepTicketsLocked() {
+        ended.entries.removeAll { clock() - it.value.second > ENDED_TTL_S }
+        tickets.values.removeAll { t ->
+            val expired = t.deadline <= clock()
+            val dead = !expired && isDeadPid(t.pid)
+            val silent = clock() - t.lastPolledAt > POLL_SILENCE_S
+            val gone = expired || dead
+            if (gone || silent) {
+                releaseOfferLocked(t)
+                db?.log("dequeue", null, t.owner, if (gone) "ticket-gone" else "poll-silence")
+                when {
+                    expired -> ended[t.id] = TicketEnd.DEADLINE to clock()
+                    dead -> Unit                              // process gone: no reason to report
+                    silent -> ended[t.id] = TicketEnd.SILENCE to clock()
+                }
+            }
+            gone || silent
+        }
+        val lapsed = tickets.values.filter { it.offered?.pendingAccept == true && clock() - it.offeredAt > offerHold }
+        lapsed.forEach { t ->
+            releaseOfferLocked(t); tickets.remove(t.id)      // unpolled offer: drop the ticket, move on
+            ended[t.id] = TicketEnd.SILENCE to clock()
+            db?.log("dequeue", null, t.owner, "offer-lapsed")
+        }
+    }
+
+    private fun Ticket.hasLiveOffer() = offered?.let { leases[it.serial] === it } == true
+
+    private fun Ticket.staleAfterS() = maxOf(1L, STALE_POLLS * pollCadenceMs / 1000)
+
+    private fun releaseOfferLocked(t: Ticket) {
+        t.offered?.let { if (leases[it.serial] === it) { leases.remove(it.serial); db?.deleteLease(it.serial) } }
+        t.offered = null
     }
 
     private fun takeFree(selector: Selector): Device? =
@@ -174,13 +269,12 @@ class LeaseManager(private val devices: () -> List<Device>,
 
     private fun reclaimIfNeeded(serial: String) {
         leases[serial]?.let {
-            if (it.expiresAt <= clock() || isDead(it) || staleOffer(it)) {
+            if (it.expiresAt <= clock() || isDead(it)) {
                 leases.remove(serial); db?.deleteLease(serial); db?.log("expire", serial, it.owner, null)
-                dispatchOffersLocked()
+                dispatchTicketsLocked()
             } }
     }
 
-    private fun staleOffer(l: Lease) = l.pendingAccept && clock() - l.offeredAt > ACCEPT_WINDOW_S
     private fun isDead(l: Lease) = isDeadPid(l.pid)
     private fun isDeadPid(pid: Long) = pid != 0L && ProcessHandle.of(pid).isEmpty
 
@@ -189,8 +283,8 @@ class LeaseManager(private val devices: () -> List<Device>,
         val busy = matching.mapNotNull { d ->
             leases[d.serial]?.let { l ->
                 val ttlLeft = maxOf(0, l.expiresAt - clock())
-                // a pending offer is reclaimed at the accept window, not the TTL — report the truth
-                val offerLeft = if (l.pendingAccept) maxOf(0, ACCEPT_WINDOW_S - (clock() - l.offeredAt)) else ttlLeft
+                // a pending offer is reclaimed at the offer hold, not the TTL — report the truth
+                val offerLeft = if (l.pendingAccept) maxOf(0, offerHold - (clock() - l.offeredAt)) else ttlLeft
                 BusyInfo(d.serial, l.owner, minOf(ttlLeft, offerLeft))
             } }
         return LeaseBusyException(busy, matching.size, timedOut)

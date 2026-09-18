@@ -48,6 +48,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   rm -f "$BIN_DIR/adb" "$BIN_DIR/corral"
   rm -f "$HOME/.gradle/init.d/corral-gate.gradle" "$HOME/.gradle/init.d/corral-gate.gradle.kts"
   rm -f "$HOME/.config/corral/gradle-tasks"
+  rm -f "$HOME/.config/corral/rules"
   rm -rf "$CORRAL_HOME"
   # restore the SDK adb if it was shimmed (adb.real -> adb)
   for d in "$HOME/Android/Sdk/platform-tools" "${ANDROID_HOME:-}/platform-tools" "${ANDROID_SDK_ROOT:-}/platform-tools"; do
@@ -57,7 +58,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
       echo "Restored SDK adb at $d/adb"
     fi
   done
-  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks"
+  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules"
   echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
   rmdir "$HOME/.gradle/init.d" "$HOME/.config/corral" 2>/dev/null || true
   exit 0
@@ -153,6 +154,16 @@ if [[ ! -f "$HOME/.config/corral/gradle-tasks" ]]; then
   printf 'install.*\nconnected.*AndroidTest\n' > "$HOME/.config/corral/gradle-tasks"
 fi
 echo "Installed gradle gate (~/.gradle/init.d/corral-gate.gradle.kts); edit ~/.config/corral/gradle-tasks to change gated tasks"
+
+# gate rules: user-editable, never clobbered; the daemon self-heals a missing file
+if [[ ! -f "$SCRIPT_DIR/corral-rules" ]]; then
+  echo "ERROR: scripts/corral-rules missing (incomplete bundle); cannot install the gate rules" >&2
+  exit 1
+fi
+if [[ ! -f "$HOME/.config/corral/rules" ]]; then
+  cp "$SCRIPT_DIR/corral-rules" "$HOME/.config/corral/rules"
+fi
+echo "Installed gate rules (~/.config/corral/rules); edit to customize read-only commands and flags"
 
 # Generate the per-host unit from the committed template, keeping the tuned JVM flags.
 if [[ -n "$ADB" ]]; then

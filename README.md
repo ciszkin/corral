@@ -35,9 +35,14 @@ the same device.
     AGP bypasses the adb binary entirely, so only a build-level gate can cover it; a
     build pinned with `ANDROID_SERIAL` is checked against that device only. The check
     runs at task execution, so gated builds stay configuration-cache compatible.
+  The wrapper's read-only-command and value-flag lists live in one editable file,
+  `~/.config/corral/rules` (override `CORRAL_RULES`), read by both the bash wrapper and the
+  CLI; the Windows `.bat` delegates to `corral gate`, so the three cannot drift. A missing
+  rules file fails closed and the daemon restores the default from the jar.
   Denials are self-teaching: they name the two working forms.
 - **Self-healing** — the daemon watches the SDK adb shim and restores it automatically
-  after SDK updates (stashing the updated binary); `corral doctor` reports the state of
+  after SDK updates (stashing the updated binary), and restores a missing or blank
+  `~/.config/corral/rules` from the jar default; `corral doctor` reports the state of
   every enforcement layer on demand.
 - **CLI** — `corral claim [--all|<serial>] [selector]`, `wait [--timeout S] [selector]`,
   `queue`, `free [--all|<serial>]`, `renew <serial>`, `lease [--all] [selector] -- <cmd>`,
@@ -70,12 +75,11 @@ agent identity — is built and verified with fake devices and the real `omp` / 
 harnesses; the queue was later reworked to client-polled tickets, so no request is parked
 server-side and a crashed client cannot stall it. Phase 3 — the MCP server
 over streamable HTTP at `/mcp` — is built and verified with fake devices via a scripted MCP
-handshake. Design and plan docs live in `docs/plans/` (untracked by convention). Corral
-replaces the `adb-lease` MVP (`adb-lease.md`).
+handshake. Corral replaces the `adb-lease` MVP (`adb-lease.md`).
 
 ## Roadmap (Phase 3+)
 
 - Screenshots + Compose Desktop UI, live view via scrcpy
 - Emulator lifecycle management
-- Verified Windows support: a `ProcessHandle` ancestry fallback in the CLI plus `.bat`
-  delegation of owner resolution (`.bat` wrappers ship; ancestry is Linux-only today)
+- Verified Windows support: a `ProcessHandle` ancestry fallback in the CLI (the `.bat`
+  now delegates the gate to `corral gate`; the ancestry walk is Linux-only today)

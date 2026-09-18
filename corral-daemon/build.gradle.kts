@@ -27,3 +27,7 @@ tasks.shadowJar {
     archiveBaseName.set("corral-daemon")
     manifest { attributes["Main-Class"] = "dev.corral.MainKt" }
 }
+
+tasks.processResources {
+    from(rootProject.file("scripts/corral-rules"))
+}

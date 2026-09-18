@@ -19,6 +19,27 @@ OWNER_SKIP=" bash sh zsh fish dash ksh env nohup timeout xargs sudo setsid stdbu
 # never an agent: the init system is where an orphaned client lands (shared + immortal principal)
 OWNER_FLOOR=" systemd init "
 
+# Gate rules: CORRAL_RULES override, else ~/.config/corral/rules. Missing/blank -> fail closed.
+# The lists are the single source of truth shared with `corral gate` (see scripts/corral-rules).
+CORRAL_RULES=${CORRAL_RULES:-$HOME/.config/corral/rules}
+if [[ ! -r "$CORRAL_RULES" || ! -s "$CORRAL_RULES" ]]; then
+  printf 'corral: gate rules missing at %s — failing closed. Re-run install.sh or start the daemon to self-heal.\n' "$CORRAL_RULES" >&2
+  exit 1
+fi
+readonly_list=""; valueflags=""
+while IFS='=' read -r k v || [[ -n $k || -n $v ]]; do
+  k=${k%$'\r'}; v=${v%$'\r'}          # tolerate CRLF (the file can be edited on Windows); bash 4+
+  k=${k#"${k%%[![:space:]]*}"}; k=${k%"${k##*[![:space:]]}"}
+  k=${k,,}                             # keys are case-insensitive, matching the Kotlin loader
+  [[ -z $k || $k == \#* ]] && continue
+  v=${v%%#*}
+  v=${v//,/ }; v=${v//$'\t'/ }
+  v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}
+  case $k in
+    readonly) readonly_list=" $v ";; valueflags) valueflags=" $v ";;
+  esac
+done < "$CORRAL_RULES"
+
 # Walk up the process tree from $PPID; the first non-shell ancestor is the agent.
 agent_process() {
   local pid="${1:-$PPID}" comm ppid start
@@ -43,15 +64,13 @@ elif read -r apid astart acomm < <(agent_process); then OWNER="proc:$acomm:$apid
 else OWNER="user:${USER:-$(id -un)}"; fi
 
 serial=${ANDROID_SERIAL:-}
-# read-only subcommands that touch no device pass through without a pin
-ro=(devices start-server kill-server track-devices version help)
+# read-only subcommands that touch no device pass through without a pin (see scripts/corral-rules)
 sub=""; args=("$@")
 while [[ $# -gt 0 ]]; do
   case $1 in
     -s) serial=${2:-}; shift $(( $# > 1 ? 2 : 1 ));;
     -s?*) serial=${1#-s}; shift;;
-    -H|-P|-L|-p|-t) shift $(( $# > 1 ? 2 : 1 ));;   # global flags that take a value
-    -*) shift;;   # global flags (-v, --version, --help, -d, -e...) are not a subcommand
+    -*) if [[ " $valueflags " == *" $1 "* ]]; then shift $(( $# > 1 ? 2 : 1 )); else shift; fi;;
     *) [[ -z $sub ]] && sub=$1; shift;;
   esac
 done
@@ -62,7 +81,7 @@ if [[ -n $serial ]]; then
   resp=$(curl -sfG --max-time 5 --data-urlencode "serial=$serial" --data-urlencode "owner=$OWNER" "$CORRAL_URL/api/check" 2>/dev/null) \
     || deny "daemon unreachable at $CORRAL_URL — failing closed (no daemon, no leasing). Start it: systemctl --user status corral"
   grep -q '"allowed":true' <<<"$resp" || deny "lease check failed for $serial: $resp"
-elif [[ -n $sub ]] && [[ ! " ${ro[*]} " == *" $sub "* ]]; then
+elif [[ -n $sub ]] && [[ ! $readonly_list == *" $sub "* ]]; then
   deny "no device pinned (no -s, no ANDROID_SERIAL)"
 fi
 exec "$REAL_ADB" "${args[@]}"

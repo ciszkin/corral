@@ -34,6 +34,8 @@ cp scripts/adb-wrapper "$TMP/bin/adb"
 chmod +x "$TMP/bin/adb"
 cp scripts/corral "$TMP/bin/corral"
 chmod +x "$TMP/bin/corral"
+export CORRAL_RULES="$TMP/corral-rules"
+cp scripts/corral-rules "$CORRAL_RULES"
 export CORRAL_JAR="$PWD/$JAR"
 
 start_daemon() {
@@ -175,6 +177,32 @@ check "identity agreement: cli and wrapper resolve the same owner" bash -c '
   }
   claim_check_free env CORRAL_OWNER=agree1 || exit 1
   claim_check_free env -u CORRAL_OWNER || exit 1
+  exit 0
+'
+
+# drift guard: for each argv the bash wrapper's verdict must equal `corral gate`'s
+check "bash wrapper and corral gate agree on classification" bash -c '
+  for line in "devices" "--version" "-P 5037 devices" "-t 3 shell ls" "shell ls" "install foo.apk" "-s \"\" devices" "-s"; do
+    eval adb $line >/dev/null 2>&1; b=$?
+    eval corral gate -- $line >/dev/null 2>&1; g=$?
+    [ "$b" = "$g" ] || { echo "mismatch [$line]: bash=$b gate=$g" >&2; exit 1; }
+  done
+  exit 0
+'
+
+check "missing rules file fails closed in both readers" bash -c '
+  missing="$TMP/no-such-rules"
+  CORRAL_RULES="$missing" adb devices >/dev/null 2>&1 && exit 1
+  CORRAL_RULES="$missing" corral gate -- devices >/dev/null 2>&1 && exit 1
+  exit 0
+'
+
+check "hand-edited rules parse identically in bash and kotlin" bash -c '
+  d="$TMP/hand"; mkdir -p "$d"
+  printf "readonly = devices\nvalueflags = -P,-H,-L,-p,-t" > "$d/rules"
+  CORRAL_RULES="$d/rules" adb -P 5037 devices >/dev/null 2>&1; b=$?
+  CORRAL_RULES="$d/rules" corral gate -- -P 5037 devices >/dev/null 2>&1; g=$?
+  [ "$b" = "$g" ] && [ "$b" = 0 ] || { echo "mismatch: bash=$b gate=$g (expected both 0)" >&2; exit 1; }
   exit 0
 '
 

@@ -36,7 +36,14 @@ fun main() {
     }
     selfHealSdkShim()
 
-    scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; selfHealSdkShim() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
+    var lastRulesStatus: String? = null
+    fun selfHealRules() {
+        val status = runCatching { RulesFile.ensure() }.getOrNull() ?: return
+        if (status != lastRulesStatus) { println("corral: $status"); lastRulesStatus = status }
+    }
+    selfHealRules()
+
+    scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; selfHealSdkShim(); selfHealRules() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
 
     val env = AppEnv({ monitor.devices }, leases)
     embeddedServer(CIO, port = port, host = "127.0.0.1") {

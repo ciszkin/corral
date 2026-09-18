@@ -1,0 +1,10 @@
+# corral gate rules — installed to ~/.config/corral/rules, overridable with CORRAL_RULES.
+# Comma-separated key=value. Missing keys are treated as empty (fail closed).
+#
+# `readonly` IS THE GATE BOUNDARY: an unpinned command whose first word is listed here runs
+# with no lease and no record. List only subcommands that never touch a device. Adding a
+# device-touching name (shell, install, push, pull, forward, reverse, root, remount, reboot,
+# uninstall, emu, exec-out, logcat) disables the unpinned guard for it. `-s <serial>` and
+# ANDROID_SERIAL are always lease-checked, whatever this file says.
+readonly=devices,start-server,kill-server,track-devices,version,help
+valueflags=-H,-P,-L,-p,-t

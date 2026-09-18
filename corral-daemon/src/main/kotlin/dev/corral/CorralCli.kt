@@ -3,6 +3,8 @@ package dev.corral
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -28,6 +30,7 @@ object CorralCli {
         ?: "http://127.0.0.1:8798"
     // Resolved once per process so claim/free in one invocation use the same owner.
     private val owner: String by lazy { resolveOwner() }
+    private val rules: GateRules by lazy { RulesFile.load() }
 
     /**
      * Lease owner identity — the declared corral identifier wins, else process ancestry:
@@ -65,6 +68,36 @@ object CorralCli {
         }
         return candidates.firstOrNull { File(it).exists() } ?: candidates.firstOrNull()
     }
+
+    /** The real binary the wrapper must exec — never the corral shim, or we would recurse. */
+    private fun findRealAdb(): String? {
+        val sdk = findSdkAdb()
+        val candidates = listOfNotNull(
+            System.getenv("CORRAL_REAL_ADB")?.takeIf { it.isNotBlank() },
+            System.getenv("CORRAL_ADB")?.takeIf { it.isNotBlank() }) +
+            listOfNotNull(sdk?.let { if (File("$it.real").exists()) "$it.real" else null }) +
+            listOfNotNull(sdk)
+        return candidates.firstOrNull { File(it).canExecute() && !isCorralShim(it) }
+    }
+
+    private fun isCorralShim(path: String) =
+        runCatching { File(path).inputStream().use { it.readNBytes(512).decodeToString().contains("corral adb wrapper") } }
+            .getOrDefault(false)
+
+    private fun execRealAdb(argv: List<String>): Nothing {
+        val adb = findRealAdb() ?: run {
+            System.err.println("corral: real adb not found; set CORRAL_ADB or CORRAL_REAL_ADB"); exitProcess(127) }
+        val code = try {
+            ProcessBuilder(listOf(adb) + argv).inheritIO().start().waitFor()
+        } catch (e: IOException) {
+            System.err.println("corral: failed to exec $adb (${e.message})"); exitProcess(127)
+        }
+        exitProcess(code)
+    }
+
+    private fun denyText(serial: String?, reason: String): String =
+        "corral: " + (if (serial != null) "lease check failed for $serial: $reason" else reason) +
+            "\nLease it first:\n  corral lease -- <cmd>\n  ser=\$(corral claim) && ANDROID_SERIAL=\$ser <cmd>\nstatus: corral status"
 
     // Walk up from the JVM's parent (like the wrapper starts at $PPID); the first
     // non-shell ancestor is the agent. Read /proc/<pid>/stat directly so comm and
@@ -116,7 +149,7 @@ object CorralCli {
     private val http = HttpClient.newHttpClient()
 
     private fun get(path: String) = http.send(
-        HttpRequest.newBuilder(URI.create("$url$path")).GET().build(),
+        HttpRequest.newBuilder(URI.create("$url$path")).timeout(Duration.ofSeconds(5)).GET().build(),
         HttpResponse.BodyHandlers.ofString()).let(::ok).body()
 
     private fun send(method: String, path: String, body: String, timeoutSeconds: Long = 0) = http.send(
@@ -216,6 +249,14 @@ object CorralCli {
                             else -> println("sdk adb shim: ok ($sdkAdb -> adb.real)")
                         }
                     }
+                }
+                val rulesPath = RulesFile.defaultPath()
+                val parsed = RulesFile.load(rulesPath)
+                when {
+                    !rulesPath.toFile().exists() -> { println("rules: FAIL - $rulesPath missing"); problems++ }
+                    parsed.readonly.isEmpty() || parsed.valueFlags.isEmpty() -> {
+                        println("rules: FAIL - $rulesPath is missing readonly or valueflags"); problems++ }
+                    else -> println("rules: ok ($rulesPath)")
                 }
                 if (problems > 0) exitProcess(1)
             }
@@ -349,6 +390,30 @@ object CorralCli {
                     }
                 }
             }
+            "gate" -> {
+                if (rules.readonly.isEmpty() || rules.valueFlags.isEmpty()) {
+                    System.err.println("corral: gate rules missing or incomplete at ${RulesFile.defaultPath()} — failing closed. Re-run install.sh or start the daemon to self-heal.")
+                    exitProcess(1)
+                }
+                var gateOwner = owner
+                var rest = args.drop(1)
+                if (rest.firstOrNull() == "--owner") { gateOwner = rest.getOrNull(1) ?: usage(2); rest = rest.drop(2) }
+                if (rest.firstOrNull() == "--") rest = rest.drop(1)
+                when (val d = Gate.classify(rest, System.getenv("ANDROID_SERIAL"), rules)) {
+                    is GateDecision.Pass -> {}
+                    is GateDecision.Deny -> { System.err.println(denyText(null, d.reason)); exitProcess(1) }
+                    is GateDecision.Check -> {
+                        val obj = Json.parseToJsonElement(get(
+                            "/api/check?serial=${URLEncoder.encode(d.serial, StandardCharsets.UTF_8)}&owner=${URLEncoder.encode(gateOwner, StandardCharsets.UTF_8)}")).jsonObject
+                        val allowed = (obj["allowed"] as? JsonPrimitive)?.contentOrNull == "true"
+                        if (!allowed) {
+                            val reason = (obj["reason"] as? JsonPrimitive)?.contentOrNull ?: "unexpected check response"
+                            System.err.println(denyText(d.serial, reason)); exitProcess(1)
+                        }
+                    }
+                }
+                execRealAdb(rest)
+            }
             "queue" -> println(get("/api/queue"))
             "help" -> usage(0)
             else -> usage(2)
@@ -377,6 +442,7 @@ object CorralCli {
         println("usage: corral devices|status|queue|owner|doctor|check [--owner <o>] [<serial>...]" +
             "|claim [--all|<serial>] [selector]|free [--all|<serial>]|renew <serial>" +
             "|wait [--timeout S (max 600)] [selector]|lease [--all] [selector] -- <cmd>" +
+            "|gate [--owner o] -- <adb args>" +
             "\n  selector: --serial S --model M --os V(min) --type usb|wifi|emulator --avd A")
         exitProcess(code)
     }

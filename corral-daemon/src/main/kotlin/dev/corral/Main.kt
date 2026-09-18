@@ -45,7 +45,7 @@ fun main() {
 
     scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; selfHealSdkShim(); selfHealRules() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
 
-    val env = AppEnv({ monitor.devices }, leases)
+    val env = AppEnv({ monitor.devices }, leases, adb)
     embeddedServer(CIO, port = port, host = "127.0.0.1") {
         guardLocalHost()
         corralModule(env)

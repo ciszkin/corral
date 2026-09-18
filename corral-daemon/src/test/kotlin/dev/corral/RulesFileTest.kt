@@ -60,4 +60,13 @@ class RulesFileTest {
         assertTrue(status!!.contains("unreadable"))
         assertTrue(Files.isDirectory(path))
     }
+
+    @Test fun identityKeysParseAndFallBack() {
+        val r = RulesFile.parse("shell_skip=bash, cmd.exe\ninit_floor=systemd\n")
+        assertEquals(setOf("bash", "cmd.exe"), r.shellSkip)
+        assertEquals(setOf("systemd"), r.initFloor)
+        // absent -> defaults; blank -> defaults (empty identity lists degrade attribution, see plan)
+        assertEquals(DEFAULT_SHELL_SKIP, RulesFile.parse("readonly=devices\n").shellSkip)
+        assertEquals(DEFAULT_INIT_FLOOR, RulesFile.parse("shell_skip=bash\ninit_floor=\n").initFloor)
+    }
 }

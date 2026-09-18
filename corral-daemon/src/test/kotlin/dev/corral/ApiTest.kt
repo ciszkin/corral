@@ -22,8 +22,10 @@ class ApiTest {
                Device("dev2", "device", model = "SM-S918B", osVersion = "13"))
     }
 
-    private fun ApplicationTestBuilder.corral(leases: LeaseManager = LeaseManager(testDevices, db = null)) =
-        application { corralModule(AppEnv(testDevices, leases)) }
+    private fun ApplicationTestBuilder.corral(
+        leases: LeaseManager = LeaseManager(testDevices, db = null),
+        adbPath: String? = null,
+    ) = application { corralModule(AppEnv(testDevices, leases, adbPath)) }
 
     private fun withApi(block: suspend CoroutineScope.(HttpClient) -> Unit) =
         testApplication { corral(); CoroutineScope(coroutineContext).block(client) }
@@ -85,6 +87,15 @@ class ApiTest {
         val r = c.post("/api/leases/dev1/renew") { contentType(ContentType.Application.Json)
             setBody("""{"owner":"agentB"}""") }
         assertEquals(HttpStatusCode.Conflict, r.status)
+    }
+
+    @Test fun statusReportsTheDaemonsAdbPath() {
+        testApplication {
+            corral(adbPath = "/custom/sdk/platform-tools/adb")
+            val r = client.get("/api/status")
+            assertEquals(HttpStatusCode.OK, r.status)
+            assertTrue(r.bodyAsText().contains("\"adb\":\"/custom/sdk/platform-tools/adb\""))
+        }
     }
 
     @Test fun statusListsLeases() = withApi { c ->

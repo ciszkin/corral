@@ -15,9 +15,9 @@ fi
 # Lease owner identity — the declared corral identifier wins, else process ancestry
 # (see agent-session-identity.md):
 #   CORRAL_OWNER > proc:<comm>:<pid>:<starttime> (process ancestry, universal) > user:$USER
-OWNER_SKIP=" bash sh zsh fish dash ksh env nohup timeout xargs sudo setsid stdbuf script "
-# never an agent: the init system is where an orphaned client lands (shared + immortal principal)
-OWNER_FLOOR=" systemd init "
+# identity walk lists: built-in defaults; the rules file's shell_skip/init_floor override them
+shell_list=" bash sh zsh fish dash ksh env nohup timeout xargs sudo setsid stdbuf script cmd cmd.exe powershell powershell.exe pwsh pwsh.exe conhost conhost.exe "
+init_list=" systemd init services services.exe wininit wininit.exe lsass lsass.exe svchost svchost.exe winlogon winlogon.exe system explorer explorer.exe "
 
 # Gate rules: CORRAL_RULES override, else ~/.config/corral/rules. Missing/blank -> fail closed.
 # The lists are the single source of truth shared with `corral gate` (see scripts/corral-rules).
@@ -37,6 +37,8 @@ while IFS='=' read -r k v || [[ -n $k || -n $v ]]; do
   v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}
   case $k in
     readonly) readonly_list=" $v ";; valueflags) valueflags=" $v ";;
+    # blank identity keys keep the built-in defaults, matching the Kotlin loader
+    shell_skip) [[ -n $v ]] && shell_list=" $v ";; init_floor) [[ -n $v ]] && init_list=" $v ";;
   esac
 done < "$CORRAL_RULES"
 
@@ -47,10 +49,10 @@ agent_process() {
     read -r comm ppid start < <(
       awk '{ c = $2; gsub(/[()]/, "", c); print c, $4, $22 }' "/proc/$pid/stat"
     ) || return 1
-    case "$OWNER_FLOOR" in
+    case "$init_list" in
       *" $comm "*) return 1;;             # hit init — no agent above us; fall back to user:$USER
     esac
-    case "$OWNER_SKIP" in
+    case "$shell_list" in
       *" $comm "*) ;;                     # a shell or wrapper — keep walking
       *) echo "$pid $start $comm"; return 0;;
     esac

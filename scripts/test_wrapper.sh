@@ -2,7 +2,14 @@
 # corral adb-wrapper integration test suite.
 set -u
 
-JAR=corral-daemon/build/libs/corral-daemon-all.jar
+# Runs from the source tree (rebuilds the jar) and from the deployed bundle (uses the jar beside
+# this script): the bundle has no gradle project and no scripts/ subdirectory.
+SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ -f "$SELF/corral-daemon-all.jar" ] && [ -f "$SELF/adb-wrapper" ]; then
+  SRC="$SELF"; ROOT=""; JAR="$SELF/corral-daemon-all.jar"; BUILD=0
+else
+  SRC="$SELF"; ROOT=$(cd "$SELF/.." && pwd); JAR="$ROOT/corral-daemon/build/libs/corral-daemon-all.jar"; BUILD=1
+fi
 PORT=8799
 CORRAL_URL="http://127.0.0.1:$PORT"
 
@@ -14,7 +21,10 @@ check() { # check <name> <cond>
 }
 
 # --- setup ---
-./gradlew :corral-daemon:shadowJar >/dev/null 2>&1 || { echo "build failed"; exit 1; }
+if [ "$BUILD" = 1 ]; then
+  (cd "$ROOT" && ./gradlew :corral-daemon:shadowJar >/dev/null 2>&1) || { echo "build failed"; exit 1; }
+fi
+[ -f "$JAR" ] || { echo "jar not found: $JAR (run from the source tree or beside corral-daemon-all.jar)"; exit 1; }
 
 TMP=$(mktemp -d)
 export TMP
@@ -30,13 +40,13 @@ mkdir -p "$TMP/bin"
 printf 'dev1 device Pixel_6 13\ndev2 device SM-S918B 13\n' > "$TMP/fake-devices"
 printf '#!/bin/sh\necho "fake-adb $@"\n' > "$TMP/fake-adb"
 chmod +x "$TMP/fake-adb"
-cp scripts/adb-wrapper "$TMP/bin/adb"
+cp "$SRC/adb-wrapper" "$TMP/bin/adb"
 chmod +x "$TMP/bin/adb"
-cp scripts/corral "$TMP/bin/corral"
+cp "$SRC/corral" "$TMP/bin/corral"
 chmod +x "$TMP/bin/corral"
 export CORRAL_RULES="$TMP/corral-rules"
-cp scripts/corral-rules "$CORRAL_RULES"
-export CORRAL_JAR="$PWD/$JAR"
+cp "$SRC/corral-rules" "$CORRAL_RULES"
+export CORRAL_JAR="$JAR"
 
 start_daemon() {
   setsid env CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" CORRAL_PORT=$PORT \
@@ -177,6 +187,18 @@ check "identity agreement: cli and wrapper resolve the same owner" bash -c '
   }
   claim_check_free env CORRAL_OWNER=agree1 || exit 1
   claim_check_free env -u CORRAL_OWNER || exit 1
+  exit 0
+'
+
+# blank identity keys fall back to the built-in lists in both readers; an emptied shell_skip
+# would make the wrapper resolve proc:bash:* where the CLI skips bash, breaking the lease check
+check "blank identity keys keep defaults in both readers" bash -c '
+  d="$TMP/blank"; mkdir -p "$d"
+  printf "readonly=devices\nvalueflags=-P\nshell_skip=\ninit_floor=\n" > "$d/rules"
+  s=$(CORRAL_RULES="$d/rules" env -u CORRAL_OWNER corral claim 2>/dev/null) || exit 1
+  [ -n "$s" ] || exit 1
+  CORRAL_RULES="$d/rules" env -u CORRAL_OWNER "$TMP/bin/adb" -s "$s" shell ls 2>&1 | grep -q fake-adb || exit 1
+  CORRAL_RULES="$d/rules" env -u CORRAL_OWNER corral free "$s" >/dev/null || exit 1
   exit 0
 '
 

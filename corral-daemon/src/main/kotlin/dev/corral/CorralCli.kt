@@ -10,6 +10,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.io.IOException
+import java.lang.ProcessHandle
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -42,21 +43,11 @@ object CorralCli {
         return "user:" + (System.getenv("USER") ?: System.getProperty("user.name"))
     }
 
-    private val shellSkip = setOf(
-        "bash", "sh", "zsh", "fish", "dash", "ksh", "env", "nohup",
-        "timeout", "xargs", "sudo", "setsid", "stdbuf", "script")
-
-    // The floor of the ancestry walk: the init system is never an agent. An orphaned (reparented)
-    // client's first non-shell ancestor is `systemd --user`, a shared and immortal principal — if
-    // returned, every orphan would own each other's leases and never be reclaimed by pid liveness.
-    // Stop here and fall back to `user:$USER` instead.
-    private val initSkip = setOf("systemd", "init")
-
     // CORRAL_ADB first (the only SDK pointer the daemon unit sets; install.sh computed and
     // trusts it) — it points at the real binary (adb.real), the shim is its sibling "adb".
     // Then the same detection order as install.sh: ANDROID_HOME, ANDROID_SDK_ROOT, default path.
-    private fun findSdkAdb(): String? {
-        val fromCorral = System.getenv("CORRAL_ADB")?.let { p ->
+    private fun findSdkAdb(corralAdb: String? = System.getenv("CORRAL_ADB")): String? {
+        val fromCorral = corralAdb?.let { p ->
             val path = Path.of(p)
             if (path.fileName?.toString()?.endsWith(".real") == true) path.resolveSibling("adb").toString() else p
         }
@@ -118,33 +109,19 @@ object CorralCli {
     private fun holderPid(): Long =
         if (owner.startsWith("proc:")) agentPid() else 0
 
-    /** First non-shell ancestor as (comm, pid, starttime), or null if none found (→ user:$USER). */
-    private fun agentAncestor(): Triple<String, Long, Long>? {
-        var p = ProcessHandle.current().parent()
-        while (p.isPresent) {
-            val h = p.get()
-            val pid = h.pid()
-            if (pid <= 1) return null
-            val stat = statOf(pid) ?: return null
-            if (stat.first in initSkip) return null   // reparented onto init — no agent above us
-            if (stat.first !in shellSkip) return Triple(stat.first, pid, stat.second)
-            p = h.parent()
-        }
-        return null
-    }
+    /** pid -> parent pid, cross-platform (ProcessHandle). */
+    private fun parentPid(pid: Long): Long? =
+        ProcessHandle.of(pid).orElse(null)?.parent()?.orElse(null)?.pid()
 
-    private fun statOf(pid: Long): Pair<String, Long>? = try {
-        val text = File("/proc/$pid/stat").readText()
-        val open = text.indexOf('(')
-        val close = text.lastIndexOf(')')
-        if (open < 0 || close < 0) null
-        else {
-            val comm = text.substring(open + 1, close)
-            val start = text.substring(close + 1).trim().split(Regex("\\s+"))
-                .getOrNull(19)?.toLongOrNull()
-            if (start == null) null else comm to start
-        }
-    } catch (_: Exception) { null }
+    /** (comm, start) from /proc when present, else from ProcessHandle — Linux keeps byte-parity. */
+    private fun commAndStart(pid: Long): Pair<String, Long>? =
+        statOf(pid) ?: processInfoOf(pid)
+
+    /** First non-shell ancestor as (comm, pid, starttime), or null if none (→ user:$USER). */
+    private fun agentAncestor(): Triple<String, Long, Long>? =
+        pickAgentAncestor(ProcessHandle.current().pid(), ::parentPid, ::commAndStart,
+            shellSkip = rules.shellSkip.ifEmpty { DEFAULT_SHELL_SKIP },
+            initFloor = rules.initFloor.ifEmpty { DEFAULT_INIT_FLOOR })
 
     private val http = HttpClient.newHttpClient()
 
@@ -235,7 +212,16 @@ object CorralCli {
                 if (devices >= 0) println("daemon: ok ($url, $devices device(s))")
                 else { println("daemon: FAIL - unreachable at $url (is it running? systemctl --user status corral)"); problems++ }
 
-                val sdkAdb = findSdkAdb()
+                // prefer the daemon's own configured adb (its unit env may differ from this shell's);
+                // the unit points CORRAL_ADB at the real binary (adb.real), findSdkAdb maps it to the shim
+                val daemonAdb = runCatching {
+                    Json.parseToJsonElement(get("/api/status")).jsonObject["adb"]
+                        ?.jsonPrimitive?.content?.takeIf { it.isNotBlank() && ('/' in it || '\\' in it) }
+                }.getOrNull()
+                val shellAdb = findSdkAdb()
+                val sdkAdb = daemonAdb?.let { findSdkAdb(it) } ?: shellAdb
+                if (daemonAdb != null && sdkAdb != shellAdb)
+                    println("sdk adb shim: checking the daemon's adb ($sdkAdb), not this shell's")
                 when {
                     sdkAdb == null -> println("sdk adb shim: skipped (no SDK platform-tools/adb found; set ANDROID_HOME)")
                     else -> {

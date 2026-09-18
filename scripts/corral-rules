@@ -1,5 +1,6 @@
 # corral gate rules — installed to ~/.config/corral/rules, overridable with CORRAL_RULES.
-# Comma-separated key=value. Missing keys are treated as empty (fail closed).
+# Comma-separated key=value. Missing gate keys are treated as empty (fail closed); missing or
+# blank identity keys below fall back to their built-in defaults.
 #
 # `readonly` IS THE GATE BOUNDARY: an unpinned command whose first word is listed here runs
 # with no lease and no record. List only subcommands that never touch a device. Adding a
@@ -8,3 +9,14 @@
 # ANDROID_SERIAL are always lease-checked, whatever this file says.
 readonly=devices,start-server,kill-server,track-devices,version,help
 valueflags=-H,-P,-L,-p,-t
+
+# Identity walk lists, shared by the CLI (corral gate / owner) and the bash wrapper.
+# shell_skip: processes that are never the agent — the walk steps over them (Unix + Windows).
+# init_floor: the walk stops here and falls back to user:$USER (an immortal shared process
+# must never become a principal). A wrong entry is silent and shared: the walk stops early and
+# every session of that user collapses into one owner, with nothing in `corral owner` to show
+# it — only add processes that truly sit above every agent. Unlike the gate keys above, absent
+# or blank keys here fall back to built-in defaults: empty identity lists degrade attribution
+# instead of failing closed.
+shell_skip=bash,sh,zsh,fish,dash,ksh,env,nohup,timeout,xargs,sudo,setsid,stdbuf,script,cmd,cmd.exe,powershell,powershell.exe,pwsh,pwsh.exe,conhost,conhost.exe
+init_floor=systemd,init,services,services.exe,wininit,wininit.exe,lsass,lsass.exe,svchost,svchost.exe,winlogon,winlogon.exe,system,explorer,explorer.exe

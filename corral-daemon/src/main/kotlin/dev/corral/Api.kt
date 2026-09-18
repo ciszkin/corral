@@ -41,7 +41,9 @@ import kotlinx.serialization.json.Json
 
 @Serializable data class DeviceStatus(val serial: String, val lease: Lease?)
 
-class AppEnv(val devices: () -> List<Device>, val leases: LeaseManager)
+@Serializable data class StatusResponse(val devices: List<DeviceStatus>, val adb: String)
+
+class AppEnv(val devices: () -> List<Device>, val leases: LeaseManager, val adbPath: String? = null)
 
 /** Browser DNS-rebinding guard: every local client (CLI, wrapper, MCP) uses a localhost Host. */
 fun Application.guardLocalHost() = intercept(ApplicationCallPipeline.Plugins) {
@@ -57,9 +59,10 @@ fun Application.corralModule(env: AppEnv) {
     routing {
         get("/api/devices") { call.respond(env.devices()) }
         get("/api/status") {
-            call.respond(mapOf("devices" to env.devices().map { d ->
-                DeviceStatus(d.serial, env.leases.snapshot[d.serial])
-            }))
+            call.respond(StatusResponse(
+                devices = env.devices().map { d -> DeviceStatus(d.serial, env.leases.snapshot[d.serial]) },
+                adb = env.adbPath ?: ""
+            ))
         }
         get("/api/check") {
             val r = env.leases.check(call.parameters["serial"] ?: "", call.parameters["owner"] ?: "")

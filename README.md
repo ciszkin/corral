@@ -24,10 +24,12 @@ the same device.
   restarts via SQLite (WAL), with an append-only audit log.
 - **Per-agent identity** — lease owners are per agent session, not per unix user. One
   declared identifier (`CORRAL_OWNER`) wins; otherwise the owner derives from process
-  ancestry (`proc:<comm>:<pid>:<starttime>`, universal, no agent cooperation needed), with
-  `user:$USER` as the floor. The pid is only a liveness *hint*, recorded when the process
-  actually spans the work — so a harness whose session outlives a single process (per-prompt
-  or per-tool-call) sets `CORRAL_OWNER` and gets a durable identity.
+  ancestry (`proc:<comm>:<pid>:<starttime>`, universal, no agent cooperation needed), read
+  from `/proc` on Linux and from `ProcessHandle` on Windows/macOS, with `user:$USER` as the
+  floor. The ancestor skip/floor lists (`shell_skip`, `init_floor`) live in the same editable
+  `~/.config/corral/rules` file as the gate lists. The pid is only a liveness *hint*, recorded
+  when the process actually spans the work — so a harness whose session outlives a single
+  process (per-prompt or per-tool-call) sets `CORRAL_OWNER` and gets a durable identity.
 - **Exec-time enforcement** — three complementary gates:
   - an `adb` wrapper on PATH checks every PATH-resolved adb invocation;
   - an SDK `platform-tools/adb` shim catches absolute-path calls (IDE, scripts);
@@ -81,5 +83,6 @@ handshake. Corral replaces the `adb-lease` MVP (`adb-lease.md`).
 
 - Screenshots + Compose Desktop UI, live view via scrcpy
 - Emulator lifecycle management
-- Verified Windows support: a `ProcessHandle` ancestry fallback in the CLI (the `.bat`
-  now delegates the gate to `corral gate`; the ancestry walk is Linux-only today)
+- Verified Windows support: the `.bat` delegates the gate to `corral gate`, and the CLI now
+  walks ancestry via `ProcessHandle` where `/proc` is absent — real Windows-host verification
+  is still outstanding

@@ -4,12 +4,28 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 
+/** Built-in identity defaults — the fallback when the rules file omits or blanks the keys. */
+val DEFAULT_SHELL_SKIP = setOf(
+    "bash", "sh", "zsh", "fish", "dash", "ksh", "env", "nohup",
+    "timeout", "xargs", "sudo", "setsid", "stdbuf", "script",
+    "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe",
+    "conhost", "conhost.exe")
+
+val DEFAULT_INIT_FLOOR = setOf(
+    "systemd", "init",
+    "services", "services.exe", "wininit", "wininit.exe", "lsass", "lsass.exe",
+    "svchost", "svchost.exe", "winlogon", "winlogon.exe", "system", "explorer", "explorer.exe")
+
 /** The lists the bash wrapper and the CLI must agree on. */
 data class GateRules(
     val readonly: Set<String>,
     val valueFlags: Set<String>,
+    val shellSkip: Set<String> = DEFAULT_SHELL_SKIP,
+    val initFloor: Set<String> = DEFAULT_INIT_FLOOR,
 ) {
-    companion object { val EMPTY = GateRules(emptySet(), emptySet()) }
+    companion object {
+        val EMPTY = GateRules(emptySet(), emptySet(), emptySet(), emptySet())
+    }
 }
 
 /** Loads, parses and self-heals ~/.config/corral/rules (see `scripts/corral-rules`). */
@@ -21,7 +37,10 @@ object RulesFile {
         System.getenv("CORRAL_RULES")?.takeIf { it.isNotBlank() }?.let { Path.of(it) }
             ?: Path.of(System.getProperty("user.home"), ".config", "corral", "rules")
 
-    /** Comma-separated `key=value`; `#` starts a comment; missing keys are empty (fail closed). */
+    /**
+     * Comma-separated `key=value`; `#` starts a comment. Missing gate keys are empty (fail
+     * closed); missing or blank identity keys fall back to the built-in defaults.
+     */
     fun parse(text: String): GateRules {
         val keys = text.lineSequence()
             .map { it.substringBefore('#').trim() }
@@ -30,7 +49,11 @@ object RulesFile {
                 it.substringBefore('=').trim().lowercase() to
                     it.substringAfter('=').split(',').map(String::trim).filter(String::isNotEmpty).toSet()
             }
-        return GateRules(keys["readonly"] ?: emptySet(), keys["valueflags"] ?: emptySet())
+        return GateRules(
+            keys["readonly"] ?: emptySet(),
+            keys["valueflags"] ?: emptySet(),
+            keys["shell_skip"]?.takeIf { it.isNotEmpty() } ?: DEFAULT_SHELL_SKIP,
+            keys["init_floor"]?.takeIf { it.isNotEmpty() } ?: DEFAULT_INIT_FLOOR)
     }
 
     fun load(path: Path = defaultPath()): GateRules =

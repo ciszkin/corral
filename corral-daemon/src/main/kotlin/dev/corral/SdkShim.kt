@@ -8,6 +8,12 @@ import java.nio.file.StandardCopyOption
  *  real binary, silently removing the wrapper (and with it, enforcement of absolute-path
  *  adb calls). The daemon detects that and restores the shim, stashing the newer binary as
  *  adb.real - so the updated adb is never lost and enforcement never silently disappears. */
+/** The shim for a reported adb path: `…/adb.real` → its sibling `…/adb`; any other path passes
+ *  through verbatim. String-based so a Windows-style path maps correctly on any host. */
+internal fun shimPathOf(reported: String): String =
+    if (reported.substringAfterLast('/').substringAfterLast('\\').endsWith(".real")) reported.removeSuffix(".real")
+    else reported
+
 object SdkShim {
     private const val MARKER = "corral adb wrapper"
 

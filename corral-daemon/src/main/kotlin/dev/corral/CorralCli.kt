@@ -15,7 +15,6 @@ import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.nio.charset.StandardCharsets
-import java.nio.file.Path
 import java.time.Duration
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
@@ -47,10 +46,7 @@ object CorralCli {
     // trusts it) — it points at the real binary (adb.real), the shim is its sibling "adb".
     // Then the same detection order as install.sh: ANDROID_HOME, ANDROID_SDK_ROOT, default path.
     private fun findSdkAdb(corralAdb: String? = System.getenv("CORRAL_ADB")): String? {
-        val fromCorral = corralAdb?.let { p ->
-            val path = Path.of(p)
-            if (path.fileName?.toString()?.endsWith(".real") == true) path.resolveSibling("adb").toString() else p
-        }
+        val fromCorral = corralAdb?.let(::shimPathOf)
         val candidates = buildList {
             fromCorral?.let { add(it) }
             System.getenv("ANDROID_HOME")?.let { add("$it/platform-tools/adb") }
@@ -213,15 +209,18 @@ object CorralCli {
                 else { println("daemon: FAIL - unreachable at $url (is it running? systemctl --user status corral)"); problems++ }
 
                 // prefer the daemon's own configured adb (its unit env may differ from this shell's);
-                // the unit points CORRAL_ADB at the real binary (adb.real), findSdkAdb maps it to the shim
+                // the unit points CORRAL_ADB at the real binary (adb.real), shimPathOf maps it to the
+                // shim. No fallback chain here: a stale/moved SDK must FAIL, not silently pass this
+                // shell's tree — the daemon wouldn't be using that one.
                 val daemonAdb = runCatching {
                     Json.parseToJsonElement(get("/api/status")).jsonObject["adb"]
                         ?.jsonPrimitive?.content?.takeIf { it.isNotBlank() && ('/' in it || '\\' in it) }
                 }.getOrNull()
                 val shellAdb = findSdkAdb()
-                val sdkAdb = daemonAdb?.let { findSdkAdb(it) } ?: shellAdb
+                val sdkAdb = daemonAdb?.let(::shimPathOf) ?: shellAdb
                 if (daemonAdb != null && sdkAdb != shellAdb)
                     println("sdk adb shim: checking the daemon's adb ($sdkAdb), not this shell's")
+                val whose = if (daemonAdb != null) " (the daemon's configured adb)" else ""
                 when {
                     sdkAdb == null -> println("sdk adb shim: skipped (no SDK platform-tools/adb found; set ANDROID_HOME)")
                     else -> {
@@ -229,9 +228,9 @@ object CorralCli {
                         val real = File("$sdkAdb.real")
                         val isWrapper = shim.exists() && shim.readText().contains("corral adb wrapper")
                         when {
-                            !shim.exists() -> { println("sdk adb shim: FAIL - $sdkAdb missing"); problems++ }
-                            !isWrapper -> { println("sdk adb shim: FAIL - $sdkAdb is not the corral wrapper (re-run install.sh)"); problems++ }
-                            !real.canExecute() -> { println("sdk adb shim: FAIL - $real missing (re-run install.sh)"); problems++ }
+                            !shim.exists() -> { println("sdk adb shim: FAIL - $sdkAdb missing$whose"); problems++ }
+                            !isWrapper -> { println("sdk adb shim: FAIL - $sdkAdb is not the corral wrapper (re-run install.sh)$whose"); problems++ }
+                            !real.canExecute() -> { println("sdk adb shim: FAIL - $real missing (re-run install.sh)$whose"); problems++ }
                             else -> println("sdk adb shim: ok ($sdkAdb -> adb.real)")
                         }
                     }

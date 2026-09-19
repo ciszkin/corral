@@ -25,5 +25,8 @@ jobs:
       - name: Run daemon tests
         run: ./gradlew :corral-daemon:test
 
+      - name: Run wrapper integration suite
+        run: bash scripts/test_wrapper.sh
+
       - name: Build runnable jar
         run: ./gradlew :corral-daemon:shadowJar

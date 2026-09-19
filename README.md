@@ -26,8 +26,13 @@ the same device.
   declared identifier (`CORRAL_OWNER`) wins; otherwise the owner derives from process
   ancestry (`proc:<comm>:<pid>:<starttime>`, universal, no agent cooperation needed), read
   from `/proc` on Linux and from `ProcessHandle` on Windows/macOS, with `user:$USER` as the
-  floor. The ancestor skip/floor lists (`shell_skip`, `init_floor`) live in the same editable
-  `~/.config/corral/rules` file as the gate lists. The pid is only a liveness *hint*, recorded
+  floor. Where `/proc` is unreadable (macOS/Windows) the PATH wrapper delegates its identity
+  to `corral owner` — one JVM spawn per unpinned adb call — so wrapper and CLI still agree;
+  `user:$USER` if `corral` is off PATH. The ancestor skip/floor lists (`shell_skip`,
+  `init_floor`) live in the same editable
+  `~/.config/corral/rules` file as the gate lists; a file from an older install without
+  those keys simply keeps the built-in defaults (add the keys to customize). The pid is
+  only a liveness *hint*, recorded
   when the process actually spans the work — so a harness whose session outlives a single
   process (per-prompt or per-tool-call) sets `CORRAL_OWNER` and gets a durable identity.
 - **Exec-time enforcement** — three complementary gates:
@@ -83,6 +88,6 @@ handshake. Corral replaces the `adb-lease` MVP (`adb-lease.md`).
 
 - Screenshots + Compose Desktop UI, live view via scrcpy
 - Emulator lifecycle management
-- Verified Windows support: the `.bat` delegates the gate to `corral gate`, and the CLI now
-  walks ancestry via `ProcessHandle` where `/proc` is absent — real Windows-host verification
-  is still outstanding
+- Verified Windows/macOS support: the `.bat` delegates the gate to `corral gate`, the CLI
+  walks ancestry via `ProcessHandle` where `/proc` is absent, and the bash wrapper delegates
+  identity to `corral owner` there — real non-Linux-host verification is still outstanding

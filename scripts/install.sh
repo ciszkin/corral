@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 # corral install.sh — install corral-daemon, the adb wrapper and the corral CLI
 # on a Linux host. User-scoped (no root). Idempotent; safe to re-run.
-# Usage: scripts/install.sh [--java PATH] [--adb PATH] [--jar PATH] [--uninstall]
+# Usage: scripts/install.sh [--java PATH] [--adb PATH] [--jar PATH] [--home DIR] [--uninstall]
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-CORRAL_HOME="$HOME/.corral"
-BIN_DIR="$HOME/bin"
-UNIT_DIR="$HOME/.config/systemd/user"
+TARGET_HOME="${HOME:-}"
 
 JAVA_ARG=""
 ADB_ARG=""
 JAR_ARG=""
+HOME_ARG=""
 UNINSTALL=0
 SHIM=1
 
@@ -23,6 +22,7 @@ Usage: install.sh [options]
   --java PATH     Java 17+ executable (auto-detect: JAVA_HOME, PATH, sdkman)
   --adb PATH      real adb executable (auto-detect: ANDROID_HOME, ~/Android/Sdk, PATH)
   --jar PATH      corral-daemon-all.jar (default: ./corral-daemon/build/libs/corral-daemon-all.jar)
+  --home DIR      install root to use instead of $HOME (tests/sandboxes only)
   --no-sdk-shim   do NOT shim the SDK's platform-tools/adb (needed to gate gradle/AGP installs)
   --uninstall     stop + remove the daemon service, shims, and ~/.corral
 EOF
@@ -33,6 +33,7 @@ while [[ $# -gt 0 ]]; do
     --java) JAVA_ARG=${2:?--java needs a path}; shift 2;;
     --adb) ADB_ARG=${2:?--adb needs a path}; shift 2;;
     --jar) JAR_ARG=${2:?--jar needs a path}; shift 2;;
+    --home) HOME_ARG=${2:-}; if [[ -z "$HOME_ARG" ]]; then echo "ERROR: --home needs a non-empty DIR" >&2; exit 2; fi; shift 2;;
     --no-sdk-shim) SHIM=0; shift;;
     --uninstall) UNINSTALL=1; shift;;
     -h|--help) usage; exit 0;;
@@ -40,18 +41,33 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+if [[ -n "$HOME_ARG" ]]; then TARGET_HOME="$HOME_ARG"; fi
+if [[ -z "$TARGET_HOME" ]]; then
+  echo "ERROR: \$HOME is unset and no --home DIR was given; set HOME or pass --home DIR." >&2
+  exit 1
+fi
+CORRAL_HOME="$TARGET_HOME/.corral"
+BIN_DIR="$TARGET_HOME/bin"
+UNIT_DIR="$TARGET_HOME/.config/systemd/user"
+SANDBOX=0
+if [[ "$TARGET_HOME" != "${HOME:-}" ]]; then SANDBOX=1; fi
+
 if [[ $UNINSTALL -eq 1 ]]; then
   echo "==> Uninstalling corral"
-  systemctl --user disable --now corral 2>/dev/null || true
+  if [[ $SANDBOX -eq 1 ]]; then
+    echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
+  else
+    systemctl --user disable --now corral 2>/dev/null || true
+  fi
   rm -f "$UNIT_DIR/corral.service"
-  systemctl --user daemon-reload 2>/dev/null || true
+  if [[ $SANDBOX -eq 0 ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
   rm -f "$BIN_DIR/adb" "$BIN_DIR/corral"
-  rm -f "$HOME/.gradle/init.d/corral-gate.gradle" "$HOME/.gradle/init.d/corral-gate.gradle.kts"
-  rm -f "$HOME/.config/corral/gradle-tasks"
-  rm -f "$HOME/.config/corral/rules"
+  rm -f "$TARGET_HOME/.gradle/init.d/corral-gate.gradle" "$TARGET_HOME/.gradle/init.d/corral-gate.gradle.kts"
+  rm -f "$TARGET_HOME/.config/corral/gradle-tasks"
+  rm -f "$TARGET_HOME/.config/corral/rules"
   rm -rf "$CORRAL_HOME"
   # restore the SDK adb if it was shimmed (adb.real -> adb)
-  for d in "$HOME/Android/Sdk/platform-tools" "${ANDROID_HOME:-}/platform-tools" "${ANDROID_SDK_ROOT:-}/platform-tools"; do
+  for d in "$TARGET_HOME/Android/Sdk/platform-tools" "${ANDROID_HOME:-}/platform-tools" "${ANDROID_SDK_ROOT:-}/platform-tools"; do
     if [[ -e "$d/adb.real" ]]; then
       rm -f "$d/adb"
       mv "$d/adb.real" "$d/adb"
@@ -60,7 +76,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   done
   echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules"
   echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
-  rmdir "$HOME/.gradle/init.d" "$HOME/.config/corral" 2>/dev/null || true
+  rmdir "$TARGET_HOME/.gradle/init.d" "$TARGET_HOME/.config/corral" 2>/dev/null || true
   exit 0
 fi
 
@@ -69,7 +85,7 @@ detect_java() {
   if [[ -n "$JAVA_ARG" ]]; then j="$JAVA_ARG"
   elif [[ -n "${JAVA_HOME:-}" && -x "$JAVA_HOME/bin/java" ]]; then j="$JAVA_HOME/bin/java"
   elif command -v java >/dev/null 2>&1; then j=$(command -v java)
-  elif [[ -x "$HOME/.sdkman/candidates/java/current/bin/java" ]]; then j="$HOME/.sdkman/candidates/java/current/bin/java"
+  elif [[ -x "$TARGET_HOME/.sdkman/candidates/java/current/bin/java" ]]; then j="$TARGET_HOME/.sdkman/candidates/java/current/bin/java"
   else echo "ERROR: no Java 17+ found. Install JDK 17 or pass --java PATH." >&2; exit 1; fi
   j=$(readlink -f "$j" 2>/dev/null || echo "$j")
   local maj; maj=$("$j" -version 2>&1 | head -1 | sed -n 's/.*version "\([0-9]*\).*/\1/p')
@@ -83,7 +99,7 @@ detect_adb() {
   if [[ -n "$ADB_ARG" ]]; then echo "$ADB_ARG"; return 0; fi
   if [[ -n "${ANDROID_HOME:-}" && -x "$ANDROID_HOME/platform-tools/adb" ]]; then echo "$ANDROID_HOME/platform-tools/adb"; return 0; fi
   if [[ -n "${ANDROID_SDK_ROOT:-}" && -x "$ANDROID_SDK_ROOT/platform-tools/adb" ]]; then echo "$ANDROID_SDK_ROOT/platform-tools/adb"; return 0; fi
-  if [[ -x "$HOME/Android/Sdk/platform-tools/adb" ]]; then echo "$HOME/Android/Sdk/platform-tools/adb"; return 0; fi
+  if [[ -x "$TARGET_HOME/Android/Sdk/platform-tools/adb" ]]; then echo "$TARGET_HOME/Android/Sdk/platform-tools/adb"; return 0; fi
   if command -v adb >/dev/null 2>&1; then command -v adb; return 0; fi
   return 1
 }
@@ -129,7 +145,7 @@ fi
 JAR=$(resolve_jar)
 if [[ -z "$JAR" || ! -f "$JAR" ]]; then echo "ERROR: jar not found at $JAR; pass --jar PATH." >&2; exit 1; fi
 
-echo "==> Installing to $HOME"
+echo "==> Installing to $TARGET_HOME"
 mkdir -p "$CORRAL_HOME" "$BIN_DIR" "$UNIT_DIR"
 cp "$JAR" "$CORRAL_HOME/corral-daemon-all.jar"
 cp "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb";  chmod +x "$BIN_DIR/adb"
@@ -143,15 +159,15 @@ if [[ ! -f "$SCRIPT_DIR/corral-gate.gradle.kts" ]]; then
   echo "ERROR: scripts/corral-gate.gradle.kts missing (incomplete bundle); cannot install the gradle gate" >&2
   exit 1
 fi
-mkdir -p "$HOME/.gradle/init.d" "$HOME/.config/corral"
+mkdir -p "$TARGET_HOME/.gradle/init.d" "$TARGET_HOME/.config/corral"
 CORRAL_SHIM="$BIN_DIR/corral"
 CORRAL_SHIM_ESCAPED=${CORRAL_SHIM//\\/\\\\}
 CORRAL_SHIM_ESCAPED=${CORRAL_SHIM_ESCAPED//&/\\&}
 CORRAL_SHIM_ESCAPED=${CORRAL_SHIM_ESCAPED//#/\\#}
-rm -f "$HOME/.gradle/init.d/corral-gate.gradle"   # remove the pre-Kotlin Groovy gate
-sed "s#@CORRAL_SHIM@#$CORRAL_SHIM_ESCAPED#g" "$SCRIPT_DIR/corral-gate.gradle.kts" > "$HOME/.gradle/init.d/corral-gate.gradle.kts"
-if [[ ! -f "$HOME/.config/corral/gradle-tasks" ]]; then
-  printf 'install.*\nconnected.*AndroidTest\n' > "$HOME/.config/corral/gradle-tasks"
+rm -f "$TARGET_HOME/.gradle/init.d/corral-gate.gradle"   # remove the pre-Kotlin Groovy gate
+sed "s#@CORRAL_SHIM@#$CORRAL_SHIM_ESCAPED#g" "$SCRIPT_DIR/corral-gate.gradle.kts" > "$TARGET_HOME/.gradle/init.d/corral-gate.gradle.kts"
+if [[ ! -f "$TARGET_HOME/.config/corral/gradle-tasks" ]]; then
+  printf 'install.*\nconnected.*AndroidTest\n' > "$TARGET_HOME/.config/corral/gradle-tasks"
 fi
 echo "Installed gradle gate (~/.gradle/init.d/corral-gate.gradle.kts); edit ~/.config/corral/gradle-tasks to change gated tasks"
 
@@ -160,8 +176,8 @@ if [[ ! -f "$SCRIPT_DIR/corral-rules" ]]; then
   echo "ERROR: scripts/corral-rules missing (incomplete bundle); cannot install the gate rules" >&2
   exit 1
 fi
-if [[ ! -f "$HOME/.config/corral/rules" ]]; then
-  cp "$SCRIPT_DIR/corral-rules" "$HOME/.config/corral/rules"
+if [[ ! -f "$TARGET_HOME/.config/corral/rules" ]]; then
+  cp "$SCRIPT_DIR/corral-rules" "$TARGET_HOME/.config/corral/rules"
 fi
 echo "Installed gate rules (~/.config/corral/rules); edit to customize read-only commands and flags"
 
@@ -180,11 +196,13 @@ fi
 
 # Ensure ~/bin is on PATH (the wrapper must precede the SDK dir) and the wrapper
 # knows the real adb path.
-PATH_LINE='export PATH="$HOME/bin:$PATH"'
+RC_HOME='$HOME'
+if [[ "$TARGET_HOME" != "${HOME:-}" ]]; then RC_HOME="$TARGET_HOME"; fi
+PATH_LINE="export PATH=\"$RC_HOME/bin:\$PATH\""
 ADB_LINE="export CORRAL_REAL_ADB=\"$ADB\""
-for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+for rc in "$TARGET_HOME/.bashrc" "$TARGET_HOME/.zshrc"; do
   [[ -f "$rc" ]] || continue
-  if ! grep -q 'HOME/bin' "$rc" 2>/dev/null; then
+  if ! grep -qF "$RC_HOME/bin" "$rc" 2>/dev/null; then
     printf '%s\n' "$PATH_LINE" >> "$rc"
     echo "Added PATH export to $rc (reload your shell or log out/in)"
   fi
@@ -194,7 +212,9 @@ for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
   fi
 done
 
-if systemctl --user daemon-reload 2>/dev/null; then
+if [[ $SANDBOX -eq 1 ]]; then
+  echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
+elif systemctl --user daemon-reload 2>/dev/null; then
   systemctl --user enable corral
   systemctl --user restart corral
   systemctl --user status corral --no-pager

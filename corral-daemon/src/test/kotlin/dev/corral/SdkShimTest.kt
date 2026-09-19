@@ -75,5 +75,12 @@ class SdkShimTest {
         assertEquals(null, SdkShim.ensure(dir.resolve("platform-tools/adb"), wrapperSource))
     }
 
+    @Test
+    fun `shimPathOf maps a real path to its sibling shim and passes others through`() {
+        assertEquals("/sdk/platform-tools/adb", shimPathOf("/sdk/platform-tools/adb.real"))
+        assertEquals("/sdk/platform-tools/adb", shimPathOf("/sdk/platform-tools/adb"))
+        assertEquals("""C:\sdk\platform-tools\adb""", shimPathOf("""C:\sdk\platform-tools\adb.real"""))
+    }
+
     companion object { const val MARKER_CONTENT = "corral adb wrapper" }
 }

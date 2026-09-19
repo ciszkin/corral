@@ -69,4 +69,11 @@ class RulesFileTest {
         assertEquals(DEFAULT_SHELL_SKIP, RulesFile.parse("readonly=devices\n").shellSkip)
         assertEquals(DEFAULT_INIT_FLOOR, RulesFile.parse("shell_skip=bash\ninit_floor=\n").initFloor)
     }
+
+    @Test fun identityEntriesAreLowercasedOnParse() {
+        // entries match the lowercased comm, so an uppercase entry must not be silently dead
+        val r = RulesFile.parse("shell_skip=CMD.EXE, Bash\ninit_floor=SERVICES.EXE\n")
+        assertEquals(setOf("cmd.exe", "bash"), r.shellSkip)
+        assertEquals(setOf("services.exe"), r.initFloor)
+    }
 }

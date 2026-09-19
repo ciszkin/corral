@@ -7,6 +7,9 @@ import java.lang.ProcessHandle
 internal fun commOf(command: String): String =
     command.substringAfterLast('/').substringAfterLast('\\')
 
+/** Walk cap: a cyclic or absurd chain gives up (→ user:$USER) instead of spinning. */
+private const val MAX_ANCESTRY_DEPTH = 128
+
 /**
  * Walk the process chain from [self]'s parent, returning the first non-shell ancestor as
  * (comm, pid, start), or null at the init floor / when the chain is unreadable (→ user:$USER).
@@ -21,10 +24,15 @@ internal fun pickAgentAncestor(
     initFloor: Set<String> = DEFAULT_INIT_FLOOR,
 ): Triple<String, Long, Long>? {
     var pid = parentOf(self) ?: return null
+    var depth = 0
     while (pid > 1) {
+        if (++depth > MAX_ANCESTRY_DEPTH) return null
         val cs = infoOf(pid) ?: return null
-        if (cs.first in initFloor) return null
-        if (cs.first !in shellSkip) return Triple(cs.first, pid, cs.second)
+        // membership matches case-insensitively (Windows keeps on-disk case: CMD.EXE is a
+        // shell); the identity itself carries the comm verbatim
+        val comm = cs.first.lowercase()
+        if (comm in initFloor) return null
+        if (comm !in shellSkip) return Triple(cs.first, pid, cs.second)
         pid = parentOf(pid) ?: return null
     }
     return null

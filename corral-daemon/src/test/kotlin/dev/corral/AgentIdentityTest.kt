@@ -17,6 +17,14 @@ class AgentIdentityTest {
         assertEquals(Triple("claude.exe", 30L, 2L), pickAgentAncestor(100, parent::get, info::get))
     }
 
+    @Test fun skipListsMatchCaseInsensitivelyButIdentityKeepsCase() {
+        // Windows preserves on-disk case: a renamed CMD.EXE is still a shell, while the
+        // identity string carries the comm verbatim
+        val parent = mapOf(100L to 50L, 50L to 30L)
+        val info = mapOf(50L to ("CMD.EXE" to 1L), 30L to ("Agent.exe" to 2L))
+        assertEquals(Triple("Agent.exe", 30L, 2L), pickAgentAncestor(100, parent::get, info::get))
+    }
+
     @Test fun stopsAtInitFloor() {
         val parent = mapOf(100L to 30L, 30L to 1L)
         assertNull(pickAgentAncestor(100, parent::get, { "systemd" to 5L }))
@@ -26,6 +34,10 @@ class AgentIdentityTest {
         val parent = mapOf(100L to 30L)
         assertNull(pickAgentAncestor(100, parent::get, { "services.exe" to 3L }))
     }
+
+    @Test fun cyclicChainStopsAtTheDepthCap() =
+        // a self-parenting fake would spin forever without the cap; null -> user:$USER
+        assertNull(pickAgentAncestor(100, { 50L }, { "bash" to 1L }))
 
     @Test fun unreadableChainIsNull() =
         assertNull(pickAgentAncestor(100, { 50L }, { null }))

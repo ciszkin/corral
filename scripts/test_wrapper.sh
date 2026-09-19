@@ -190,6 +190,25 @@ check "identity agreement: cli and wrapper resolve the same owner" bash -c '
   exit 0
 '
 
+# where /proc is absent (macOS/Windows hosts) the wrapper cannot walk the tree itself; it
+# delegates identity to `corral owner` (the CLI's walk), so the owner it checks with is the
+# one the delegate reports — and a disagreeing delegate is denied
+check "no-proc host: wrapper delegates identity to corral owner" bash -c '
+  mkdir -p "$TMP/noproc" "$TMP/fakebin"
+  printf "#!/bin/sh\necho delegated-owner\n" > "$TMP/fakebin/corral"; chmod +x "$TMP/fakebin/corral"
+  curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
+    -d "{\"selector\":{\"serial\":\"dev2\"},\"owner\":\"delegated-owner\"}" >/dev/null || exit 1
+  rc=0
+  PATH="$TMP/fakebin:$PATH" CORRAL_PROC_ROOT="$TMP/noproc" env -u CORRAL_OWNER \
+    "$TMP/bin/adb" -s dev2 shell ls >/dev/null 2>&1 || rc=1
+  printf "#!/bin/sh\necho someone-else\n" > "$TMP/fakebin/corral"
+  PATH="$TMP/fakebin:$PATH" CORRAL_PROC_ROOT="$TMP/noproc" env -u CORRAL_OWNER \
+    "$TMP/bin/adb" -s dev2 shell ls >/dev/null 2>&1 && rc=1
+  curl -sf -X DELETE "$CORRAL_URL/api/leases/dev2" -H "Content-Type: application/json" \
+    -d "{\"owner\":\"delegated-owner\"}" >/dev/null
+  exit $rc
+'
+
 # blank identity keys fall back to the built-in lists in both readers; an emptied shell_skip
 # would make the wrapper resolve proc:bash:* where the CLI skips bash, breaking the lease check
 check "blank identity keys keep defaults in both readers" bash -c '
@@ -200,6 +219,22 @@ check "blank identity keys keep defaults in both readers" bash -c '
   CORRAL_RULES="$d/rules" env -u CORRAL_OWNER "$TMP/bin/adb" -s "$s" shell ls 2>&1 | grep -q fake-adb || exit 1
   CORRAL_RULES="$d/rules" env -u CORRAL_OWNER corral free "$s" >/dev/null || exit 1
   exit 0
+'
+
+# identity entries in the rules file match the lowercased comm in both readers: an uppercase
+# shell_skip entry must still skip that process, not be silently dead (a dead entry would make
+# the wrapper resolve proc:python3:* where the claim saw the agent above it)
+check "rules identity entries match case-insensitively in both readers" bash -c '
+  d="$TMP/case-rules"; mkdir -p "$d"
+  printf "readonly=devices\nvalueflags=-P\nshell_skip=bash,sh,env,PYTHON3\n" > "$d/rules"
+  s=$(CORRAL_RULES="$d/rules" env -u CORRAL_OWNER corral claim 2>/dev/null) || exit 1
+  [ -n "$s" ] || exit 1
+  rc=0
+  CORRAL_RULES="$d/rules" env -u CORRAL_OWNER \
+    python3 -c "import subprocess,sys; raise SystemExit(subprocess.run(sys.argv[1:]).returncode)" \
+    "$TMP/bin/adb" -s "$s" shell ls >/dev/null 2>&1 || rc=1
+  CORRAL_RULES="$d/rules" env -u CORRAL_OWNER corral free "$s" >/dev/null 2>&1
+  exit $rc
 '
 
 # drift guard: for each argv the bash wrapper's verdict must equal `corral gate`'s
@@ -238,6 +273,25 @@ check "corral claim <serial> claims the pinned device" bash -c '
 
 check "corral doctor reports daemon status" bash -c '
   corral doctor 2>&1 | grep -q "daemon: ok"
+'
+
+# a daemon whose configured adb no longer exists must FAIL doctor rather than silently pass
+# this shell's own SDK tree (a fallback chain used to mask the stale daemon config)
+check "doctor fails on the daemon's stale adb, not the shell's tree" bash -c '
+  setsid env CORRAL_ADB="$TMP/gone/adb.real" CORRAL_FAKE_DEVICES="$TMP/fake-devices" \
+    CORRAL_DB="$TMP/corral2.db" CORRAL_PORT=8800 java -Dcorral.test.tag=doctor-stale -jar "$CORRAL_JAR" \
+    </dev/null >"$TMP/daemon2.log" 2>&1 &
+  d2=$!
+  up=0
+  for i in $(seq 1 30); do
+    curl -sf http://127.0.0.1:8800/api/devices >/dev/null 2>&1 && { up=1; break; }; sleep 0.2
+  done
+  [ $up -eq 1 ] || { kill $d2 2>/dev/null; cat "$TMP/daemon2.log" >&2; exit 1; }
+  out=$(CORRAL_URL=http://127.0.0.1:8800 corral doctor 2>&1); rc=$?
+  kill $d2 2>/dev/null
+  [ $rc -ne 0 ] || { echo "doctor exited 0 (stale adb passed): $out" >&2; exit 1; }
+  echo "$out" | grep -q "the daemon.s configured adb" || { echo "no daemon note in: $out" >&2; exit 1; }
+  exit 0
 '
 
 check "corral owner prints a resolved identity" bash -c '

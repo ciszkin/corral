@@ -24,6 +24,9 @@ data class GateRules(
     val initFloor: Set<String> = DEFAULT_INIT_FLOOR,
 ) {
     companion object {
+        /** Unreadable-file result: gate keys empty (fail closed) AND identity keys empty by
+         *  design — `CorralCli.agentAncestor` refills the identity defaults, so a bare read of
+         *  `rules.shellSkip` on an unreadable file gets the fallback tier, not the defaults. */
         val EMPTY = GateRules(emptySet(), emptySet(), emptySet(), emptySet())
     }
 }
@@ -49,11 +52,13 @@ object RulesFile {
                 it.substringBefore('=').trim().lowercase() to
                     it.substringAfter('=').split(',').map(String::trim).filter(String::isNotEmpty).toSet()
             }
+        // identity entries match the lowercased comm, so they are lowercased on parse — an
+        // uppercase entry would be silently dead otherwise (gate keys stay verbatim: -P is not -p)
         return GateRules(
             keys["readonly"] ?: emptySet(),
             keys["valueflags"] ?: emptySet(),
-            keys["shell_skip"]?.takeIf { it.isNotEmpty() } ?: DEFAULT_SHELL_SKIP,
-            keys["init_floor"]?.takeIf { it.isNotEmpty() } ?: DEFAULT_INIT_FLOOR)
+            keys["shell_skip"]?.takeIf { it.isNotEmpty() }?.map(String::lowercase)?.toSet() ?: DEFAULT_SHELL_SKIP,
+            keys["init_floor"]?.takeIf { it.isNotEmpty() }?.map(String::lowercase)?.toSet() ?: DEFAULT_INIT_FLOOR)
     }
 
     fun load(path: Path = defaultPath()): GateRules =

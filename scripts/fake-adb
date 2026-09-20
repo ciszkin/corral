@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# fake adb: getprop-backed enrichment + a shell echo. Answers for any -s serial.
+args=("$@"); ser=""; sub=""; i=0
+while [ $i -lt ${#args[@]} ]; do
+  case "${args[$i]}" in
+    -s) i=$((i+1)); ser="${args[$i]:-}";;
+    -s*) ser="${args[$i]#-s}";;
+    -*) ;;
+    *) [ -z "$sub" ] && sub="${args[$i]}";;
+  esac; i=$((i+1))
+done
+last=""
+[ ${#args[@]} -gt 0 ] && last="${args[${#args[@]}-1]}"
+# env override lets a test simulate enrichment failure for one serial
+if [ "$ser" = "${FAKE_ADB_FAIL_SERIAL:-__none__}" ]; then exit 1; fi
+case "$sub" in
+  shell)
+    case "$last" in
+      # DeviceMonitor.enrich passes both getprops in one shell payload; answer two lines
+      *getprop*) printf '%s\n%s\n' "${FAKE_ADB_MODEL:-Pixel_6}" "${FAKE_ADB_OS:-13}";;
+      *) echo "fake-adb $*";;
+    esac;;
+  emu) echo "${FAKE_ADB_AVD:-Pixel6AVD}";;
+  getprop)
+    case "$last" in
+      ro.product.model) echo "${FAKE_ADB_MODEL:-Pixel_6}";;
+      ro.build.version.release) echo "${FAKE_ADB_OS:-13}";;
+    esac;;
+  *) exit 0;;
+esac

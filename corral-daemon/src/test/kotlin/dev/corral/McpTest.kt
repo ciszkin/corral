@@ -5,9 +5,11 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import io.ktor.server.testing.testApplication
 import io.modelcontextprotocol.kotlin.sdk.ExperimentalMcpApi
 import io.modelcontextprotocol.kotlin.sdk.client.Client
@@ -24,8 +26,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
@@ -230,17 +234,39 @@ class McpTest {
     }
 
     @Test
+    fun queueParityMatchesApi() = testApplication {
+        val env = testDaemon(devices)
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val s = corralMcpServer(env, sessions)
+        val mcp = harness(sessions, s, "queue-parity")
+        suspend fun claim(owner: String, wait: Boolean) = client.post("/api/leases") {
+            header(HttpHeaders.Host, "127.0.0.1:8798")
+            contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"$owner"${if (wait) ",\"waitSeconds\":60" else ""}}""")
+        }
+        claim("holder", wait = false)
+        claim("waiter", wait = true)
+
+        val viaApi = Json.parseToJsonElement(
+            client.get("/api/queue") { header(HttpHeaders.Host, "127.0.0.1:8798") }.bodyAsText())
+        assertEquals(1, viaApi.jsonArray.size)
+        val viaMcp = Json.parseToJsonElement(
+            mcp.tool("queue", obj()).content.filterIsInstance<TextContent>().single().text)
+        assertEquals(viaApi, viaMcp)
+        mcp.close(); s.close()
+    }
+
+    @Test
     fun mcpRoutesCoexistWithApi() = testApplication {
-        val env = AppEnv({ devices }, LeaseManager({ devices }, db = null))
-        application { corralModule(env); installMcp(env) }
-        assertEquals(HttpStatusCode.OK, client.get("/api/devices").status)
-        assertEquals(HttpStatusCode.MethodNotAllowed, client.get("/mcp").status)
+        testDaemon(devices)
+        suspend fun get(path: String) = client.get(path) { header(HttpHeaders.Host, "127.0.0.1:8798") }
+        assertEquals(HttpStatusCode.OK, get("/api/devices").status)
+        assertEquals(HttpStatusCode.MethodNotAllowed, get("/mcp").status)
     }
 
     @Test
     fun guardAllowsLocalHostsAndRejectsForeign() = testApplication {
-        val env = AppEnv({ devices }, LeaseManager({ devices }, db = null))
-        application { guardLocalHost(); corralModule(env) }
+        testDaemon(devices)
         suspend fun req(host: String) = client.get("/api/devices") { header(HttpHeaders.Host, host) }
         assertEquals(HttpStatusCode.OK, req("127.0.0.1:8798").status)
         assertEquals(HttpStatusCode.OK, req("localhost:8798").status)

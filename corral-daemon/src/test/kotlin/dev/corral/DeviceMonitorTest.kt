@@ -1,12 +1,22 @@
 package dev.corral
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import java.io.File
 import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class DeviceMonitorTest {
+    private val fakeAdb: File
+        get() {
+            var d: File? = File(System.getProperty("user.dir")).absoluteFile
+            while (d != null && !File(d, "scripts/fake-adb").exists()) d = d.parentFile
+            return d?.resolve("scripts/fake-adb")
+                ?: error("scripts/fake-adb not found above ${System.getProperty("user.dir")}")
+        }
+
     @Test fun parsesFullSnapshotMessages() {
         val payload = "dev1\tdevice\n192.168.1.5:5555\toffline\nemulator-5554\tdevice\n"
         val hex = payload.length.toString(16).padStart(4, '0')
@@ -18,6 +28,64 @@ class DeviceMonitorTest {
     @Test fun transportClassified() {
         val d = TrackParser.parse("0011emulator-1\tdevice").first().let { Device(it.first, it.second) }
         assertEquals("emulator", d.transport)
+        assertEquals("wifi", Device("192.168.1.5:5555", "device").transport)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun zeroDevicesEmptyAndClaimFails() = runTest {
+        val dir = createTempDirectory("corral").toFile()
+        val f = dir.resolve("devices")
+        f.writeText("")
+        val m = DeviceMonitor(fakeAdb.path, f.path, backgroundScope)
+        m.start()
+        runCurrent()
+        assertTrue(m.devices.isEmpty())
+
+        // the same empty inventory at the lease seam: no device to claim, and the
+        // requestClaim failure the CLI renders as "no connected device matches"
+        val lm = LeaseManager({ emptyList() }, null, { 1000L })
+        assertNull(lm.claim("dev1", "agentA"))
+        val busy = runCatching { lm.requestClaim(Selector(serial = "dev1"), "agentA") }
+            .exceptionOrNull() as LeaseBusyException
+        assertEquals(0, busy.matching)
+        assertTrue(busy.busy.isEmpty())
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun fixtureEditsAppearAndDisappear() = runTest {
+        val dir = createTempDirectory("corral").toFile()
+        val f = dir.resolve("devices")
+        f.writeText("dev1 device\ndev2 device\n")
+        val m = DeviceMonitor(fakeAdb.path, f.path, backgroundScope)
+        m.start()
+        runCurrent()
+        assertEquals(listOf("dev1", "dev2"), m.devices.map { it.serial })
+
+        f.writeText("dev1 device\ndev3 device\n")          // dev3 connects, dev2 disconnects
+        advanceTimeBy(2001); runCurrent()
+        assertEquals(listOf("dev1", "dev3"), m.devices.map { it.serial })
+
+        f.writeText("dev3 device\n")                       // dev1 disconnects
+        advanceTimeBy(2001); runCurrent()
+        assertEquals(listOf("dev3"), m.devices.map { it.serial })
+
+        f.writeText("dev1 device\n")                       // dev1 reconnects, same serial
+        advanceTimeBy(2001); runCurrent()
+        assertEquals(listOf("dev1"), m.devices.map { it.serial })   // exactly one entry, not a duplicate
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun unauthorizedAndOfflineExcluded() = runTest {
+        val dir = createTempDirectory("corral").toFile()
+        val f = dir.resolve("devices")
+        f.writeText("dev1 unauthorized\ndev2 offline\ndev3 device\n")
+        val m = DeviceMonitor(fakeAdb.path, f.path, backgroundScope)
+        m.start()
+        runCurrent()
+        val bySerial = m.devices.associateBy { it.serial }
+        assertFalse(bySerial.getValue("dev1").usable())
+        assertFalse(bySerial.getValue("dev2").usable())
+        assertTrue(bySerial.getValue("dev3").usable())
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -36,5 +104,37 @@ class DeviceMonitorTest {
         val emu = m.devices.first { it.serial == "emulator-5554" }
         assertEquals("emulator", emu.transport); assertEquals("Pixel6AVD", emu.avd)
         assertTrue(fired >= 1)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun emulatorAvdPopulated() = runTest {
+        val dir = createTempDirectory("corral").toFile()
+        val f = dir.resolve("devices")
+        f.writeText("emulator-5554 device\n")
+        val m = DeviceMonitor(fakeAdb.path, f.path, backgroundScope)
+        m.start()
+        runCurrent()
+        val emu = m.devices.first { it.serial == "emulator-5554" }
+        assertEquals("emulator", emu.transport)
+        assertEquals("Pixel_6", emu.model)
+        assertEquals("13", emu.osVersion)
+        assertEquals("Pixel6AVD", emu.avd)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun enrichmentFailureStillLists() = runTest {
+        val dir = createTempDirectory("corral").toFile()
+        val f = dir.resolve("devices")
+        f.writeText("emulator-5554 device\n")
+        // a wrapper injects the fail serial into the fake adb's env (System.getenv can't be changed)
+        val failing = dir.resolve("fake-adb-fail")
+        failing.writeText("#!/usr/bin/env bash\nFAKE_ADB_FAIL_SERIAL=emulator-5554 exec '${fakeAdb.path}' \"\$@\"\n")
+        failing.setExecutable(true)
+        val m = DeviceMonitor(failing.path, f.path, backgroundScope)
+        m.start()
+        runCurrent()
+        val emu = m.devices.first { it.serial == "emulator-5554" }
+        assertEquals("device", emu.state)
+        assertNull(emu.model)
     }
 }

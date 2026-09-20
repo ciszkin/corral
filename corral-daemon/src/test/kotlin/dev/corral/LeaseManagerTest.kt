@@ -115,6 +115,12 @@ class LeaseManagerTest {
         assertEquals(setOf("dev1"), mgr.snapshot.keys)
     }
 
+    @Test fun sameOwnerReclaimIsRefused() = runTest {
+        val mgr = freshMgr()
+        mgr.claim("dev1", "agentA")
+        assertFailsWith<LeaseBusyException> { mgr.claim("dev1", "agentA") }
+    }
+
     @Test fun claimAnyPicksFirstFreeThenReportsBusy() = runTest {
         val mgr = freshMgr()
         assertEquals("dev1", mgr.claimAny("agentA")?.serial)

@@ -30,3 +30,18 @@ jobs:
 
       - name: Build runnable jar
         run: ./gradlew :corral-daemon:shadowJar
+
+      - name: Wrapper integration suite
+        run: bash scripts/test_wrapper.sh
+
+      - name: Daemon e2e suite
+        run: bash scripts/test_e2e.sh
+
+      - name: Install sandbox suite
+        run: bash scripts/test_install.sh
+
+      - name: Mirror and verify installer bundle
+        run: bash scripts/make-installer.sh
+
+      - name: Installer bundle drift check
+        run: bash scripts/make-installer.sh --check

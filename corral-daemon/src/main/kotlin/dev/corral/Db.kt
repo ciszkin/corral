@@ -53,4 +53,10 @@ class Db(file: Path) {
     fun countHistory(): Int = conn.createStatement().use { s ->
         s.executeQuery("SELECT COUNT(*) FROM history").use { it.next(); it.getInt(1) }
     }
+
+    fun history(): List<String> = conn.createStatement().use { s ->
+        s.executeQuery("SELECT event FROM history ORDER BY id ASC").use { rs ->
+            buildList { while (rs.next()) add(rs.getString(1)) }
+        }
+    }
 }

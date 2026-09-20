@@ -1,10 +1,21 @@
 package dev.corral
 
 import java.sql.DriverManager
+import kotlinx.coroutines.test.runTest
 import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class DbTest {
+    @Test fun freshDbIsCreatedEmpty() {
+        val dir = createTempDirectory("corral")
+        val f = dir.resolve("fresh.db")
+        assertFalse(f.toFile().exists())
+        val db = Db(f)
+        assertTrue(f.toFile().exists())
+        assertTrue(db.loadLeases().isEmpty())
+        assertEquals(0, db.countHistory())
+    }
+
     @Test fun roundTripAndDelete() {
         val dir = createTempDirectory("corral")
         val db = Db(dir.resolve("t.db"))
@@ -18,12 +29,25 @@ class DbTest {
         assertTrue(db.loadLeases().isEmpty())
     }
 
-    @Test fun historyAppends() {
+    @Test fun historyAppends() = runTest {
         val dir = createTempDirectory("corral")
         val db = Db(dir.resolve("t.db"))
-        db.log("claim", "dev1", "agentA", "ttl=1800")
-        db.log("free", "dev1", "agentA", null)
-        assertEquals(2, db.countHistory())
+        var now = 1500L
+        val devices = listOf(Device("dev1", "device"), Device("dev2", "device"))
+        val m = LeaseManager({ devices }, db, { now })
+        m.claim("dev1", "agentA")                       // claim
+        m.claim("dev2", "agentB", ttl = 10)
+        val t = m.enqueue(Selector(serial = "dev1"), "agentW", 0, 1800, waitSeconds = 600)  // enqueue
+        m.free("dev1", "agentA")                        // free, then offer dev1 to the ticket
+        m.cancelTicket(t.id, "agentW")                  // dequeue
+        now += 11
+        m.sweep()                                       // dev2 expired -> expire
+
+        val events = db.history()
+        assertEquals(
+            listOf("claim", "claim", "enqueue", "free", "offer", "dequeue", "expire"), events)
+        assertEquals(setOf("claim", "free", "enqueue", "offer", "dequeue", "expire"), events.toSet())
+        assertEquals(events.size, db.countHistory())
     }
 
     @Test fun offeredAtRoundTrip() {

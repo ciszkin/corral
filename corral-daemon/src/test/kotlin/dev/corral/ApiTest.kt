@@ -12,6 +12,13 @@ import io.ktor.http.contentType
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 import kotlin.test.*
@@ -32,6 +39,12 @@ class ApiTest {
 
     private fun withApi(leases: LeaseManager, block: suspend CoroutineScope.(HttpClient) -> Unit) =
         testApplication { corral(leases); CoroutineScope(coroutineContext).block(client) }
+
+    private fun withApi(devices: List<Device>, block: suspend CoroutineScope.(HttpClient) -> Unit) =
+        testApplication {
+            application { corralModule(AppEnv({ devices }, LeaseManager({ devices }, db = null))) }
+            CoroutineScope(coroutineContext).block(client)
+        }
 
     @Test fun devicesListed() = withApi { c ->
         assertEquals(HttpStatusCode.OK, c.get("/api/devices").status)
@@ -104,6 +117,29 @@ class ApiTest {
         val r = c.get("/api/status")
         assertEquals(HttpStatusCode.OK, r.status)
         assertTrue(r.bodyAsText().contains("\"serial\":\"dev1\""))
+    }
+
+    @Test fun freeAllOnlyOwned() = withApi(
+        listOf(Device("dev1", "device"), Device("dev2", "device"), Device("dev3", "device"))
+    ) { c ->
+        suspend fun claim(serial: String, owner: String) = c.post("/api/leases") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"$serial"},"owner":"$owner"}""") }
+        suspend fun status() = Json.decodeFromString<StatusResponse>(c.get("/api/status").bodyAsText())
+
+        claim("dev1", "agentA"); claim("dev2", "agentA"); claim("dev3", "agentB")
+
+        // mirrors the CLI `free --all` loop: read status, DELETE every serial the caller owns
+        val owned = status().devices.filter { it.lease?.owner == "agentA" }.map { it.serial }
+        owned.forEach { serial ->
+            c.delete("/api/leases/$serial") {
+                contentType(ContentType.Application.Json); setBody("""{"owner":"agentA"}""") }
+        }
+
+        val after = status()
+        assertNull(after.devices.first { it.serial == "dev1" }.lease)
+        assertNull(after.devices.first { it.serial == "dev2" }.lease)
+        assertEquals("agentB", after.devices.first { it.serial == "dev3" }.lease?.owner)
     }
 
     @Test fun modelSelectorClaimsMatchingDevice() = withApi { c ->
@@ -266,6 +302,77 @@ class ApiTest {
             setBody("""{"selector":{},"owner":"waiter","waitSeconds":60}""") }
         assertEquals(HttpStatusCode.Accepted, enq.status)
         assertTrue(c.get("/api/queue").bodyAsText().contains("\"owner\":\"waiter\""))
+    }
+
+    @Test fun malformedJsonIsClientError() = withApi { c ->
+        val r = c.post("/api/leases") { contentType(ContentType.Application.Json); setBody("{not json") }
+        assertTrue(r.status.value in 400..499, "malformed JSON must be a 4xx, got ${r.status}")
+    }
+
+    @Test fun unknownSerialClaimFreeRenew() = withApi { c ->
+        val claim = c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"zzz"},"owner":"agentA"}""") }
+        assertEquals(HttpStatusCode.Conflict, claim.status)
+        assertTrue(claim.bodyAsText().contains("\"matching\":0"))
+
+        val free = c.delete("/api/leases/zzz") { contentType(ContentType.Application.Json)
+            setBody("""{"owner":"agentA"}""") }
+        assertEquals(HttpStatusCode.OK, free.status)
+        assertTrue(free.bodyAsText().contains("\"freed\":true"))
+
+        val renew = c.post("/api/leases/zzz/renew") { contentType(ContentType.Application.Json)
+            setBody("""{"owner":"agentA"}""") }
+        assertEquals(HttpStatusCode.Conflict, renew.status)
+        assertTrue(renew.bodyAsText().contains("no lease on zzz"))
+    }
+
+    @Test fun routeShapesStable() = withApi { c ->
+        val devices = Json.parseToJsonElement(c.get("/api/devices").bodyAsText()).jsonArray
+        val dev = devices.first().jsonObject
+        assertTrue(dev["serial"] is JsonPrimitive && dev["serial"]!!.jsonPrimitive.isString)
+        assertTrue(dev["state"] is JsonPrimitive && dev["state"]!!.jsonPrimitive.isString)
+
+        val status = Json.parseToJsonElement(c.get("/api/status").bodyAsText()).jsonObject
+        assertTrue(status["devices"] is JsonArray)
+        assertTrue(status["adb"] is JsonPrimitive && status["adb"]!!.jsonPrimitive.isString)
+        val ds = status["devices"]!!.jsonArray.first().jsonObject
+        assertTrue(ds["serial"] is JsonPrimitive && ds["serial"]!!.jsonPrimitive.isString)
+        assertTrue(ds.containsKey("lease"))
+
+        // enqueue one ticket so the queue entry shape is pinned, not just "empty array"
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{},"owner":"waiter","waitSeconds":60}""") }
+        val queue = Json.parseToJsonElement(c.get("/api/queue").bodyAsText()).jsonArray
+        val q = queue.first().jsonObject
+        assertTrue(q["position"] is JsonPrimitive && q["position"]!!.jsonPrimitive.content.toLongOrNull() != null)
+        assertTrue(q["owner"] is JsonPrimitive && q["owner"]!!.jsonPrimitive.isString)
+        assertTrue(q["selector"] is JsonPrimitive && q["selector"]!!.jsonPrimitive.isString)
+        assertTrue(q["waitedSeconds"] is JsonPrimitive && q["waitedSeconds"]!!.jsonPrimitive.content.toLongOrNull() != null)
+        assertTrue(q["deadlineIn"] is JsonPrimitive && q["deadlineIn"]!!.jsonPrimitive.content.toLongOrNull() != null)
+
+        val check = Json.parseToJsonElement(c.get("/api/check?serial=dev1&owner=nobody").bodyAsText()).jsonObject
+        assertEquals("false", check["allowed"]!!.jsonPrimitive.content)
+        assertTrue(check["reason"] is JsonPrimitive && check["reason"]!!.jsonPrimitive.isString)
+    }
+
+    @Test fun checkIndependentOfQueueState() {
+        val leases = LeaseManager(testDevices, db = null)
+        withApi(leases) { c ->
+            suspend fun post(body: String) = c.post("/api/leases") {
+                contentType(ContentType.Application.Json); setBody(body) }
+            post("""{"selector":{"serial":"dev1"},"owner":"holder"}""")
+            post("""{"selector":{"serial":"dev1"},"owner":"waiter","waitSeconds":60}""")
+            c.delete("/api/leases/dev1") { contentType(ContentType.Application.Json)
+                setBody("""{"owner":"holder"}""") }
+
+            assertTrue(leases.snapshot["dev1"]!!.pendingAccept)   // the queued ticket holds dev1
+
+            val foreign = Json.parseToJsonElement(
+                c.get("/api/check?serial=dev1&owner=someone-else").bodyAsText()).jsonObject
+            assertEquals("false", foreign["allowed"]!!.jsonPrimitive.content)
+            assertTrue(foreign["reason"]!!.jsonPrimitive.content.contains("waiter"))
+            assertTrue(leases.snapshot["dev1"]!!.pendingAccept)   // a foreign check does not touch the offer
+        }
     }
 
     private fun String.ticketOf() = substringAfter("\"ticket\":\"").substringBefore("\"")

@@ -50,6 +50,21 @@ class QueueTest {
         assertEquals("dev1", (m.poll(t.id, "W") as Poll.Offered).lease.serial)
     }
 
+    @Test fun pidDeathHandsDeviceToTicket() = runTest {
+        val m = mgr()
+        val victim = ProcessBuilder("sleep", "60").start()
+        try {
+            m.claim("dev1", "A", pid = victim.pid(), ttl = 99999); m.claim("dev2", "B")
+            val t = m.enqueue(Selector(), "W", 0, 1800, waitSeconds = 600)
+            assertTrue(m.poll(t.id, "W") is Poll.Queued)   // holder alive: no offer yet
+            victim.destroyForcibly(); victim.waitFor()     // holder pid dies
+            m.sweep()                                      // pid-liveness reclaim -> ticket offered
+            assertEquals("dev1", (m.poll(t.id, "W") as Poll.Offered).lease.serial)
+        } finally {
+            victim.destroyForcibly()
+        }
+    }
+
     @Test fun directClaimCannotOvertakeQueuedTicket() = runTest {
         val m = mgr()
         m.claim("dev1", "A", ttl = 10); m.claim("dev2", "B")
@@ -317,6 +332,16 @@ class QueueTest {
         assertTrue(m.queueSnapshot().any { it.owner == "quiet" })   // skipped, not dropped
         m.free("dev1", "live")
         assertEquals("quiet", (m.poll(quiet.id, "quiet") as Poll.Offered).lease.owner)  // alive after refreshing
+    }
+
+    @Test fun pausedTicketLosesOfferToDirectClaim() = runTest {
+        val m = mgr()
+        m.claim("dev1", "A")
+        m.enqueue(Selector(serial = "dev1"), "quiet", 0, 1800, waitSeconds = 600)
+        now += STALE_POLLS * DEFAULT_RETRY_AFTER_MS / 1000 + 1   // past the 3 s stale window, under 30 s silence
+        m.free("dev1", "A"); runCurrent()
+        assertEquals("Sneaky", m.claim("dev1", "Sneaky")?.owner)   // paused ticket does not shield the device
+        assertTrue(m.queueSnapshot().any { it.owner == "quiet" })  // keeps position, not dropped
     }
 
     @Test fun subMinimumCadenceClampsToOneSecond() = runTest {

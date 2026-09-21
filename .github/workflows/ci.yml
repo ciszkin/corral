@@ -35,7 +35,7 @@ jobs:
         run: bash scripts/test_wrapper.sh
 
       - name: Daemon e2e suite
-        run: bash scripts/test_e2e.sh
+        run: SLOW=1 bash scripts/test_e2e.sh
 
       - name: Install sandbox suite
         run: bash scripts/test_install.sh

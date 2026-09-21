@@ -8,12 +8,21 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlin.system.exitProcess
 
 fun main() {
     val port = System.getenv("CORRAL_PORT")?.toInt() ?: 8798
     val dbPath = System.getenv("CORRAL_DB")?.let { Path.of(it) }
         ?: Path.of(System.getProperty("user.home"), ".corral", "corral.db") // one portable state dir on every OS
     dbPath.parent?.let { Files.createDirectories(it) }
+    // Refuse a second daemon on the same DB: each would keep its own in-memory leases over one
+    // SQLite file and double-lease. The OS drops the lock on crash, so a dead daemon never blocks.
+    // Keep the returned reference for the process lifetime — an unreferenced FileLock can be
+    // collected, which would release it.
+    val dbLock = DbLock.acquire(dbPath) ?: run {
+        System.err.println("corral: another daemon already holds $dbPath — refusing to start (two daemons must not share one CORRAL_DB)")
+        exitProcess(1)
+    }
     val adb = System.getenv("CORRAL_ADB") ?: "adb"
     val db = Db(dbPath)
     val scope = CoroutineScope(Dispatchers.IO)

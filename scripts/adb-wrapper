@@ -3,6 +3,12 @@
 # the hook catches absolute-path adb calls, this shim catches PATH-resolved ones.
 # Install: cp scripts/adb-wrapper ~/bin/adb && chmod +x ~/bin/adb   (~/bin must precede the SDK dir on PATH)
 # Needs bash 4+ (case-modifier expansions); stock macOS /bin/bash is 3.2 — install a newer bash first.
+# Guard before the first ${var,,} so a 3.2 host gets this sentence, not a parse error.
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
+  printf 'corral: adb-wrapper needs bash 4+ (found %s); stock macOS /bin/bash is 3.2 — install a newer bash first.\n' \
+    "${BASH_VERSION:-unknown}" >&2
+  exit 1
+fi
 set -u
 CORRAL_URL=${CORRAL_URL:-http://127.0.0.1:8798}
 # the real adb: explicit CORRAL_REAL_ADB, else the adb.real sibling when this script is

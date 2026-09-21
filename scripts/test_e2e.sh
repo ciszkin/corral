@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # corral process-level e2e suite (L2): daemon lifecycle, queue timing, signal handling.
 # Complements scripts/test_wrapper.sh; it covers only what that suite does NOT (no duplicate
-# 1.13/5.2/5.7/5.13/gate/identity cases). Source-tree only: it needs the built shadow jar.
+# 1.13/5.2/5.7/5.13/gate/identity cases).
+#
+# Runs from the source tree (rebuilds the jar) and from the deployed bundle (uses the jar beside
+# this script): the bundle has no gradle project and no scripts/ subdirectory.
 #
 # Isolation: every path is redirected into a mktemp tree (CORRAL_DB/CORRAL_RULES/
 # CORRAL_FAKE_DEVICES/CORRAL_ADB); nothing touches ~/.corral, ~/.config/corral or a real
@@ -10,26 +13,31 @@
 set -u
 
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-ROOT=$(cd "$SELF/.." && pwd)
-JAR="$ROOT/corral-daemon/build/libs/corral-daemon-all.jar"
+if [ -f "$SELF/corral-daemon-all.jar" ] && [ -f "$SELF/adb-wrapper" ]; then
+  SRC="$SELF"; ROOT=""; JAR="$SELF/corral-daemon-all.jar"; BUILD=0
+else
+  SRC="$SELF"; ROOT=$(cd "$SELF/.." && pwd); JAR="$ROOT/corral-daemon/build/libs/corral-daemon-all.jar"; BUILD=1
+fi
 PORT="${E2E_PORT:-8801}"                 # wrapper suite owns 8799; never reuse it
 CORRAL_URL="http://127.0.0.1:$PORT"
 STALE_S=$((3 * 5000 / 1000))            # MCP cadence 5000ms x STALE_POLLS=3 -> 15s
 
-pass=0; fail=0
+pass=0; fail=0; skipped=0
 check() { # check <name> <cond...>
   local name="$1"; shift
   if "$@"; then printf 'ok %d %s\n' "$((++pass))" "$name"
   else printf 'FAIL %d %s\n' "$((++fail))" "$name"; fi
 }
-skip() { printf 'ok %d %s (skipped; set SLOW=1)\n' "$((++pass))" "$1"; }
+skip() { printf 'skip %d %s (set SLOW=1 to run)\n' "$((++skipped))" "$1"; }
 
 ms_now() { date +%s%N; }
 elapsed_ms() { echo $(( ($2 - $1) / 1000000 )); }
 
 # --- setup ---
-(cd "$ROOT" && ./gradlew :corral-daemon:shadowJar >/dev/null 2>&1) || { echo "build failed"; exit 1; }
-[ -f "$JAR" ] || { echo "jar not found: $JAR (run from the source tree)"; exit 1; }
+if [ "$BUILD" = 1 ]; then
+  (cd "$ROOT" && ./gradlew :corral-daemon:shadowJar >/dev/null 2>&1) || { echo "build failed"; exit 1; }
+fi
+[ -f "$JAR" ] || { echo "jar not found: $JAR (run from the source tree or beside corral-daemon-all.jar)"; exit 1; }
 
 for p in "$PORT" "$((PORT + 1))"; do
   if curl -s --max-time 1 "http://127.0.0.1:$p/api/devices" >/dev/null 2>&1; then
@@ -50,9 +58,9 @@ trap cleanup EXIT
 mkdir -p "$TMP/bin" "$TMP/sdk/platform-tools" "$TMP/bind"
 printf 'dev1 device Pixel_6 13\ndev2 device SM-S918B 13\n' > "$TMP/fake-devices"
 printf '#!/bin/sh\necho "fake-adb $@"\n' > "$TMP/fake-adb"; chmod +x "$TMP/fake-adb"
-cp "$SELF/adb-wrapper" "$TMP/bin/adb"; chmod +x "$TMP/bin/adb"
-cp "$SELF/corral" "$TMP/bin/corral"; chmod +x "$TMP/bin/corral"
-cp "$SELF/corral-rules" "$TMP/corral-rules"
+cp "$SRC/adb-wrapper" "$TMP/bin/adb"; chmod +x "$TMP/bin/adb"
+cp "$SRC/corral" "$TMP/bin/corral"; chmod +x "$TMP/bin/corral"
+cp "$SRC/corral-rules" "$TMP/corral-rules"
 # faithful platform-tools layout: adb (the wrapper/shim) + adb.real (the real binary)
 printf '#!/bin/sh\necho "sdk-shim $@"\n' > "$TMP/sdk/platform-tools/adb"; chmod +x "$TMP/sdk/platform-tools/adb"
 printf '#!/bin/sh\necho "sdk-real $@"\n' > "$TMP/sdk/platform-tools/adb.real"; chmod +x "$TMP/sdk/platform-tools/adb.real"
@@ -123,35 +131,27 @@ check_1_9() {
   [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ]   # 124 = it hung; a bind failure exits fast
 }
 
-# --- 1.10: two daemons, one DB. Unsupported. Observed 2026-09: both start, independent
-# in-memory maps over one SQLite file, and the same serial can be leased by both (silent
-# divergence). Pin whichever loud/silent mode we actually get, never an invisible success.
+# --- 1.10: two daemons, one DB is refused. The daemon takes an exclusive advisory lock on
+# CORRAL_DB at startup; a live holder makes the second daemon exit non-zero with a message,
+# so the same device can never be leased by two owners. ---
 check_1_10() {
-  local port2=$((PORT + 1)) p2 drc c1 c2 i result=1
+  local port2=$((PORT + 1)) p2 drc i
   setsid env CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" \
     CORRAL_RULES="$TMP/corral-rules" CORRAL_PORT="$port2" \
     java -Dcorral.test.tag=$$ -jar "$JAR" </dev/null >"$TMP/daemon-2db.log" 2>&1 &
   p2=$!
   for i in $(seq 1 50); do
-    curl -s --max-time 1 "http://127.0.0.1:$port2/api/devices" >/dev/null 2>&1 && break
     kill -0 "$p2" 2>/dev/null || break
     sleep 0.2
   done
-  if ! kill -0 "$p2" 2>/dev/null; then
-    wait "$p2" 2>/dev/null; drc=$?
-    printf '# 1.10: second daemon on the same DB exited rc=%s (loud)\n' "$drc"
-    [ "$drc" -ne 0 ] && [ "$drc" -ne 124 ] && result=0
-  else
-    c1=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/leases" \
-      -H 'Content-Type: application/json' -d '{"selector":{"serial":"dev1"},"owner":"main"}')
-    c2=$(curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$port2/api/leases" \
-      -H 'Content-Type: application/json' -d '{"selector":{"serial":"dev1"},"owner":"second"}')
-    printf '# 1.10: both daemons started on one DB; double-lease main=%s second=%s (silent divergence)\n' "$c1" "$c2"
-    [ "$c1" = 200 ] && [ "$c2" = 200 ] && result=0
-    kill -9 "$p2" 2>/dev/null
+  if kill -0 "$p2" 2>/dev/null; then
+    kill -9 "$p2" 2>/dev/null; wait "$p2" 2>/dev/null
+    printf '# 1.10: second daemon on the same DB stayed up — expected a loud refusal\n'
+    return 1
   fi
-  wait "$p2" 2>/dev/null
-  return $result
+  wait "$p2" 2>/dev/null; drc=$?
+  printf '# 1.10: second daemon on the same DB exited rc=%s\n' "$drc"
+  [ "$drc" -ne 0 ] && [ "$drc" -ne 124 ] && grep -q "refusing to start" "$TMP/daemon-2db.log"
 }
 
 # --- 1.6: tickets are in-memory; a restart drops them and the waiter errors, never hangs ---
@@ -280,7 +280,7 @@ check_6_19() {
 start_daemon || exit 1
 check "8.6 daemon binds loopback only" check_8_6
 check "1.9 second daemon on same port exits non-zero" check_1_9
-check "1.10 two daemons same DB: unsupported, loud exit or silent divergence pinned" check_1_10
+check "1.10 two daemons on one DB: second refused loudly (exclusive lock)" check_1_10
 
 stop_daemon
 rm -f "$TMP/corral.db"*
@@ -296,5 +296,5 @@ else
 fi
 check "6.19 SDK-dir-first PATH: ~/bin wrapper never intercepts" check_6_19
 
-printf '\n%d passed, %d failed\n' "$pass" "$fail"
+printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 exit "$fail"

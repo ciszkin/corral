@@ -118,26 +118,30 @@ check "9.8 SDK adb restored from adb.real" grep -q 'fake-sdk-adb' "$SDK/adb"
 check "9.8 adb.real consumed" test ! -e "$SDK/adb.real"
 
 # ===== --home differs from the exported HOME: rc line must use the absolute target =====
-# HOME is left as the real user's here, so this also proves the override never writes the real rc.
+# This block proves the --home override wins over $HOME without betting the reviewer's dotfiles:
+# the "real" HOME here is a scratch dir (CORRAL_TEST_HOME to reuse an existing one), so the test
+# asserts on a throwaway .bashrc. Pass CORRAL_TEST_HOME= (empty) to point it at the real HOME —
+# only for a deliberate manual run.
 TMPHOME2="$TMP/home2"
+REALHOME2="${CORRAL_TEST_HOME:-$TMP/realhome}"
 SDK2="$TMPHOME2/Android/Sdk/platform-tools"
 FAKE_ADB2="$SDK2/adb"
-mkdir -p "$SDK2" "$TMPHOME2/bin"
+mkdir -p "$SDK2" "$TMPHOME2/bin" "$REALHOME2"
 printf '%s\n' '#!/bin/sh' 'echo "fake-sdk-adb2 $@"' > "$FAKE_ADB2"
 chmod +x "$FAKE_ADB2"
 : > "$TMPHOME2/.bashrc"
-REAL_BASHRC="$REAL_HOME/.bashrc"
+: > "$REALHOME2/.bashrc"
+REAL_BASHRC="$REALHOME2/.bashrc"
 real_bashrc_before=$(sha256sum "$REAL_BASHRC" 2>/dev/null || echo missing)
 
-HOME="$REAL_HOME" bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$FAKE_ADB2" \
+HOME="$REALHOME2" bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$FAKE_ADB2" \
   --jar "$JAR" --home "$TMPHOME2" >"$TMP/install-override.log" 2>&1
 rco=$?
 dump_on_fail "$rco" "$TMP/install-override.log"
 check "install with --home != HOME exits 0" test "$rco" -eq 0
 check "rc PATH line uses the absolute --home target" \
   grep -qF "export PATH=\"$TMPHOME2/bin:" "$TMPHOME2/.bashrc"
-real_bashrc_after=$(sha256sum "$REAL_BASHRC" 2>/dev/null || echo missing)
-check "real HOME .bashrc untouched by --home override" test "$real_bashrc_before" = "$real_bashrc_after"
+check "the differed HOME's .bashrc is untouched by --home override" test "$real_bashrc_before" = "$(sha256sum "$REAL_BASHRC" 2>/dev/null || echo missing)"
 
 # the PATH stub proved the real systemd session was never addressed
 check "systemctl stub handled daemon-reload (real session untouched)" test -s "$TMP/systemctl.log"

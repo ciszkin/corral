@@ -1,17 +1,30 @@
 package dev.corral
 
 import io.ktor.client.HttpClient
+import io.ktor.client.plugins.websocket.WebSockets
+import io.ktor.client.plugins.websocket.webSocket
+import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
+import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.server.testing.ApplicationTestBuilder
 import io.ktor.server.testing.testApplication
+import io.ktor.websocket.CloseReason
+import io.ktor.websocket.Frame
+import io.ktor.websocket.WebSocketSession
+import io.ktor.websocket.readText
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -19,8 +32,10 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
+import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 class ApiTest {
@@ -34,6 +49,9 @@ class ApiTest {
         adbPath: String? = null,
     ) = application { corralModule(AppEnv(testDevices, leases, adbPath)) }
 
+    private fun ApplicationTestBuilder.corralWithEvents(events: Events, leases: LeaseManager) =
+        application { corralModule(AppEnv(testDevices, leases, events = events)) }
+
     private fun withApi(block: suspend CoroutineScope.(HttpClient) -> Unit) =
         testApplication { corral(); CoroutineScope(coroutineContext).block(client) }
 
@@ -45,6 +63,28 @@ class ApiTest {
             application { corralModule(AppEnv({ devices }, LeaseManager({ devices }, db = null))) }
             CoroutineScope(coroutineContext).block(client)
         }
+
+    private fun fakeScreenshotter(devices: List<Device>, fail: Boolean = false): Screenshotter {
+        val dir = createTempDirectory("shot")
+        val fakeAdb = dir.resolve("fake-adb")
+        Files.writeString(fakeAdb, if (fail) "#!/usr/bin/env bash\necho boom >&2\nexit 3\n"
+                                       else "#!/usr/bin/env bash\nprintf 'fake-screen'\n")
+        fakeAdb.toFile().setExecutable(true)
+        return Screenshotter({ devices }, fakeAdb.toString())
+    }
+
+    private fun withScreenshotApi(
+        devices: List<Device> = testDevices(),
+        policy: ScreenshotPolicy = ScreenshotPolicy("strict"),
+        failAdb: Boolean = false,
+        block: suspend CoroutineScope.(HttpClient) -> Unit,
+    ) = testApplication {
+        val leases = LeaseManager({ devices }, db = null)
+        application {
+            corralModule(AppEnv({ devices }, leases, screenshotter = fakeScreenshotter(devices, failAdb), policy = policy))
+        }
+        CoroutineScope(coroutineContext).block(client)
+    }
 
     @Test fun devicesListed() = withApi { c ->
         assertEquals(HttpStatusCode.OK, c.get("/api/devices").status)
@@ -374,6 +414,136 @@ class ApiTest {
             assertTrue(leases.snapshot["dev1"]!!.pendingAccept)   // a foreign check does not touch the offer
         }
     }
+
+    @Test fun screenshotServesPngBytes() = withScreenshotApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"me"}""") }
+        val r = c.get("/api/devices/dev1/screenshot?owner=me")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertEquals(ContentType.Image.PNG, r.contentType())
+        assertEquals("fake-screen", r.bodyAsText())
+    }
+
+    @Test fun screenshotUnwiredIs503() = withApi { c ->
+        assertEquals(HttpStatusCode.ServiceUnavailable,
+            c.get("/api/devices/dev1/screenshot?owner=me").status)
+    }
+
+    @Test fun screenshotStrictDeniesStranger() = withScreenshotApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"me"}""") }
+        val r = c.get("/api/devices/dev1/screenshot?owner=stranger")
+        assertEquals(HttpStatusCode.Forbidden, r.status)
+        assertTrue(r.bodyAsText().contains("held by me"))
+        assertTrue(r.bodyAsText().contains("CORRAL_SCREENSHOTS=open"))
+    }
+
+    @Test fun screenshotStrictAllowsHolder() = withScreenshotApi { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev1"},"owner":"me"}""") }
+        assertEquals(HttpStatusCode.OK, c.get("/api/devices/dev1/screenshot?owner=me").status)
+    }
+
+    @Test fun screenshotStrictAllowsObserver() =
+        withScreenshotApi(policy = ScreenshotPolicy("strict", "corral-ui")) { c ->
+            assertEquals(HttpStatusCode.OK, c.get("/api/devices/dev1/screenshot?owner=corral-ui").status)
+        }
+
+    @Test fun screenshotStrictUnknownSerialIs403Not404() =
+        withScreenshotApi(policy = ScreenshotPolicy("strict", null)) { c ->
+            val r = c.get("/api/devices/zzz/screenshot?owner=me")
+            assertEquals(HttpStatusCode.Forbidden, r.status)          // policy first: no existence leak
+            assertTrue(r.bodyAsText().contains("not leased"))
+        }
+
+    @Test fun screenshotUnknownSerialIs404() = withScreenshotApi(policy = ScreenshotPolicy("open")) { c ->
+        assertEquals(HttpStatusCode.NotFound, c.get("/api/devices/zzz/screenshot?owner=me").status)
+    }
+
+    @Test fun screenshotUnusableDeviceIs404() = withScreenshotApi(
+        devices = listOf(Device("dev1", "offline")), policy = ScreenshotPolicy("open")
+    ) { c ->
+        val r = c.get("/api/devices/dev1/screenshot?owner=me")
+        assertEquals(HttpStatusCode.NotFound, r.status)
+        assertTrue(r.bodyAsText().contains("offline"))
+    }
+
+    @Test fun screenshotAdbFailureIs502() =
+        withScreenshotApi(policy = ScreenshotPolicy("open"), failAdb = true) { c ->
+            assertEquals(HttpStatusCode.BadGateway, c.get("/api/devices/dev1/screenshot?owner=me").status)
+        }
+
+    @Test fun wsEventsSendsHelloThenNudges() = testApplication {
+        val leases = LeaseManager(testDevices, db = null)
+        val eventsScope = CoroutineScope(Job())
+        val events = Events(
+            { testDevices().map { d -> DeviceStatus(d.serial, leases.snapshot[d.serial]) } },
+            { leases.queueSnapshot() },
+            eventsScope,
+            tickMs = 100,
+        )
+        corralWithEvents(events, leases)
+        events.start()
+        delay(500)                                       // let the baseline tick prime before mutating
+        try {
+            val ws = createClient { install(WebSockets) }
+            ws.webSocket("/ws/events") {
+                val hello = Json.parseToJsonElement(nextText()).jsonObject
+                assertEquals("hello", hello["type"]?.jsonPrimitive?.content)
+                assertEquals("devices", hello["resources"]!!.jsonArray.first().jsonPrimitive.content)
+
+                leases.requestClaim(Selector(serial = "dev1"), "me", ttl = 100)
+                val changed = Json.parseToJsonElement(nextText()).jsonObject
+                assertEquals("state.changed", changed["type"]?.jsonPrimitive?.content)
+                assertTrue(changed["resources"]!!.jsonArray.any { it.jsonPrimitive.content == "devices" })
+
+                send(Frame.Text("not a real frame"))
+                leases.free("dev1", "me")
+                val next = Json.parseToJsonElement(nextText()).jsonObject
+                assertEquals("state.changed", next["type"]?.jsonPrimitive?.content)
+                assertTrue(next["resources"]!!.jsonArray.any { it.jsonPrimitive.content == "devices" })
+            }
+        } finally {
+            eventsScope.cancel()
+        }
+    }
+
+    @Test fun wsForeignOriginIsClosed() = testApplication {
+        val leases = LeaseManager(testDevices, db = null)
+        val events = Events({ emptyList() }, { emptyList() }, CoroutineScope(coroutineContext))
+        corralWithEvents(events, leases)
+
+        val ws = createClient { install(WebSockets) }
+        val session = ws.webSocketSession("/ws/events") { header(HttpHeaders.Origin, "https://evil.example") }
+        val reason: CloseReason? = withTimeout(5000) { session.closeReason.await() }
+        assertEquals(CloseReason.Codes.VIOLATED_POLICY, reason?.knownReason)
+        assertEquals("corral: local only", reason?.message)
+    }
+
+    @Test fun wsIpv6LoopbackOriginIsAccepted() = testApplication {
+        val leases = LeaseManager(testDevices, db = null)
+        val events = Events({ emptyList() }, { emptyList() }, CoroutineScope(coroutineContext))
+        corralWithEvents(events, leases)
+
+        val ws = createClient { install(WebSockets) }
+        ws.webSocket("/ws/events", { header(HttpHeaders.Origin, "http://[::1]:3000") }) {
+            val hello = Json.parseToJsonElement(nextText()).jsonObject
+            assertEquals("hello", hello["type"]?.jsonPrimitive?.content)
+        }
+    }
+
+    @Test fun wsUnconfiguredEventsIsClosed() = testApplication {
+        corral()
+
+        val ws = createClient { install(WebSockets) }
+        val session = ws.webSocketSession("/ws/events")
+        val reason: CloseReason? = withTimeout(5000) { session.closeReason.await() }
+        assertEquals(CloseReason.Codes.VIOLATED_POLICY, reason?.knownReason)
+        assertEquals("corral: events not configured", reason?.message)
+    }
+
+    private suspend fun WebSocketSession.nextText() =
+        withTimeout(5000) { (incoming.receive() as Frame.Text).readText() }
 
     private fun String.ticketOf() = substringAfter("\"ticket\":\"").substringBefore("\"")
 }

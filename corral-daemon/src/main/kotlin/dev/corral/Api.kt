@@ -1,5 +1,6 @@
 package dev.corral
 
+import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
@@ -11,11 +12,18 @@ import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.request.header
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.routing
+import io.ktor.server.websocket.WebSockets
+import io.ktor.server.websocket.webSocket
+import io.ktor.websocket.CloseReason
+import io.ktor.websocket.Frame
+import io.ktor.websocket.close
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -43,20 +51,45 @@ import kotlinx.serialization.json.Json
 
 @Serializable data class StatusResponse(val devices: List<DeviceStatus>, val adb: String)
 
-class AppEnv(val devices: () -> List<Device>, val leases: LeaseManager, val adbPath: String? = null)
+class AppEnv(
+    val devices: () -> List<Device>,
+    val leases: LeaseManager,
+    val adbPath: String? = null,
+    val screenshotter: Screenshotter? = null,
+    val policy: ScreenshotPolicy? = null,
+    val events: Events? = null,
+)
+
+/** Accepts a `Host` header (`127.0.0.1:8798`, `[::1]:8798`) or an `Origin` URL (`http://[::1]:3000`). */
+private fun bareHost(value: String): String {
+    val host = value.substringAfter("//", value)
+    val bare = if (host.startsWith("[")) host.substringAfter("[").substringBefore("]")
+               else host.substringBefore(":")
+    return bare.lowercase()
+}
 
 /** Browser DNS-rebinding guard: every local client (CLI, wrapper, MCP) uses a localhost Host. */
 fun Application.guardLocalHost() = intercept(ApplicationCallPipeline.Plugins) {
-    val host = (call.request.header(HttpHeaders.Host) ?: "")
-    val bare = if (host.startsWith("[")) host.substringAfter("[").substringBefore("]")
-               else host.substringBefore(":")
-    if (bare !in setOf("127.0.0.1", "localhost", "::1"))
+    if (bareHost(call.request.header(HttpHeaders.Host) ?: "") !in setOf("127.0.0.1", "localhost", "::1"))
         call.respondText("corral: local only", status = HttpStatusCode.Forbidden)
 }
 
 fun Application.corralModule(env: AppEnv) {
     install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+    install(WebSockets)
     routing {
+        webSocket("/ws/events") {
+            val ev = env.events
+                ?: run { close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "corral: events not configured")); return@webSocket }
+            val origin = call.request.header(HttpHeaders.Origin)
+            if (origin != null && bareHost(origin) !in setOf("127.0.0.1", "localhost", "::1")) {
+                close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "corral: local only")); return@webSocket
+            }
+            send(Frame.Text(ev.helloFrame()))
+            val pump = launch { ev.flow.collect { send(Frame.Text(it)) } }
+            try { for (frame in incoming) { /* client frames are ignored; tolerance is part of the contract */ } }
+            finally { pump.cancel() }
+        }
         get("/api/devices") { call.respond(env.devices()) }
         get("/api/status") {
             call.respond(StatusResponse(
@@ -108,6 +141,24 @@ fun Application.corralModule(env: AppEnv) {
             }
         }
         get("/api/queue") { call.respond(env.leases.queueSnapshot()) }
+        get("/api/devices/{serial}/screenshot") {
+            val serial = call.parameters["serial"]!!
+            val shotter = env.screenshotter
+                ?: run { call.respondText("corral: screenshots not configured", status = HttpStatusCode.ServiceUnavailable); return@get }
+            val policy = env.policy ?: ScreenshotPolicy()
+            val owner = call.request.queryParameters["owner"] ?: ""
+            val denial = policy.denies(serial, env.leases.snapshot[serial], owner)
+            if (denial != null) { call.respondText(denial, status = HttpStatusCode.Forbidden); return@get }
+            try {
+                call.respondBytes(shotter.capture(serial), ContentType.Image.PNG)
+            } catch (e: CaptureException.UnusableDevice) {
+                call.respondText(e.message ?: "device not usable", status = HttpStatusCode.NotFound)
+            } catch (e: CaptureException.UnknownDevice) {
+                call.respondText(e.message ?: "device not connected", status = HttpStatusCode.NotFound)
+            } catch (e: CaptureException.AdbFailure) {
+                call.respondText(e.message ?: "screencap failed", status = HttpStatusCode.BadGateway)
+            }
+        }
         delete("/api/leases/{serial}") {
             val req = call.receive<FreeRequest>()
             try { env.leases.free(call.parameters["serial"]!!, req.owner, req.force); call.respond(mapOf("freed" to true)) }

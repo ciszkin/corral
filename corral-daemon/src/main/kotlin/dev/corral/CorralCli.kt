@@ -14,10 +14,15 @@ import java.lang.ProcessHandle
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
+import java.net.http.WebSocket
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Duration
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CountDownLatch
 import kotlin.system.exitProcess
 
 /**
@@ -125,6 +130,27 @@ object CorralCli {
         HttpRequest.newBuilder(URI.create("$url$path")).timeout(Duration.ofSeconds(5)).GET().build(),
         HttpResponse.BodyHandlers.ofString()).let(::ok).body()
 
+    /** Fetch a device PNG and exit; on non-200 print the denial body and exit 1. */
+    private fun screenshot(serial: String, out: String): Nothing {
+        val resp = http.send(
+            HttpRequest.newBuilder(URI.create("$url/api/devices/${URLEncoder.encode(serial, StandardCharsets.UTF_8)}/screenshot" +
+                "?owner=${URLEncoder.encode(owner, StandardCharsets.UTF_8)}"))
+                .timeout(Duration.ofSeconds(30)).GET().build(),
+            HttpResponse.BodyHandlers.ofByteArray())
+        if (resp.statusCode() != 200) {
+            System.err.println(String(resp.body(), StandardCharsets.UTF_8)
+                .ifBlank { "corral: screenshot failed (HTTP ${resp.statusCode()})" })
+            exitProcess(1)
+        }
+        try {
+            Files.write(Path.of(out), resp.body())
+        } catch (e: IOException) {
+            System.err.println("corral: cannot write $out (${e.message})"); exitProcess(1)
+        }
+        println("$out (${resp.body().size} bytes)")
+        exitProcess(0)
+    }
+
     private fun send(method: String, path: String, body: String, timeoutSeconds: Long = 0) = http.send(
         HttpRequest.newBuilder(URI.create("$url$path"))
             .method(method, HttpRequest.BodyPublishers.ofString(body))
@@ -198,6 +224,43 @@ object CorralCli {
             "devices" -> println(get("/api/devices"))
             "status" -> println(get("/api/status"))
             "owner" -> println(owner)
+            "screenshot" -> {
+                var serial = ""
+                var out = ""
+                val rest = args.drop(1)
+                var i = 0
+                while (i < rest.size) {
+                    when {
+                        rest[i] == "--out" -> out = rest.getOrNull(++i) ?: usage(2)
+                        rest[i].startsWith("--out=") -> out = rest[i].substringAfter("=")
+                        serial.isEmpty() -> serial = rest[i]
+                        else -> usage(2)
+                    }
+                    i++
+                }
+                if (serial.isEmpty()) usage(2)
+                screenshot(serial, out.ifEmpty { "$serial.png" })
+            }
+            "events" -> {
+                val target = URI.create(url.replaceFirst("http", "ws") + "/ws/events")
+                var backoff = 1000L
+                while (true) {
+                    val closed = CountDownLatch(1)
+                    try {
+                        http.newWebSocketBuilder().buildAsync(target, object : WebSocket.Listener {
+                            override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean) =
+                                CompletableFuture.completedFuture(webSocket).also { webSocket.request(1); println(data) }
+                            override fun onError(webSocket: WebSocket, error: Throwable) { closed.countDown() }
+                            override fun onClose(webSocket: WebSocket, statusCode: Int, reason: String): CompletableFuture<*> {
+                                closed.countDown(); return CompletableFuture.completedFuture(null)
+                            }
+                        }).join()
+                        closed.await(); backoff = 1000L
+                    } catch (_: Exception) { /* fall through to reconnect */ }
+                    System.err.println("corral: events disconnected; retrying in ${backoff / 1000}s")
+                    Thread.sleep(backoff); backoff = (backoff * 2).coerceAtMost(5000L)
+                }
+            }
             "doctor" -> {
                 var problems = 0
                 val devices = try {
@@ -428,6 +491,7 @@ object CorralCli {
             "|claim [--all|<serial>] [selector]|free [--all|<serial>]|renew <serial>" +
             "|wait [--timeout S (max 600)] [selector]|lease [--all] [selector] -- <cmd>" +
             "|gate [--owner o] -- <adb args>" +
+            "|screenshot <serial> [--out F]|events" +
             "\n  selector: --serial S --model M --os V(min) --type usb|wifi|emulator --avd A")
         exitProcess(code)
     }

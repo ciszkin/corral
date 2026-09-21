@@ -15,11 +15,13 @@ import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.ServerSession
 import io.modelcontextprotocol.kotlin.sdk.server.StreamableHttpServerTransport
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
+import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolAnnotations
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -28,6 +30,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
 private val mcpJson = Json { ignoreUnknownKeys = true }
@@ -46,6 +49,9 @@ data class FreeArgs(val serial: String, val force: Boolean = false)
 
 @Serializable
 data class RenewArgs(val serial: String, val ttlSeconds: Long = 1800)
+
+@Serializable
+data class ShotArgs(val serial: String? = null)
 
 /**
  * MCP surface at /mcp: streamable HTTP, one Server per session. Manual wiring (not the
@@ -180,6 +186,39 @@ fun corralMcpServer(env: AppEnv, sessions: ConcurrentHashMap<String, ServerSessi
                 ?: return@toolResult toolError("serial is required")
             env.leases.free(args.serial, ownerOf(this, sessions, null), args.force)
             "freed ${args.serial}"
+        }
+    }
+
+    server.addTool(
+        name = "screenshot",
+        description = "Capture a PNG screenshot of a device screen. Read-only. serial is optional: " +
+            "omit it to target the single usable connected device. Strict mode (default): your session " +
+            "must hold the device's lease, or be a configured observer (CORRAL_SCREENSHOT_OBSERVERS).",
+        inputSchema = ToolSchema(properties = buildJsonObject {
+            putJsonObject("serial") { put("type", "string"); put("description", "device serial (omit = the single usable device)") }
+        }),
+        toolAnnotations = ToolAnnotations(readOnlyHint = true, openWorldHint = false),
+    ) { request ->
+        try {
+            val args = request.arguments?.let { mcpJson.decodeFromJsonElement<ShotArgs>(it) } ?: ShotArgs()
+            val owner = ownerOf(this, sessions, null)   // the session is the principal; no owner override here
+            val usable = env.devices().filter { it.state == "device" }
+            val serial = args.serial
+                ?: usable.singleOrNull()?.serial
+                ?: throw IllegalStateException(
+                    if (usable.isEmpty()) "no usable connected device; call list_devices"
+                    else "several devices connected; pass one of: " + usable.joinToString(", ") { it.serial })
+            (env.policy ?: ScreenshotPolicy()).denies(serial, env.leases.snapshot[serial], owner)
+                ?.let { throw IllegalStateException(it) }
+            val shotter = env.screenshotter ?: throw IllegalStateException("screenshots not configured on the daemon")
+            val png = shotter.capture(serial)
+            CallToolResult(content = listOf(
+                TextContent(text = "$serial: ${png.size} bytes png"),
+                ImageContent(data = Base64.getEncoder().encodeToString(png), mimeType = "image/png")))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            CallToolResult(content = listOf(TextContent(text = e.message ?: "screenshot failed")), isError = true)
         }
     }
 

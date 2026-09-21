@@ -11,6 +11,8 @@ while [ $i -lt ${#args[@]} ]; do
 done
 last=""
 [ ${#args[@]} -gt 0 ] && last="${args[${#args[@]}-1]}"
+# invocation log lets wrapper tests count adb calls
+[ -n "${FAKE_ADB_LOG:-}" ] && printf '%s\n' "$*" >> "$FAKE_ADB_LOG"
 # env override lets a test simulate enrichment failure for one serial
 if [ "$ser" = "${FAKE_ADB_FAIL_SERIAL:-__none__}" ]; then exit 1; fi
 case "$sub" in
@@ -25,6 +27,12 @@ case "$sub" in
     case "$last" in
       ro.product.model) echo "${FAKE_ADB_MODEL:-Pixel_6}";;
       ro.build.version.release) echo "${FAKE_ADB_OS:-13}";;
+    esac;;
+  exec-out)
+    # `adb -s <serial> exec-out screencap -p`: "screencap" is not the last arg, so scan them all
+    case " ${args[*]} " in
+      *" screencap "*) printf 'fake-screen';;   # bytes only; tests assert equality, not PNG validity
+      *) exit 0;;
     esac;;
   *) exit 0;;
 esac

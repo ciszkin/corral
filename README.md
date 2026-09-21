@@ -53,15 +53,28 @@ the same device.
   every enforcement layer on demand.
 - **CLI** — `corral claim [--all|<serial>] [selector]`, `wait [--timeout S] [selector]`,
   `queue`, `free [--all|<serial>]`, `renew <serial>`, `lease [--all] [selector] -- <cmd>`,
-  `check`, `owner`, `doctor`, `devices`, `status` — all logic in the jar behind 3-line
+  `screenshot <serial> [--out F]`, `events`, `check`, `owner`, `doctor`, `devices`,
+  `status` — all logic in the jar behind 3-line
   launcher shims, so it works for humans and agents alike.
   Selector: `--serial S --model M --os V(min) --type usb|wifi|emulator --avd A`.
 - **MCP server** — the same lease API is exposed over streamable HTTP at `/mcp`
-  (`list_devices`, `queue`, `claim`, `free`, `renew`), with one identity per MCP session:
+  (`list_devices`, `queue`, `claim`, `free`, `renew`, `screenshot`), with one identity per MCP session:
   `claude mcp add --transport http corral http://127.0.0.1:8798/mcp`. `claim` with
   `waitSeconds > 0` returns a ticket; re-call `claim` with that ticket to pick up the device.
   Each ticket carries a poll cadence (MCP advertises 5 s; a client may propose its own,
   clamped to 1–10 s) and the accepted value comes back in `retryAfterMs`.
+- **Observability** — `GET /api/devices/{serial}/screenshot?owner=O` returns a PNG
+  (`adb -s <serial> exec-out screencap -p`, single-flight per serial with a 1 s coalescing
+  window). Strict by default: only the lease holder may read; an owner listed in
+  `CORRAL_SCREENSHOT_OBSERVERS` (empty unless configured — the UI opts in), or anyone when
+  `CORRAL_SCREENSHOTS=open`, is also allowed. Observer names are case-sensitive. Strict mode
+  answers `403` for any serial the caller may not read, including unknown or unusable ones (no
+  existence leak); `404`/`502` apply once access is allowed. `GET /ws/events` streams a
+  `hello` frame then additive `state.changed` nudges — `{"type","resources","seq"}` with
+  resources `devices`/`queue`; a client ignores unknown types, refetches on an unknown
+  resource, and treats a seq gap after reconnect as refetch-all. The MCP `screenshot` tool
+  returns an image content block, and `corral screenshot <serial> [--out F]` / `corral events`
+  are the CLI verbs.
 - **Loopback only** — the daemon binds `127.0.0.1` and refuses any non-local `Host`
   header with `403 corral: local only`, which also covers `/mcp`. A browser on the host
   cannot be tricked by DNS rebinding into driving the daemon.
@@ -86,7 +99,7 @@ handshake. Corral replaces the `adb-lease` MVP (`adb-lease.md`).
 
 ## Roadmap (Phase 3+)
 
-- Screenshots + Compose Desktop UI, live view via scrcpy
+- Compose Desktop UI, live view via scrcpy (screenshots + event stream are done)
 - Emulator lifecycle management
 - Verified Windows/macOS support: the `.bat` delegates the gate to `corral gate`, the CLI
   walks ancestry via `ProcessHandle` where `/proc` is absent, and the bash wrapper delegates

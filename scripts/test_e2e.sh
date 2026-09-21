@@ -57,7 +57,14 @@ trap cleanup EXIT
 
 mkdir -p "$TMP/bin" "$TMP/sdk/platform-tools" "$TMP/bind"
 printf 'dev1 device Pixel_6 13\ndev2 device SM-S918B 13\n' > "$TMP/fake-devices"
-printf '#!/bin/sh\necho "fake-adb $@"\n' > "$TMP/fake-adb"; chmod +x "$TMP/fake-adb"
+cat > "$TMP/fake-adb" <<'SH'
+#!/bin/sh
+case "$*" in
+  *exec-out*screencap*) printf 'fake-screen';;
+  *) echo "fake-adb $@";;
+esac
+SH
+chmod +x "$TMP/fake-adb"
 cp "$SRC/adb-wrapper" "$TMP/bin/adb"; chmod +x "$TMP/bin/adb"
 cp "$SRC/corral" "$TMP/bin/corral"; chmod +x "$TMP/bin/corral"
 cp "$SRC/corral-rules" "$TMP/corral-rules"
@@ -276,6 +283,41 @@ check_6_19() {
   return 0
 }
 
+# --- 11.1/11.2 + CLI: screenshot route. Strict by default: the lease holder (here the
+# declared CORRAL_OWNER=tester) reads a PNG; a stranger is denied; the CLI verb writes it. ---
+check_11_screenshot() {
+  free_all
+  corral claim dev1 >/dev/null 2>&1 || return 1
+  local denied allowed
+  denied=$(curl -s -o /dev/null -w '%{http_code}' "$CORRAL_URL/api/devices/dev1/screenshot?owner=stranger")
+  allowed=$(curl -s -o "$TMP/shot.bin" -w '%{http_code}' "$CORRAL_URL/api/devices/dev1/screenshot?owner=tester")
+  corral screenshot dev1 --out "$TMP/dev1.png" >/dev/null 2>&1
+  local cli=$?
+  free_all
+  [ "$denied" = 403 ] || return 1
+  [ "$allowed" = 200 ] || return 1
+  [ "$cli" = 0 ] || return 1
+  grep -q fake-screen "$TMP/shot.bin" || return 1
+  grep -q fake-screen "$TMP/dev1.png" || return 1
+  return 0
+}
+
+# --- 11.9/11.10: /ws/events sends a hello frame, then a state.changed nudge after a claim/free ---
+check_11_events() {
+  free_all
+  timeout 12 corral events >"$TMP/events.out" 2>&1 &
+  local ep=$! i
+  for i in $(seq 1 50); do grep -q '"type":"hello"' "$TMP/events.out" && break; sleep 0.1; done
+  corral claim dev2 >/dev/null 2>&1
+  corral free dev2 >/dev/null 2>&1
+  for i in $(seq 1 50); do grep -q 'state.changed' "$TMP/events.out" && break; sleep 0.1; done
+  kill "$ep" 2>/dev/null; wait "$ep" 2>/dev/null
+  free_all
+  grep -q '"type":"hello"' "$TMP/events.out" || return 1
+  grep -q 'state.changed' "$TMP/events.out" || return 1
+  return 0
+}
+
 # --- run ---
 start_daemon || exit 1
 check "8.6 daemon binds loopback only" check_8_6
@@ -295,6 +337,8 @@ else
   skip "1.14 poll-silence drop"
 fi
 check "6.19 SDK-dir-first PATH: ~/bin wrapper never intercepts" check_6_19
+check "11.1/11.2 + CLI screenshot: holder reads PNG, stranger 403, CLI verb" check_11_screenshot
+check "11.9/11.10 ws events: hello frame, then state.changed on claim/free" check_11_events
 
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 exit "$fail"

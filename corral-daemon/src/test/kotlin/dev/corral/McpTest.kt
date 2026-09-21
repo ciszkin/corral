@@ -18,6 +18,7 @@ import io.modelcontextprotocol.kotlin.sdk.server.ServerSession
 import io.modelcontextprotocol.kotlin.sdk.testing.ChannelTransport
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequest
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolRequestParams
+import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import kotlinx.coroutines.CoroutineScope
@@ -31,8 +32,11 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.put
+import java.nio.file.Files
+import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
+import kotlin.io.path.createTempDirectory
 import kotlin.test.*
 
 @OptIn(ExperimentalMcpApi::class)
@@ -56,6 +60,26 @@ class McpTest {
         return client
     }
 
+    private fun fakeScreenshotter(devices: List<Device>): Screenshotter {
+        val dir = createTempDirectory("mcp-shot")
+        val fakeAdb = dir.resolve("fake-adb")
+        Files.writeString(fakeAdb, "#!/usr/bin/env bash\nprintf 'fake-screen'\n")
+        fakeAdb.toFile().setExecutable(true)
+        return Screenshotter({ devices }, fakeAdb.toString())
+    }
+
+    private fun screenshotServer(
+        sessions: ConcurrentHashMap<String, ServerSession>,
+        devices: List<Device> = listOf(Device("dev1", "device")),
+        policy: ScreenshotPolicy? = ScreenshotPolicy("open"),
+    ): Pair<Server, LeaseManager> {
+        val devs = { devices }
+        val leases = LeaseManager(devs, null)
+        val s = corralMcpServer(
+            AppEnv(devs, leases, screenshotter = fakeScreenshotter(devices), policy = policy), sessions)
+        return s to leases
+    }
+
     private fun obj(vararg pairs: Pair<String, Any?>): JsonObject = buildJsonObject {
         pairs.forEach { (k, v) ->
             when (v) {
@@ -71,13 +95,13 @@ class McpTest {
         callTool(CallToolRequest(CallToolRequestParams(name = name, arguments = args)))
 
     @Test
-    fun fiveToolsListedAndClaimCarriesDerivedOwner() = runBlocking {
+    fun sixToolsListedAndClaimCarriesDerivedOwner() = runBlocking {
         val sessions = ConcurrentHashMap<String, ServerSession>()
         val s = server(sessions)
         val client = harness(sessions, s, "test-harness")
 
         assertEquals(
-            setOf("list_devices", "queue", "claim", "free", "renew"),
+            setOf("list_devices", "queue", "claim", "free", "renew", "screenshot"),
             client.listTools().tools.map { it.name }.toSet(),
         )
 
@@ -91,6 +115,97 @@ class McpTest {
 
         val freed = client.tool("free", obj("serial" to "dev1"))
         assertFalse(freed.isError == true)
+        client.close(); s.close()
+    }
+
+    @Test
+    fun screenshotReturnsImageContent() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, _) = screenshotServer(sessions)
+        val client = harness(sessions, s, "shot-harness")
+
+        val r = client.tool("screenshot", obj("serial" to "dev1"))
+
+        assertFalse(r.isError == true)
+        val img = r.content.filterIsInstance<ImageContent>().single()
+        assertEquals("image/png", img.mimeType)
+        assertEquals("fake-screen", Base64.getDecoder().decode(img.data).decodeToString())
+        val text = r.content.filterIsInstance<TextContent>().single().text
+        assertTrue(text.contains("dev1") && text.contains("png"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun screenshotOmittedSerialUsesTheSingleUsableDevice() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, _) = screenshotServer(sessions)
+        val client = harness(sessions, s, "shot-harness")
+
+        val r = client.tool("screenshot", obj())
+
+        assertFalse(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("dev1"))
+        assertEquals("fake-screen",
+            Base64.getDecoder().decode(r.content.filterIsInstance<ImageContent>().single().data).decodeToString())
+        client.close(); s.close()
+    }
+
+    @Test
+    fun screenshotAmbiguousSerialIsErrorListingDevices() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, _) = screenshotServer(sessions,
+            devices = listOf(Device("dev1", "device"), Device("dev2", "device")))
+        val client = harness(sessions, s, "shot-harness")
+
+        val r = client.tool("screenshot", obj())
+
+        assertTrue(r.isError == true)
+        val text = r.content.filterIsInstance<TextContent>().single().text
+        assertTrue(text.contains("dev1") && text.contains("dev2"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun screenshotStrictDenialNamesHolder() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, leases) = screenshotServer(sessions, policy = ScreenshotPolicy("strict"))
+        val client = harness(sessions, s, "shot-harness")
+        leases.claim("dev1", "some-other-agent")
+
+        val r = client.tool("screenshot", obj("serial" to "dev1"))
+
+        assertTrue(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("held by"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun screenshotNullPolicyFailsClosed() = runBlocking {
+        // ScreenshotPolicy() honours CORRAL_SCREENSHOTS=open, so skip when the environment opened it.
+        if (System.getenv("CORRAL_SCREENSHOTS")?.trim()?.lowercase() == "open") return@runBlocking
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, _) = screenshotServer(sessions, policy = null)
+        val client = harness(sessions, s, "shot-harness")
+
+        val r = client.tool("screenshot", obj("serial" to "dev1"))
+
+        assertTrue(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("not leased"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun screenshotWithoutScreenshotterIsError() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val devs = listOf(Device("dev1", "device"))
+        val s = corralMcpServer(AppEnv({ devs }, LeaseManager({ devs }, null),
+            screenshotter = null, policy = ScreenshotPolicy("open")), sessions)
+        val client = harness(sessions, s, "shot-harness")
+
+        val r = client.tool("screenshot", obj("serial" to "dev1"))
+
+        assertTrue(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("not configured"))
         client.close(); s.close()
     }
 

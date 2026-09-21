@@ -11,6 +11,7 @@ dependencies {
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.ktor.server.cio)
     implementation(libs.ktor.server.contentnegotiation)
+    implementation(libs.ktor.server.websockets)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.sqlite.jdbc)
     implementation(libs.mcp.server)
@@ -21,6 +22,7 @@ dependencies {
     testImplementation(libs.ktor.server.testhost)
     testImplementation(libs.ktor.client.cio)
     testImplementation(libs.ktor.client.contentnegotiation)
+    testImplementation(libs.ktor.client.websockets)
 }
 
 tasks.shadowJar {

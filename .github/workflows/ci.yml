@@ -22,8 +22,8 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6
 
-      - name: Run daemon tests
-        run: ./gradlew :corral-daemon:test
+      - name: Run module tests
+        run: ./gradlew :corral-common:test :corral-daemon:test :corral-ui:test
 
       - name: Run wrapper integration suite
         run: bash scripts/test_wrapper.sh
@@ -31,8 +31,8 @@ jobs:
       - name: Build runnable jar
         run: ./gradlew :corral-daemon:shadowJar
 
-      - name: Wrapper integration suite
-        run: bash scripts/test_wrapper.sh
+      - name: Build ui jar
+        run: ./gradlew :corral-ui:shadowJar
 
       - name: Daemon e2e suite
         run: SLOW=1 bash scripts/test_e2e.sh

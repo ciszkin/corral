@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec java -cp "${CORRAL_UI_JAR:-$HOME/.corral/corral-ui-all.jar}" dev.corral.ui.CorralUiKt "$@"

@@ -15,7 +15,7 @@ data class Selector(val serial: String? = null, val model: String? = null,
         && (model == null || model == d.model)
         && (transport == null || transport == d.transport)
         && (avd == null || avd == d.avd)
-        && (minOs == null || (d.osVersion != null && osAtLeast(d.osVersion, minOs)))
+        && (minOs == null || (d.osVersion?.let { osAtLeast(it, minOs) } == true))
 
     override fun toString() = listOfNotNull(
         serial?.let { "serial=$it" }, model?.let { "model=$it" }, minOs?.let { "os>=$it" },

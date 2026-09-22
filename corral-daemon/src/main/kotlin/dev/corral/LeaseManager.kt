@@ -59,9 +59,6 @@ class Ticket internal constructor(
     val pollCadenceMs: Long,
 ) { internal var offered: Lease? = null; internal var offeredAt: Long = 0 }
 
-@Serializable data class QueueEntry(val position: Int, val owner: String, val selector: String,
-    val waitedSeconds: Long, val deadlineIn: Long)
-
 /**
  * Mutex-guarded lease map + FIFO ticket queue. SQLite mirrors leases for restart recovery;
  * the queue is in-memory only (a parked client cannot outlive the daemon).

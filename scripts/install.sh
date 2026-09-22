@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # corral install.sh — install corral-daemon, the adb wrapper and the corral CLI
 # on a Linux host. User-scoped (no root). Idempotent; safe to re-run.
-# Usage: scripts/install.sh [--java PATH] [--adb PATH] [--jar PATH] [--home DIR] [--uninstall]
+# Usage: scripts/install.sh [--java PATH] [--adb PATH] [--jar PATH] [--ui|--no-ui] [--home DIR] [--uninstall]
 set -u
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -14,6 +14,7 @@ JAR_ARG=""
 HOME_ARG=""
 UNINSTALL=0
 SHIM=1
+INSTALL_UI=auto
 
 usage() {
   cat <<'EOF'
@@ -22,6 +23,9 @@ Usage: install.sh [options]
   --java PATH     Java 17+ executable (auto-detect: JAVA_HOME, PATH, sdkman)
   --adb PATH      real adb executable (auto-detect: ANDROID_HOME, ~/Android/Sdk, PATH)
   --jar PATH      corral-daemon-all.jar (default: ./corral-daemon/build/libs/corral-daemon-all.jar)
+  --ui            install the corral-ui desktop app (~/bin/corral-ui, jar in ~/.corral, and a
+                  "Corral" launcher in ~/.local/share/applications for the app grid/dock)
+  --no-ui         skip corral-ui (default: install when corral-ui-all.jar is present)
   --home DIR      install root to use instead of $HOME (tests/sandboxes only)
   --no-sdk-shim   do NOT shim the SDK's platform-tools/adb (needed to gate gradle/AGP installs)
   --uninstall     stop + remove the daemon service, shims, and ~/.corral
@@ -35,6 +39,8 @@ while [[ $# -gt 0 ]]; do
     --jar) JAR_ARG=${2:?--jar needs a path}; shift 2;;
     --home) HOME_ARG=${2:-}; if [[ -z "$HOME_ARG" ]]; then echo "ERROR: --home needs a non-empty DIR" >&2; exit 2; fi; shift 2;;
     --no-sdk-shim) SHIM=0; shift;;
+    --ui) INSTALL_UI=1; shift;;
+    --no-ui) INSTALL_UI=0; shift;;
     --uninstall) UNINSTALL=1; shift;;
     -h|--help) usage; exit 0;;
     *) echo "unknown option: $1" >&2; usage; exit 2;;
@@ -61,7 +67,11 @@ if [[ $UNINSTALL -eq 1 ]]; then
   fi
   rm -f "$UNIT_DIR/corral.service"
   if [[ $SANDBOX -eq 0 ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
-  rm -f "$BIN_DIR/adb" "$BIN_DIR/corral"
+  rm -f "$BIN_DIR/adb" "$BIN_DIR/corral" "$BIN_DIR/corral-ui"
+  rm -f "$TARGET_HOME/.local/share/applications/corral-ui.desktop"
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$TARGET_HOME/.local/share/applications" >/dev/null 2>&1 || true
+  fi
   rm -f "$TARGET_HOME/.gradle/init.d/corral-gate.gradle" "$TARGET_HOME/.gradle/init.d/corral-gate.gradle.kts"
   rm -f "$TARGET_HOME/.config/corral/gradle-tasks"
   rm -f "$TARGET_HOME/.config/corral/rules"
@@ -74,7 +84,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
       echo "Restored SDK adb at $d/adb"
     fi
   done
-  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules"
+  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/bin/corral-ui, Corral launcher, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules"
   echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
   rmdir "$TARGET_HOME/.gradle/init.d" "$TARGET_HOME/.config/corral" 2>/dev/null || true
   exit 0
@@ -112,6 +122,14 @@ resolve_jar() {
   exit 1
 }
 
+# The UI jar is optional (want_ui decides), so unlike resolve_jar this never exits:
+# an explicit CORRAL_UI_JAR wins, then the bundle beside install.sh, then the source-tree build.
+resolve_ui_jar() {
+  if [[ -n "${CORRAL_UI_JAR:-}" ]]; then echo "$CORRAL_UI_JAR"; return 0; fi
+  if [[ -f "$SCRIPT_DIR/corral-ui-all.jar" ]]; then echo "$SCRIPT_DIR/corral-ui-all.jar"; return 0; fi
+  echo "$REPO_ROOT/corral-ui/build/libs/corral-ui-all.jar"
+}
+
 # Gate EVERY adb call, including absolute-path ones from gradle/AGP/IDE, by replacing the
 # SDK's platform-tools/adb with the wrapper (real binary kept as adb.real next to it).
 # Updates $ADB to the real binary so the daemon and the ~/bin wrapper use it directly.
@@ -145,11 +163,45 @@ fi
 JAR=$(resolve_jar)
 if [[ -z "$JAR" || ! -f "$JAR" ]]; then echo "ERROR: jar not found at $JAR; pass --jar PATH." >&2; exit 1; fi
 
+UI_JAR=$(resolve_ui_jar)
+want_ui() { [ "$INSTALL_UI" = 1 ] || { [ "$INSTALL_UI" != 0 ] && [ -f "$UI_JAR" ]; }; }
+if [[ "$INSTALL_UI" = 1 && ! -f "$UI_JAR" ]]; then
+  echo "ERROR: --ui given but corral-ui-all.jar not found at $UI_JAR; pass CORRAL_UI_JAR or build it." >&2
+  exit 1
+fi
+if want_ui && [[ ! -f "$SCRIPT_DIR/corral-ui" ]]; then
+  echo "ERROR: scripts/corral-ui missing (incomplete bundle); cannot install the ui shim" >&2
+  exit 1
+fi
+
 echo "==> Installing to $TARGET_HOME"
 mkdir -p "$CORRAL_HOME" "$BIN_DIR" "$UNIT_DIR"
 cp "$JAR" "$CORRAL_HOME/corral-daemon-all.jar"
 cp "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb";  chmod +x "$BIN_DIR/adb"
 cp "$SCRIPT_DIR/corral"      "$BIN_DIR/corral"; chmod +x "$BIN_DIR/corral"
+
+if want_ui; then
+  cp "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" || { echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2; exit 1; }
+  install -m 755 "$SCRIPT_DIR/corral-ui" "$BIN_DIR/corral-ui" || { echo "ERROR: cannot install $BIN_DIR/corral-ui" >&2; exit 1; }
+  echo "Installed: corral-ui (~/bin/corral-ui, jar in ~/.corral)"
+  # Launcher for the app grid/dock. Exec uses the detected java + fat jar (not the shim) so a
+  # GUI session without the login shell's PATH/JDK still starts it. Icon is a stock placeholder.
+  DESKTOP_DIR="$TARGET_HOME/.local/share/applications"
+  mkdir -p "$DESKTOP_DIR"
+  cat > "$DESKTOP_DIR/corral-ui.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Corral
+Comment=Lease Android devices to coding agents — operator console
+Exec="$JAVA_BIN" -jar "$CORRAL_HOME/corral-ui-all.jar"
+Icon=phone
+Terminal=false
+Categories=Development;
+StartupWMClass=dev-corral-ui-CorralUiKt
+EOF
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DESKTOP_DIR" >/dev/null 2>&1 || true
+  echo "Installed: Corral launcher ($DESKTOP_DIR/corral-ui.desktop — pin it from the app grid)"
+fi
 
 # Shimming changes $ADB to the real binary (adb.real), used by the unit + the rc export.
 [[ $SHIM -eq 1 ]] && install_sdk_shim
@@ -181,6 +233,17 @@ if [[ ! -f "$TARGET_HOME/.config/corral/rules" ]]; then
 fi
 echo "Installed gate rules (~/.config/corral/rules); edit to customize read-only commands and flags"
 
+# Carry an existing observer line verbatim — including an emptied value (observers off); seed
+# corral-ui only when the line is truly absent and the UI installs.
+OBS_LINE=""
+if grep -q '^Environment=CORRAL_SCREENSHOT_OBSERVERS=' "$UNIT_DIR/corral.service" 2>/dev/null; then
+  existing_obs=$(grep -h '^Environment=CORRAL_SCREENSHOT_OBSERVERS=' "$UNIT_DIR/corral.service" | head -1 | cut -d= -f3-)
+  OBS_LINE="Environment=CORRAL_SCREENSHOT_OBSERVERS=$existing_obs"
+elif want_ui; then
+  OBS_LINE="Environment=CORRAL_SCREENSHOT_OBSERVERS=corral-ui"
+  echo "Seeded CORRAL_SCREENSHOT_OBSERVERS=corral-ui in the daemon unit (edit freely; absent-only seeding)"
+fi
+
 # Generate the per-host unit from the committed template, keeping the tuned JVM flags.
 if [[ -n "$ADB" ]]; then
   sed -e "s#%h/.sdkman/candidates/java/current/bin/java#$JAVA_BIN#" \
@@ -192,6 +255,12 @@ else
       -e "/^Environment=CORRAL_ADB=/d" \
       -e "/^Environment=PATH=/d" \
       "$SCRIPT_DIR/corral.service" > "$UNIT_DIR/corral.service"
+fi
+# Environment= belongs to [Service]; appending it after [Install] is silently ignored by systemd.
+if [[ -n "$OBS_LINE" ]]; then
+  awk -v line="$OBS_LINE" '/^\[Install\]/ { print line } { print }' \
+    "$UNIT_DIR/corral.service" > "$UNIT_DIR/corral.service.tmp" \
+    && mv "$UNIT_DIR/corral.service.tmp" "$UNIT_DIR/corral.service"
 fi
 
 # Ensure ~/bin is on PATH (the wrapper must precede the SDK dir) and the wrapper

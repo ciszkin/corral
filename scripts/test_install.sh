@@ -6,9 +6,9 @@ set -u
 
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if [ -f "$SELF/corral-daemon-all.jar" ] && [ -f "$SELF/install.sh" ]; then
-  SRC="$SELF"; ROOT=""; JAR="$SELF/corral-daemon-all.jar"; BUILD=0
+  SRC="$SELF"; ROOT=""; JAR="$SELF/corral-daemon-all.jar"; UI_JAR="$SELF/corral-ui-all.jar"; BUILD=0
 else
-  SRC="$SELF"; ROOT=$(cd "$SELF/.." && pwd); JAR="$ROOT/corral-daemon/build/libs/corral-daemon-all.jar"; BUILD=1
+  SRC="$SELF"; ROOT=$(cd "$SELF/.." && pwd); JAR="$ROOT/corral-daemon/build/libs/corral-daemon-all.jar"; UI_JAR="$ROOT/corral-ui/build/libs/corral-ui-all.jar"; BUILD=1
 fi
 
 pass=0; fail=0
@@ -20,9 +20,10 @@ check() { # check <name> <cmd...>
 
 # Build before touching HOME — gradle needs the real ~/.gradle cache.
 if [ "$BUILD" = 1 ]; then
-  (cd "$ROOT" && ./gradlew :corral-daemon:shadowJar >/dev/null 2>&1) || { echo "build failed"; exit 1; }
+  (cd "$ROOT" && ./gradlew :corral-daemon:shadowJar :corral-ui:shadowJar >/dev/null 2>&1) || { echo "build failed"; exit 1; }
 fi
 [ -f "$JAR" ] || { echo "jar not found: $JAR (build it or run beside corral-daemon-all.jar)"; exit 1; }
+[ -f "$UI_JAR" ] || { echo "ui jar not found: $UI_JAR (build it or run beside corral-ui-all.jar)"; exit 1; }
 
 REAL_HOME="${HOME:-}"
 TMP=$(mktemp -d)
@@ -145,6 +146,116 @@ check "the differed HOME's .bashrc is untouched by --home override" test "$real_
 
 # the PATH stub proved the real systemd session was never addressed
 check "systemctl stub handled daemon-reload (real session untouched)" test -s "$TMP/systemctl.log"
+
+# ===== UI component: --ui/--no-ui, observer seeding, absent-only edits, bundle default =====
+TMPHOME3="$TMP/home3"
+SDK3="$TMPHOME3/Android/Sdk/platform-tools"
+FAKE_ADB3="$SDK3/adb"
+mkdir -p "$SDK3" "$TMPHOME3/bin"
+printf '%s\n' '#!/bin/sh' 'echo "fake-sdk-adb3 $@"' > "$FAKE_ADB3"
+chmod +x "$FAKE_ADB3"
+: > "$TMPHOME3/.bashrc"
+UNIT3="$TMPHOME3/.config/systemd/user/corral.service"
+DESKTOP3="$TMPHOME3/.local/share/applications/corral-ui.desktop"
+export CORRAL_UI_JAR="$UI_JAR"
+
+ui_run() { bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$FAKE_ADB3" --jar "$JAR" --home "$TMPHOME3" "$@"; }
+
+# exactly one observer Environment= line with <value>, and it sits in [Service] (before [Install])
+obs_is() {
+  [ "$(grep -c '^Environment=CORRAL_SCREENSHOT_OBSERVERS=' "$1")" = 1 ] || return 1
+  grep -q "^Environment=CORRAL_SCREENSHOT_OBSERVERS=$2\$" "$1" || return 1
+  awk '/^\[Install\]/ { exit } /^Environment=CORRAL_SCREENSHOT_OBSERVERS=/ { found=1 } END { exit !found }' "$1"
+}
+
+# systemd ignores Environment= outside [Service]; catch that when the tool is available
+verify_unit() {
+  command -v systemd-analyze >/dev/null 2>&1 || return 0
+  ! systemd-analyze verify "$1" 2>&1 | grep -qiE 'unknown key|invalid'
+}
+
+# a malformed .desktop silently disappears from the app grid; validate when the tool is available
+verify_desktop() {
+  command -v desktop-file-validate >/dev/null 2>&1 || return 0
+  desktop-file-validate "$1"
+}
+
+ui_run --no-ui >"$TMP/ui-no.log" 2>&1; rcui=$?
+dump_on_fail "$rcui" "$TMP/ui-no.log"
+check "--no-ui installs neither" bash -c \
+  "[ ! -e '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ ! -e '$TMPHOME3/bin/corral-ui' ] && ! grep -q 'CORRAL_SCREENSHOT_OBSERVERS' '$UNIT3'"
+check "--no-ui installs no launcher" test ! -e "$DESKTOP3"
+
+# explicit --ui with a missing jar must fail before touching anything
+env CORRAL_UI_JAR=/no/such.jar bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$FAKE_ADB3" \
+  --jar "$JAR" --home "$TMPHOME3" --ui >"$TMP/ui-missing.log" 2>&1; rcm=$?
+check "--ui with a missing jar exits non-zero" test "$rcm" -ne 0
+check "--ui with a missing jar installs neither" bash -c \
+  "[ ! -e '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ ! -e '$TMPHOME3/bin/corral-ui' ] && ! grep -q 'CORRAL_SCREENSHOT_OBSERVERS' '$UNIT3'"
+
+ui_run --ui >"$TMP/ui-yes.log" 2>&1; rcui=$?
+dump_on_fail "$rcui" "$TMP/ui-yes.log"
+check "ui jar + shim installed with --ui" bash -c \
+  "[ -f '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ -x '$TMPHOME3/bin/corral-ui' ]"
+check "observer line seeded in [Service] when ui installs" obs_is "$UNIT3" corral-ui
+check "generated unit passes systemd-analyze verify" verify_unit "$UNIT3"
+check "Corral launcher installed with --ui" bash -c \
+  "[ -f '$DESKTOP3' ] && grep -q '^Name=Corral' '$DESKTOP3' && grep -q '^StartupWMClass=dev-corral-ui-CorralUiKt' '$DESKTOP3' && grep -q 'corral-ui-all.jar' '$DESKTOP3'"
+check "launcher passes desktop-file-validate" verify_desktop "$DESKTOP3"
+
+# simulate a user edit, then reinstall --ui: the edit must survive verbatim, once, in [Service]
+grep -v '^Environment=CORRAL_SCREENSHOT_OBSERVERS=' "$UNIT3" > "$UNIT3.tmp"; mv "$UNIT3.tmp" "$UNIT3"
+printf 'Environment=CORRAL_SCREENSHOT_OBSERVERS=custom-name\n' >> "$UNIT3"
+ui_run --ui >"$TMP/ui-custom.log" 2>&1; rcui=$?
+dump_on_fail "$rcui" "$TMP/ui-custom.log"
+check "existing custom observer edit survives --ui reinstall" obs_is "$UNIT3" custom-name
+
+# an emptied value means "observers off": it is present, so it must survive rather than re-seed
+grep -v '^Environment=CORRAL_SCREENSHOT_OBSERVERS=' "$UNIT3" > "$UNIT3.tmp"; mv "$UNIT3.tmp" "$UNIT3"
+printf 'Environment=CORRAL_SCREENSHOT_OBSERVERS=\n' >> "$UNIT3"
+ui_run --ui >"$TMP/ui-empty.log" 2>&1; rcui=$?
+dump_on_fail "$rcui" "$TMP/ui-empty.log"
+check "emptied observer line survives --ui reinstall" obs_is "$UNIT3" ""
+
+# --no-ui carries the edit too, and does not remove already-installed artifacts (that's --uninstall)
+ui_run --no-ui >"$TMP/ui-carry.log" 2>&1; rcui=$?
+dump_on_fail "$rcui" "$TMP/ui-carry.log"
+check "custom observer edit survives --no-ui reinstall" obs_is "$UNIT3" ""
+check "--no-ui leaves already-installed ui artifacts alone" bash -c \
+  "[ -f '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ -x '$TMPHOME3/bin/corral-ui' ]"
+
+bash "$SRC/install.sh" --home "$TMPHOME3" --uninstall >"$TMP/ui-uninstall.log" 2>&1; rcui=$?
+dump_on_fail "$rcui" "$TMP/ui-uninstall.log"
+check "uninstall removes ui artifacts" bash -c \
+  "[ ! -e '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ ! -e '$TMPHOME3/bin/corral-ui' ]"
+check "uninstall removes the launcher" test ! -e "$DESKTOP3"
+
+# no CORRAL_UI_JAR and no jar beside install.sh: --ui must fall back to the source-tree build
+if [ "$BUILD" = 1 ]; then
+  env -u CORRAL_UI_JAR bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$FAKE_ADB3" --jar "$JAR" \
+    --home "$TMPHOME3" --ui >"$TMP/ui-fallback.log" 2>&1; rcf=$?
+  dump_on_fail "$rcf" "$TMP/ui-fallback.log"
+  check "source-tree --ui falls back to the build jar" bash -c \
+    "[ -f '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ -x '$TMPHOME3/bin/corral-ui' ]"
+fi
+
+# bundle simulation: install.sh + both jars in one dir; default auto must pick the ui jar up
+BUNDLE3="$TMP/bundle3"; TMPHOME4="$TMP/home4"; SDK4="$TMPHOME4/Android/Sdk/platform-tools"; FAKE_ADB4="$SDK4/adb"
+mkdir -p "$BUNDLE3" "$SDK4" "$TMPHOME4/bin"
+cp "$SRC/install.sh" "$SRC/adb-wrapper" "$SRC/corral" "$SRC/corral-ui" "$SRC/corral.service" \
+   "$SRC/corral-gate.gradle.kts" "$SRC/corral-rules" "$BUNDLE3/"
+cp "$JAR" "$BUNDLE3/corral-daemon-all.jar"; cp "$UI_JAR" "$BUNDLE3/corral-ui-all.jar"
+chmod +x "$BUNDLE3/corral-ui" "$BUNDLE3/adb-wrapper" "$BUNDLE3/corral"
+printf '%s\n' '#!/bin/sh' 'echo "fake-sdk-adb4 $@"' > "$FAKE_ADB4"
+chmod +x "$FAKE_ADB4"
+: > "$TMPHOME4/.bashrc"
+env -u CORRAL_UI_JAR HOME="$TMPHOME" bash "$BUNDLE3/install.sh" --java "$FAKE_JAVA" --adb "$FAKE_ADB4" \
+  --jar "$BUNDLE3/corral-daemon-all.jar" --home "$TMPHOME4" >"$TMP/bundle-ui.log" 2>&1; rcb=$?
+dump_on_fail "$rcb" "$TMP/bundle-ui.log"
+check "bundle-mode default installs ui when jar present" bash -c \
+  "[ -f '$TMPHOME4/.corral/corral-ui-all.jar' ] && [ -x '$TMPHOME4/bin/corral-ui' ]"
+check "bundle-mode observer seeded in [Service]" obs_is "$TMPHOME4/.config/systemd/user/corral.service" corral-ui
+check "bundle-mode installs the launcher too" test -f "$TMPHOME4/.local/share/applications/corral-ui.desktop"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

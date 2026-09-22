@@ -9,12 +9,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-
-@Serializable
-data class EventFrame(val type: String, val resources: List<String> = emptyList(), val seq: Long = 0)
 
 /**
  * Coarse change nudges over the same shapes REST serves: a tick diffs the devices+lease view

@@ -47,10 +47,6 @@ import kotlinx.serialization.json.Json
 
 @Serializable data class RenewRequest(val owner: String, val ttlSeconds: Long = 1800)
 
-@Serializable data class DeviceStatus(val serial: String, val lease: Lease?)
-
-@Serializable data class StatusResponse(val devices: List<DeviceStatus>, val adb: String)
-
 class AppEnv(
     val devices: () -> List<Device>,
     val leases: LeaseManager,

@@ -31,7 +31,11 @@ case "$sub" in
   exec-out)
     # `adb -s <serial> exec-out screencap -p`: "screencap" is not the last arg, so scan them all
     case " ${args[*]} " in
-      *" screencap "*) printf 'fake-screen';;   # bytes only; tests assert equality, not PNG validity
+      # default is bytes only (tests assert equality, not PNG validity); opt in for demo thumbnails
+      *" screencap "*)
+        if [ -n "${FAKE_ADB_REAL_PNG:-}" ]; then
+          echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==' | base64 -d
+        else printf 'fake-screen'; fi;;
       *) exit 0;;
     esac;;
   *) exit 0;;

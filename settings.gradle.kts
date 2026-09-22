@@ -1,8 +1,9 @@
 dependencyResolutionManagement {
     repositories {
+        google()
         mavenCentral()
     }
 }
 
 rootProject.name = "corral"
-include("corral-daemon")
+include("corral-common", "corral-daemon", "corral-ui")

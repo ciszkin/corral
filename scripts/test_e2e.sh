@@ -7,9 +7,10 @@
 # this script): the bundle has no gradle project and no scripts/ subdirectory.
 #
 # Isolation: every path is redirected into a mktemp tree (CORRAL_DB/CORRAL_RULES/
-# CORRAL_FAKE_DEVICES/CORRAL_ADB); nothing touches ~/.corral, ~/.config/corral or a real
-# device. Daemons and waiters are killed by exact pid only — never `pkill -f` a pattern that
-# also appears in this script's own command line (a `corral wait` JVM has "corral" in argv).
+# CORRAL_FAKE_DEVICES/CORRAL_ADB/CORRAL_ENV_FILE); nothing touches ~/.corral,
+# ~/.config/corral or a real device. Daemons and waiters are killed by exact pid only —
+# never `pkill -f` a pattern that also appears in this script's own command line (a
+# `corral wait` JVM has "corral" in argv).
 set -u
 
 SELF=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -75,6 +76,7 @@ printf '#!/bin/sh\necho "sdk-real $@"\n' > "$TMP/sdk/platform-tools/adb.real"; c
 export CORRAL_JAR="$JAR" CORRAL_URL CORRAL_OWNER=tester
 export CORRAL_REAL_ADB="$TMP/fake-adb" CORRAL_ADB="$TMP/fake-adb"
 export CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" CORRAL_RULES="$TMP/corral-rules"
+export CORRAL_ENV_FILE="$TMP/daemon.env"   # absent on purpose: inherited env must keep winning in tests
 export PATH="$TMP/bin:$PATH"
 unset ANDROID_SERIAL
 
@@ -318,6 +320,22 @@ check_11_events() {
   return 0
 }
 
+# --- M7 Plan A: a PUT port change lands in daemon.env and survives a restart whose inherited
+# CORRAL_PORT differs — the file wins over the environment. This is the final check: it leaves
+# the daemon running on PORT+1 for the EXIT trap (nothing after it, so no port collision). ---
+check_13_precedence() {
+  local newp=$((PORT + 1))
+  curl -sf -X PUT "$CORRAL_URL/api/config" -H 'Content-Type: application/json' \
+    -d "{\"settings\":{\"CORRAL_PORT\":\"$newp\"}}" >/dev/null || return 1
+  grep -q "^CORRAL_PORT=$newp$" "$CORRAL_ENV_FILE" || return 1
+  stop_daemon
+  setsid env CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" \
+    CORRAL_RULES="$TMP/corral-rules" CORRAL_PORT="$PORT" \
+    java -Dcorral.test.tag=$$ -jar "$JAR" </dev/null >"$TMP/daemon-precedence.log" 2>&1 &
+  DAEMON_PID=$!
+  wait_daemon "$newp" "$TMP/daemon-precedence.log"   # daemon.env beats the inherited CORRAL_PORT
+}
+
 # --- run ---
 start_daemon || exit 1
 check "8.6 daemon binds loopback only" check_8_6
@@ -339,6 +357,59 @@ fi
 check "6.19 SDK-dir-first PATH: ~/bin wrapper never intercepts" check_6_19
 check "11.1/11.2 + CLI screenshot: holder reads PNG, stranger 403, CLI verb" check_11_screenshot
 check "11.9/11.10 ws events: hello frame, then state.changed on claim/free" check_11_events
+
+# --- M7 Plan A: config/doctor API. Run last: the round-trip row writes CORRAL_SCREENSHOTS=open
+# into the pinned env file, and the final precedence row restarts the daemon on PORT+1. ---
+check "config get/put round-trip and precedence" bash -c '
+  curl -sf "$CORRAL_URL/api/config" | grep -q "\"key\":\"CORRAL_PORT\"" || exit 1
+  curl -sf -X PUT "$CORRAL_URL/api/config" -H "Content-Type: application/json" \
+    -d "{\"settings\":{\"CORRAL_SCREENSHOTS\":\"open\"}}" | grep -q "\"restartRequired\":true" || exit 1
+  grep -q "^CORRAL_SCREENSHOTS=open$" "$CORRAL_ENV_FILE" || exit 1
+  exit 0
+'
+check "invalid put is 400 and writes nothing" bash -c '
+  [ -f "$CORRAL_ENV_FILE" ] || exit 1
+  before=$(md5sum "$CORRAL_ENV_FILE" | cut -d" " -f1)
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" -d "{\"settings\":{\"CORRAL_PORT\":\"99999\"}}")
+  [ "$code" = 400 ] || exit 1
+  after=$(md5sum "$CORRAL_ENV_FILE" | cut -d" " -f1)
+  [ "$before" = "$after" ] || exit 1
+  exit 0
+'
+check "doctor reports three layers" bash -c '
+  body=$(curl -sf "$CORRAL_URL/api/doctor") || exit 1
+  for l in daemon sdk-shim rules; do printf "%s" "$body" | grep -q "\"layer\":\"$l\"" || exit 1; done
+  exit 0
+'
+check "config put refuses device-touching readonly" bash -c '
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" \
+    -d "{\"rules\":{\"readonly\":[\"devices\",\"install\"],\"valueflags\":[\"-P\"],\"shell_skip\":[],\"init_floor\":[]}}")
+  [ "$code" = 400 ] || exit 1
+  exit 0
+'
+check "config put rejects a foreign origin" bash -c '
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" -H "Origin: https://evil.example" \
+    -d "{\"settings\":{\"CORRAL_SCREENSHOTS\":\"open\"}}")
+  [ "$code" = 403 ] || exit 1
+  exit 0
+'
+check "config put refuses a non-host-only readonly" bash -c '
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" \
+    -d "{\"rules\":{\"readonly\":[\"devices\",\"exec-in\"],\"valueflags\":[\"-P\"]}}")
+  [ "$code" = 400 ] || exit 1
+  exit 0
+'
+check "config put refuses a privileged port" bash -c '
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" -d "{\"settings\":{\"CORRAL_PORT\":\"80\"}}")
+  [ "$code" = 400 ] || exit 1
+  exit 0
+'
+check "config precedence: daemon.env port beats inherited env across restart" check_13_precedence
 
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"
 exit "$fail"

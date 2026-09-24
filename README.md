@@ -75,6 +75,30 @@ the same device.
   resource, and treats a seq gap after reconnect as refetch-all. The MCP `screenshot` tool
   returns an image content block, and `corral screenshot <serial> [--out F]` / `corral events`
   are the CLI verbs.
+- **Config & doctor API** — `GET /api/config` reports every daemon knob with its **effective**
+  value, built-in default and `restartRequired` flag, plus the gate rules and the `rules` /
+  `daemon.env` paths; an unusable file value falls through to inherited env then the default.
+  `PUT /api/config` validates the whole payload before writing anything (unknown keys are ignored,
+  control characters rejected, settings paths checked, the port must be 1024–65535), so a bad
+  request is `400` and writes nothing. A rules entry that cannot round-trip through the rules file
+  (whitespace, `,`, `#`, `=`) is refused, as is a `valueflags` entry without a leading dash. Over
+  the API `readonly` is an **allowlist** of host-only commands (`devices`, `start-server`,
+  `kill-server`, `track-devices`, `version`, `help`) and `shell_skip` / `init_floor` are file-only:
+  edit `~/.config/corral/rules` directly for a device-touching exemption or an identity change.
+  A rules `PUT` is idempotent for `GET`→`PUT` — an unchanged `readonly` or identity value is
+  accepted, so a save on a hand-edited host works; `readonly` / `valueflags` are a full replace
+  (an empty list clears them), while `shell_skip` / `init_floor` are file-only (an empty list
+  means "no change").
+  The response is honest about scope: `restartRequired` covers settings, while `rulesLive` marks
+  rules the wrapper reads live. Settings persist to `~/.config/corral/daemon.env` (override
+  `CORRAL_ENV_FILE`) with **file > inherited env > default** precedence — a deliberate edit beats
+  the unit's `Environment` and survives restarts. The installer seeds the file absent-only and the
+  unit's `EnvironmentFile=-…` is optional, so a fresh host still starts; a `PUT` whose `Origin` is
+  not loopback or whose port differs from the request `Host` is `403`, and startup logs and falls
+  back (rather than exiting) on an unusable `daemon.env` value. `GET /api/doctor` mirrors
+  `corral doctor`'s three layers (`daemon` / `sdk-shim` / `rules`) and is read-only; the `rules`
+  layer reports `warn` when a hand-edited `readonly` holds a non-host-only command or the identity
+  lists differ from the defaults.
 - **Desktop UI** — `corral-ui [--url http://127.0.0.1:port]` (else `CORRAL_URL`, default
   `http://127.0.0.1:8798`; the daemon is loopback-only, so `--url` picks a non-default local
   port unless the operator deliberately rebinds it) opens a Compose operator console: a device-card grid with live
@@ -121,7 +145,9 @@ agent identity — is built and verified with fake devices and the real `omp` / 
 harnesses; the queue was later reworked to client-polled tickets, so no request is parked
 server-side and a crashed client cannot stall it. Phase 3 — the MCP server
 over streamable HTTP at `/mcp` — is built and verified with fake devices via a scripted MCP
-handshake. Corral replaces the `adb-lease` MVP (`adb-lease.md`).
+handshake. Later phases are built too: M4 observability (screenshots + `/ws/events`), M5 the
+Compose Desktop UI, and M7 the config/doctor API. Corral replaces the `adb-lease` MVP
+(`adb-lease.md`).
 
 ## Roadmap (Phase 3+)
 

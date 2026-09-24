@@ -64,6 +64,38 @@ object RulesFile {
     fun load(path: Path = defaultPath()): GateRules =
         runCatching { Files.readString(path) }.getOrNull()?.let(::parse) ?: GateRules.EMPTY
 
+    /** Upsert only the gate keys, preserving the identity lists (and every other line) verbatim. */
+    fun writeGate(readonly: Set<String>, valueFlags: Set<String>, path: Path = defaultPath()) =
+        upsert(path, linkedMapOf(
+            "readonly" to readonly.joinToString(","),
+            "valueflags" to valueFlags.joinToString(",")))
+
+    /** Upsert the four known keys, preserving every other line (comments, unknown keys) verbatim. Atomic. */
+    fun write(rules: GateRules, path: Path = defaultPath()) =
+        upsert(path, linkedMapOf(
+            "readonly" to rules.readonly.joinToString(","),
+            "valueflags" to rules.valueFlags.joinToString(","),
+            "shell_skip" to rules.shellSkip.map(String::lowercase).joinToString(","),
+            "init_floor" to rules.initFloor.map(String::lowercase).joinToString(",")))
+
+    private fun upsert(path: Path, wanted: Map<String, String>) {
+        val existing = if (Files.exists(path)) Files.readAllLines(path) else emptyList()
+        val out = existing.filter { line ->
+            line.substringBefore('#').substringBefore('=').trim().lowercase() !in wanted.keys
+        }.toMutableList()
+        wanted.forEach { (k, v) -> out.add("$k=$v") }
+        val dir = path.parent ?: Path.of(".")
+        Files.createDirectories(dir)
+        val tmp = Files.createTempFile(dir, "rules", ".tmp")
+        try {
+            Files.write(tmp, out)
+            Files.move(tmp, path, StandardCopyOption.REPLACE_EXISTING)
+        } catch (e: Exception) {
+            runCatching { Files.deleteIfExists(tmp) }
+            throw e
+        }
+    }
+
     /**
      * Restore the factory default from the jar resource when the file is absent or blank.
      * A present, non-blank file is user intent and is never overwritten. Mirrors SdkShim.

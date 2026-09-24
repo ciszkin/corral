@@ -10,10 +10,53 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.system.exitProcess
 
+internal fun resolvePort(config: DaemonConfig): Int {
+    val raw = config.get("CORRAL_PORT")
+    parsePort(raw)?.let { return it }
+    val chosen = parsePort(config.get("CORRAL_PORT", useFile = false)) ?: 8798
+    System.err.println("corral: CORRAL_PORT '$raw' is unusable; using $chosen")
+    return chosen
+}
+
+internal fun resolveDbPath(config: DaemonConfig): Path {
+    val raw = config.get("CORRAL_DB")
+    if (dbPathUsable(raw)) return Path.of(raw)
+    val fallback = config.get("CORRAL_DB", useFile = false)
+    val chosen = if (dbPathUsable(fallback)) fallback else config.defaultValue("CORRAL_DB")
+    System.err.println("corral: CORRAL_DB '$raw' is unusable; using '$chosen'")
+    return Path.of(chosen)
+}
+
+internal fun resolveAdb(config: DaemonConfig): String {
+    val raw = config.get("CORRAL_ADB")
+    if (adbValueUsable(raw)) return raw
+    val fileValue = config.fileValue("CORRAL_ADB")?.takeIf { it.isNotBlank() }
+    if (fileValue == null || adbValueUsable(fileValue)) {
+        // an env-provided bad value is preserved so /api/doctor can surface it, but say so
+        System.err.println("corral: CORRAL_ADB '$raw' is unusable (from the environment)")
+        return raw
+    }
+    val fallback = config.get("CORRAL_ADB", useFile = false)
+    val chosen = if (adbValueUsable(fallback)) fallback else config.defaultValue("CORRAL_ADB")
+    System.err.println("corral: CORRAL_ADB '$raw' is unusable; using '$chosen'")
+    return chosen
+}
+
+/** A file value the API wrote that the daemon had to reject: say so, then the effective value shows in GET. */
+private fun warnRejectedFileValue(config: DaemonConfig, key: String) {
+    val file = config.fileValue(key)?.takeIf { it.isNotBlank() } ?: return
+    if (!config.usable(key, file))
+        System.err.println("corral: $key '$file' in ${DaemonConfig.defaultPath()} is unusable; using '${config.get(key)}'")
+}
+
 fun main() {
-    val port = System.getenv("CORRAL_PORT")?.toInt() ?: 8798
-    val dbPath = System.getenv("CORRAL_DB")?.let { Path.of(it) }
-        ?: Path.of(System.getProperty("user.home"), ".corral", "corral.db") // one portable state dir on every OS
+    val config = DaemonConfig()
+    warnRejectedFileValue(config, "CORRAL_PORT")
+    warnRejectedFileValue(config, "CORRAL_DB")
+    warnRejectedFileValue(config, "CORRAL_ADB")
+    warnRejectedFileValue(config, "CORRAL_SCREENSHOTS")
+    val port = resolvePort(config)
+    val dbPath = resolveDbPath(config)
     dbPath.parent?.let { Files.createDirectories(it) }
     // Refuse a second daemon on the same DB: each would keep its own in-memory leases over one
     // SQLite file and double-lease. The OS drops the lock on crash, so a dead daemon never blocks.
@@ -23,7 +66,7 @@ fun main() {
         System.err.println("corral: another daemon already holds $dbPath — refusing to start (two daemons must not share one CORRAL_DB)")
         exitProcess(1)
     }
-    val adb = System.getenv("CORRAL_ADB") ?: "adb"
+    val adb = resolveAdb(config)
     val db = Db(dbPath)
     val scope = CoroutineScope(Dispatchers.IO)
 
@@ -58,7 +101,7 @@ fun main() {
         { monitor.devices.map { DeviceStatus(it.serial, leases.snapshot[it.serial]) } },
         { leases.queueSnapshot() },
         scope)
-    val env = AppEnv({ monitor.devices }, leases, adb, Screenshotter({ monitor.devices }, adb), ScreenshotPolicy(), events)
+    val env = AppEnv({ monitor.devices }, leases, adb, Screenshotter({ monitor.devices }, adb), ScreenshotPolicy(), events, config)
     events.start()
     embeddedServer(CIO, port = port, host = "127.0.0.1") {
         guardLocalHost()

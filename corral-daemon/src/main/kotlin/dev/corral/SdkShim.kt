@@ -40,4 +40,17 @@ object SdkShim {
         return if (repaired) "repaired SDK adb shim at $shim (real binary kept as $realAdb)"
         else "SDK adb shim repair failed at $shim; re-run install.sh"
     }
+
+    /** Read-only health check for /api/doctor — never repairs (that is [ensure]'s job on the 10 s tick). */
+    fun probe(realAdb: Path): Pair<String, String> {
+        if (!realAdb.isAbsolute || realAdb.fileName?.toString()?.endsWith(".real") != true)
+            return "skipped" to "unmanaged adb path (${shimPathOf(realAdb.toString())})"
+        val shim = realAdb.resolveSibling("adb")
+        val shimText = runCatching { Files.readString(shim) }.getOrNull()
+            ?: return "fail" to "$shim missing (re-run install.sh)"
+        if (!shimText.contains(MARKER)) return "fail" to "$shim is not the corral wrapper (re-run install.sh)"
+        if (!Files.isExecutable(realAdb))
+            return "fail" to "shim ok but $realAdb is missing or not executable (re-run install.sh)"
+        return "ok" to "$shim -> adb.real"
+    }
 }

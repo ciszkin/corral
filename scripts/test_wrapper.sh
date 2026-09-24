@@ -47,6 +47,7 @@ chmod +x "$TMP/bin/corral"
 export CORRAL_RULES="$TMP/corral-rules"
 cp "$SRC/corral-rules" "$CORRAL_RULES"
 export CORRAL_JAR="$JAR"
+export CORRAL_ENV_FILE="$TMP/daemon.env"   # absent on purpose: inherited env must keep winning in tests
 
 start_daemon() {
   setsid env CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" CORRAL_PORT=$PORT \
@@ -244,6 +245,16 @@ check "bash wrapper and corral gate agree on classification" bash -c '
     eval corral gate -- $line >/dev/null 2>&1; g=$?
     [ "$b" = "$g" ] || { echo "mismatch [$line]: bash=$b gate=$g" >&2; exit 1; }
   done
+  exit 0
+'
+
+# the wrapper only consults valueflags inside its `-*)` branch, so a non-dash entry would be a
+# subcommand there but a flag here — the API must refuse to write that drift at all
+check "api rejects non-dash valueflags" bash -c '
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" \
+    -d "{\"rules\":{\"readonly\":[\"devices\"],\"valueflags\":[\"shell\"],\"shell_skip\":[],\"init_floor\":[]}}")
+  [ "$code" = 400 ] || { echo "expected 400, got $code" >&2; exit 1; }
   exit 0
 '
 

@@ -64,6 +64,7 @@ dump_on_fail() { [ "$1" -eq 0 ] || { echo "--- log ---"; sed -n '1,80p' "$2"; };
 
 UNIT="$TMPHOME/.config/systemd/user/corral.service"
 RULES="$TMPHOME/.config/corral/rules"
+DAEMON_ENV="$TMPHOME/.config/corral/daemon.env"
 GATE="$TMPHOME/.gradle/init.d/corral-gate.gradle.kts"
 
 # ===== first install =====
@@ -96,11 +97,17 @@ check "9.5 gate points at the sandbox corral shim" grep -qF "$TMPHOME/bin/corral
 check "9.6 rules installed" test -f "$RULES"
 printf '\n# sandbox sentinel edit\n' >> "$RULES"
 
+# 9.9 optional EnvironmentFile: the generated unit carries it; daemon.env installed absent-only
+check "9.9 unit carries optional EnvironmentFile line" grep -q '^EnvironmentFile=-.*daemon.env' "$UNIT"
+check "9.9 daemon.env created on install" test -f "$DAEMON_ENV"
+printf '\n# sandbox daemon.env sentinel edit\n' >> "$DAEMON_ENV"
+
 # ===== 9.3 idempotence: second install =====
 install_run >"$TMP/install2.log" 2>&1; rc2=$?
 dump_on_fail "$rc2" "$TMP/install2.log"
 check "9.3 re-run install exits 0" test "$rc2" -eq 0
 check "9.6 user rules edit survives re-run" grep -q 'sandbox sentinel edit' "$RULES"
+check "9.9 daemon.env edit survives re-run" grep -q 'sandbox daemon.env sentinel edit' "$DAEMON_ENV"
 check "9.3 artifacts intact after re-run" bash -c \
   "[ -f '$UNIT' ] && [ -x '$TMPHOME/bin/adb' ] && grep -q 'corral adb wrapper' '$TMPHOME/bin/adb' && [ -f '$SDK/adb.real' ]"
 
@@ -115,6 +122,7 @@ check "9.7 ~/.corral removed" test ! -e "$TMPHOME/.corral"
 check "9.7 gradle gate removed" test ! -e "$GATE"
 check "9.7 gradle-tasks removed" test ! -e "$TMPHOME/.config/corral/gradle-tasks"
 check "9.7 rules removed" test ! -e "$RULES"
+check "9.7 daemon.env removed" test ! -e "$DAEMON_ENV"
 check "9.8 SDK adb restored from adb.real" grep -q 'fake-sdk-adb' "$SDK/adb"
 check "9.8 adb.real consumed" test ! -e "$SDK/adb.real"
 

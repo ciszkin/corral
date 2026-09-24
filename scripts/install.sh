@@ -75,6 +75,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   rm -f "$TARGET_HOME/.gradle/init.d/corral-gate.gradle" "$TARGET_HOME/.gradle/init.d/corral-gate.gradle.kts"
   rm -f "$TARGET_HOME/.config/corral/gradle-tasks"
   rm -f "$TARGET_HOME/.config/corral/rules"
+  rm -f "$TARGET_HOME/.config/corral/daemon.env"
   rm -rf "$CORRAL_HOME"
   # restore the SDK adb if it was shimmed (adb.real -> adb)
   for d in "$TARGET_HOME/Android/Sdk/platform-tools" "${ANDROID_HOME:-}/platform-tools" "${ANDROID_SDK_ROOT:-}/platform-tools"; do
@@ -84,7 +85,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
       echo "Restored SDK adb at $d/adb"
     fi
   done
-  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/bin/corral-ui, Corral launcher, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules"
+  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/bin/corral-ui, Corral launcher, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules, ~/.config/corral/daemon.env"
   echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
   rmdir "$TARGET_HOME/.gradle/init.d" "$TARGET_HOME/.config/corral" 2>/dev/null || true
   exit 0
@@ -232,6 +233,13 @@ if [[ ! -f "$TARGET_HOME/.config/corral/rules" ]]; then
   cp "$SCRIPT_DIR/corral-rules" "$TARGET_HOME/.config/corral/rules"
 fi
 echo "Installed gate rules (~/.config/corral/rules); edit to customize read-only commands and flags"
+
+# daemon.env: the /api/config write target; absent-only (a present file is deliberate config)
+if [ ! -f "$TARGET_HOME/.config/corral/daemon.env" ]; then
+  printf '# corral daemon env — written by PUT /api/config; file wins over the unit env\n' \
+    > "$TARGET_HOME/.config/corral/daemon.env"
+  echo "Created ~/.config/corral/daemon.env (absent-only)"
+fi
 
 # Carry an existing observer line verbatim — including an emptied value (observers off); seed
 # corral-ui only when the line is truly absent and the UI installs.

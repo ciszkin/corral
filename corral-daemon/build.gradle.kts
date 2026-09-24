@@ -26,6 +26,13 @@ dependencies {
     testImplementation(libs.ktor.client.websockets)
 }
 
+tasks.test {
+    // L1 hermeticity: the daemon's file-backed config must not read the developer's ~/.config.
+    val testHome = layout.buildDirectory.dir("test-home")
+    environment("CORRAL_RULES", testHome.get().asFile.resolve("rules").absolutePath)
+    environment("CORRAL_ENV_FILE", testHome.get().asFile.resolve("daemon.env").absolutePath)
+}
+
 tasks.shadowJar {
     archiveBaseName.set("corral-daemon")
     manifest { attributes["Main-Class"] = "dev.corral.MainKt" }

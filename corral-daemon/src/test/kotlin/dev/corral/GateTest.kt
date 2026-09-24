@@ -13,6 +13,11 @@ class GateTest {
     @Test fun bareAdbPasses() = assertEquals(GateDecision.Pass, c())
     @Test fun globalFlagAlonePasses() = assertEquals(GateDecision.Pass, c("-v"))
     @Test fun valueFlagConsumesItsValue() = assertEquals(GateDecision.Pass, c("-P", "5037", "devices"))
+    @Test fun nonDashValueFlagDoesNotSwallowTheSubcommand() {
+        val rules = GateRules(setOf("devices"), setOf("shell"), emptySet(), emptySet())
+        assertEquals(GateDecision.Deny("no device pinned (no -s, no ANDROID_SERIAL)"),
+            Gate.classify(listOf("shell", "ls"), null, rules))
+    }
     @Test fun inlineSerialChecks() =
         assertEquals(GateDecision.Check("dev1", "shell"), c("-sdev1", "shell", "ls"))
     @Test fun splitSerialChecks() =

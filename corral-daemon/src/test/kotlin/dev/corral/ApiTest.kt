@@ -8,6 +8,7 @@ import io.ktor.client.request.delete
 import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
@@ -42,6 +43,11 @@ class ApiTest {
     private val testDevices = {
         listOf(Device("dev1", "device", model = "Pixel_6", osVersion = "13"),
                Device("dev2", "device", model = "SM-S918B", osVersion = "13"))
+    }
+
+    @AfterTest fun cleanConfigFixtures() {
+        Files.deleteIfExists(RulesFile.defaultPath())
+        Files.deleteIfExists(DaemonConfig.defaultPath())
     }
 
     private fun ApplicationTestBuilder.corral(
@@ -84,6 +90,539 @@ class ApiTest {
             corralModule(AppEnv({ devices }, leases, screenshotter = fakeScreenshotter(devices, failAdb), policy = policy))
         }
         CoroutineScope(coroutineContext).block(client)
+    }
+
+    private fun withConfigApi(config: DaemonConfig, block: suspend CoroutineScope.(HttpClient) -> Unit) =
+        testApplication {
+            application {
+                corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), config = config))
+            }
+            CoroutineScope(coroutineContext).block(client)
+        }
+
+    @Test fun configReportsEffectiveValuesDefaultsAndPaths() {
+        val rules = GateRules(setOf("-s"), setOf("-p"), setOf("bash", "sh"), setOf("systemd"))
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(rules, rulesPath)
+
+        val config = DaemonConfig(
+            fileValues = mapOf("CORRAL_PORT" to "9000"),
+            inherited = mapOf("CORRAL_SCREENSHOTS" to "open"))
+
+        withConfigApi(config) { c ->
+            val r = c.get("/api/config")
+            assertEquals(HttpStatusCode.OK, r.status)
+            val body = Json.decodeFromString<ConfigResponse>(r.bodyAsText())
+
+            val rawRules = Json.parseToJsonElement(r.bodyAsText()).jsonObject["rules"]!!.jsonObject
+            for (key in listOf("readonly", "valueflags", "shell_skip", "init_floor"))
+                assertTrue(key in rawRules, "wire key '$key' missing from rules")
+
+            val port = body.settings.first { it.key == "CORRAL_PORT" }
+            assertEquals("9000", port.value)
+            assertEquals("8798", port.default)
+            assertTrue(port.restartRequired)
+
+            val shots = body.settings.first { it.key == "CORRAL_SCREENSHOTS" }
+            assertEquals("open", shots.value)
+            assertEquals("strict", shots.default)
+
+            val adb = body.settings.first { it.key == "CORRAL_ADB" }
+            assertEquals("adb", adb.value)
+            assertEquals("adb", adb.default)
+
+            assertEquals(listOf("-s"), body.rules.readonly)
+            assertEquals(listOf("-p"), body.rules.valueflags)
+            assertEquals(listOf("bash", "sh"), body.rules.shell_skip)
+            assertEquals(listOf("systemd"), body.rules.init_floor)
+            assertEquals(rulesPath.toString(), body.rulesPath)
+            assertEquals(DaemonConfig.defaultPath().toString(), body.envPath)
+        }
+    }
+
+    @Test fun configReportsTheEffectiveValueWhenTheFileValueIsUnusable() {
+        val config = DaemonConfig(
+            fileValues = mapOf("CORRAL_PORT" to "22"),
+            inherited = mapOf("CORRAL_PORT" to "9000"))
+
+        withConfigApi(config) { c ->
+            val body = Json.decodeFromString<ConfigResponse>(c.get("/api/config").bodyAsText())
+            assertEquals("9000", body.settings.first { it.key == "CORRAL_PORT" }.value)
+        }
+    }
+
+    @Test fun configEmitsRuleKeysEvenWhenAListIsEmpty() {
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(GateRules(setOf("devices"), emptySet()), rulesPath)
+
+        withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+            val rawRules = Json.parseToJsonElement(c.get("/api/config").bodyAsText())
+                .jsonObject["rules"]!!.jsonObject
+            for (key in listOf("readonly", "valueflags", "shell_skip", "init_floor"))
+                assertTrue(key in rawRules, "wire key '$key' missing from rules when its list is empty")
+            assertEquals(0, rawRules["valueflags"]!!.jsonArray.size)
+        }
+    }
+
+    @Test fun configUnwiredAnswers503() = withApi { c ->
+        val r = c.get("/api/config")
+        assertEquals(HttpStatusCode.ServiceUnavailable, r.status)
+        assertTrue(r.bodyAsText().contains("config not wired"))
+    }
+
+    private suspend fun HttpClient.putConfig(json: String) =
+        put("/api/config") { contentType(ContentType.Application.Json); setBody(json) }
+
+    @Test fun putWritesKnownSettingsAndRules() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"open"},"rules":{"readonly":["devices"],"valueflags":["-p"]}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(Json.decodeFromString<PutConfigResponse>(r.bodyAsText()).restartRequired)
+        val raw = Json.parseToJsonElement(r.bodyAsText()).jsonObject
+        assertEquals(JsonPrimitive(true), raw["restartRequired"])
+        assertTrue(raw["warnings"] is JsonArray, "warnings key missing from the PUT wire response")
+        assertEquals("open", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_SCREENSHOTS"])
+        val rules = RulesFile.load(RulesFile.defaultPath())
+        assertEquals(setOf("devices"), rules.readonly)
+        assertEquals(setOf("-p"), rules.valueFlags)
+        assertEquals(DEFAULT_SHELL_SKIP, rules.shellSkip)
+        assertEquals(DEFAULT_INIT_FLOOR, rules.initFloor)
+    }
+
+    @Test fun putInvalidPortIs400AndWritesNothing() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000", "KEEP" to "yes"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_PORT":"99999"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        val errs = Json.decodeFromString<ConfigErrors>(r.bodyAsText())
+        assertTrue(errs.errors.any { it.contains("CORRAL_PORT") }, "expected a CORRAL_PORT error, got ${errs.errors}")
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putRejectsBadScreenshotsMode() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val bad = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"sometimes"}}""")
+        assertEquals(HttpStatusCode.BadRequest, bad.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(bad.bodyAsText()).errors.any { it.contains("CORRAL_SCREENSHOTS") })
+
+        val ok = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"OPEN"}}""")
+        assertEquals(HttpStatusCode.OK, ok.status)
+        assertEquals("open", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_SCREENSHOTS"])
+    }
+
+    @Test fun putRejectsBlankPaths() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_ADB":"  "}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_ADB") })
+    }
+
+    @Test fun putRejectsRelativeDbPath() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_DB":"relative/x.db"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_DB") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putRejectsUnwritableDbParent() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val file = Files.createTempFile("corral-db-parent", ".file")
+        try {
+            val r = c.putConfig("""{"settings":{"CORRAL_DB":"$file/child/db"}}""")
+            assertEquals(HttpStatusCode.BadRequest, r.status)
+            assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_DB") })
+            assertEquals(envBefore, Files.readString(envPath))
+            assertEquals(rulesBefore, Files.readString(rulesPath))
+        } finally {
+            Files.deleteIfExists(file)
+        }
+    }
+
+    @Test fun putRejectsDbPathThatIsADirectory() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val dir = createTempDirectory("corral-db-dir")
+        try {
+            val r = c.putConfig("""{"settings":{"CORRAL_DB":"$dir"}}""")
+            assertEquals(HttpStatusCode.BadRequest, r.status)
+            assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_DB") })
+            assertEquals(envBefore, Files.readString(envPath))
+            assertEquals(rulesBefore, Files.readString(rulesPath))
+        } finally {
+            Files.deleteIfExists(dir)
+        }
+    }
+
+    @Test fun putRejectsRelativeAdbPath() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_ADB":"../x"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_ADB") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putRejectsMissingAdbExecutable() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_ADB":"/nonexistent/adb"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_ADB") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putAcceptsValidAbsoluteDbAndAdb() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val db = createTempDirectory("corral-db").resolve("db/corral.db")
+        val adb = Files.createTempFile("corral-adb", ".sh")
+        adb.toFile().setExecutable(true)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_DB":"$db","CORRAL_ADB":"$adb"}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        val env = EnvFile.read(DaemonConfig.defaultPath())
+        assertEquals(db.toString(), env["CORRAL_DB"])
+        assertEquals(adb.toString(), env["CORRAL_ADB"])
+    }
+
+    @Test fun putWarnsWhenBareAdbIsNotOnPath() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_ADB":"definitely-not-a-real-bin-xyz"}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(Json.decodeFromString<PutConfigResponse>(r.bodyAsText()).warnings.any {
+            it.contains("definitely-not-a-real-bin-xyz") && it.contains("not on PATH")
+        }, "a bare command not on PATH must warn")
+    }
+
+    @Test fun putRejectsPrivilegedPort() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000", "KEEP" to "yes"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_PORT":"22"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_PORT") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putIgnoresUnknownSettingsKeys() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"UNKNOWN":"x","CORRAL_PORT":"9001"}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        val env = EnvFile.read(DaemonConfig.defaultPath())
+        assertEquals("9001", env["CORRAL_PORT"])
+        assertFalse(env.containsKey("UNKNOWN"))
+    }
+
+    @Test fun putRulesOnlyLeavesEnvFileUntouched() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        val envBefore = Files.readString(envPath)
+
+        val r = c.putConfig("""{"rules":{"readonly":["devices"],"valueflags":[]}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(setOf("devices"), RulesFile.load(rulesPath).readonly)
+
+        val rulesBefore = Files.readString(rulesPath)
+        val s = c.putConfig("""{"settings":{"CORRAL_PORT":"9001"}}""")
+        assertEquals(HttpStatusCode.OK, s.status)
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+        assertEquals("9001", EnvFile.read(envPath)["CORRAL_PORT"])
+    }
+
+    @Test fun putRefusesNonHostOnlyReadonly() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("devices"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        for (bad in listOf("install", "exec-in")) {
+            val r = c.putConfig("""{"rules":{"readonly":["devices","$bad"],"valueflags":[]}}""")
+            assertEquals(HttpStatusCode.BadRequest, r.status, "$bad must be refused")
+            assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains(bad) },
+                "error must name $bad")
+            assertEquals(envBefore, Files.readString(envPath))
+            assertEquals(rulesBefore, Files.readString(rulesPath))
+        }
+
+        val ok = c.putConfig("""{"rules":{"readonly":["devices","help"],"valueflags":[]}}""")
+        assertEquals(HttpStatusCode.OK, ok.status)
+    }
+
+    @Test fun putRejectsIdentityListChange() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val shellSkip = c.putConfig("""{"rules":{"readonly":["devices"],"valueflags":[],"shell_skip":["python3"]}}""")
+        assertEquals(HttpStatusCode.BadRequest, shellSkip.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(shellSkip.bodyAsText()).errors.any { it.contains("shell_skip") })
+
+        val initFloor = c.putConfig("""{"rules":{"readonly":["devices"],"valueflags":[],"init_floor":["systemd"]}}""")
+        assertEquals(HttpStatusCode.BadRequest, initFloor.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(initFloor.bodyAsText()).errors.any { it.contains("init_floor") })
+    }
+
+    @Test fun putAcceptsUnchangedHandEditedReadonly() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(GateRules(setOf("devices", "exec-in"), setOf("-P")), rulesPath)
+
+        val r = c.putConfig("""{"rules":{"readonly":["devices","exec-in"],"valueflags":["-P"]}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue("exec-in" in Files.readString(rulesPath), "an unchanged hand-edited readonly must survive")
+    }
+
+    @Test fun putAcceptsUnchangedHandEditedIdentity() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(GateRules(setOf("devices"), setOf("-P"), setOf("python3")), rulesPath)
+
+        val r = c.putConfig("""{"rules":{"readonly":["devices"],"valueflags":["-P"],"shell_skip":["python3"]}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue("shell_skip=python3" in Files.readString(rulesPath), "the unchanged identity line must survive")
+    }
+
+    @Test fun putEmptyReadonlyClearsTheGateList() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(GateRules(setOf("devices"), setOf("-P")), rulesPath)
+
+        val r = c.putConfig("""{"rules":{"readonly":[],"valueflags":["-P"]}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(RulesFile.load(rulesPath).readonly.isEmpty(), "an empty readonly must clear the gate list")
+        assertTrue(Files.readString(rulesPath).lineSequence().any { it == "readonly=" },
+            "the file must keep an explicit empty readonly line, not the old devices")
+    }
+
+    @Test fun putStillRefusesAReadonlyChange() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(GateRules(setOf("devices"), setOf("-P")), rulesPath)
+
+        val r = c.putConfig("""{"rules":{"readonly":["devices","exec-in"],"valueflags":["-P"]}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("exec-in") })
+    }
+
+    @Test fun putOmittedIdentityListsAreLeftUntouched() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        Files.writeString(rulesPath, "readonly=devices\nvalueflags=-P\nshell_skip=python3,claude\ninit_floor=myinit\n# keep me\n")
+
+        val r = c.putConfig("""{"rules":{"readonly":["devices","help"],"valueflags":["-P"]}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        val after = Files.readString(rulesPath)
+        assertTrue("shell_skip=python3,claude" in after, "identity line must survive verbatim")
+        assertTrue("init_floor=myinit" in after, "identity line must survive verbatim")
+        assertTrue("# keep me" in after)
+        val rules = RulesFile.load(rulesPath)
+        assertEquals(setOf("devices", "help"), rules.readonly)
+        assertEquals(setOf("-P"), rules.valueFlags)
+        assertEquals(setOf("python3", "claude"), rules.shellSkip)
+        assertEquals(setOf("myinit"), rules.initFloor)
+    }
+
+    @Test fun putRejectsRulesEntryWithComma() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"rules":{"readonly":["version,install"],"valueflags":[],"shell_skip":[],"init_floor":[]}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("readonly='version,install'") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putRejectsRulesEntryWithWhitespace() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"rules":{"readonly":["ver sion"],"valueflags":[],"shell_skip":[],"init_floor":[]}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("readonly='ver sion'") })
+    }
+
+    @Test fun putRejectsValueflagsWithoutDash() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"rules":{"readonly":["devices"],"valueflags":["shell"],"shell_skip":[],"init_floor":[]}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any {
+            it.contains("valueflags") && it.contains("'shell'")
+        })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putRulesOnlyReportsRulesLiveWithoutRestart() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"rules":{"readonly":["devices"],"valueflags":[],"shell_skip":[],"init_floor":[]}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        val body = Json.decodeFromString<PutConfigResponse>(r.bodyAsText())
+        assertTrue(body.rulesLive)
+        assertFalse(body.restartRequired)
+    }
+
+    @Test fun putSettingsOnlyReportsRestartWithoutRulesLive() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"open"}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        val body = Json.decodeFromString<PutConfigResponse>(r.bodyAsText())
+        assertTrue(body.restartRequired)
+        assertFalse(body.rulesLive)
+    }
+
+    @Test fun putObserversTrimmedAndDeduped() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOT_OBSERVERS":" a , a, b "}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertEquals("a,b", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_SCREENSHOT_OBSERVERS"])
+    }
+
+    @Test fun putBlankObserversDisablesObservers() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOT_OBSERVERS":""}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertEquals("", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_SCREENSHOT_OBSERVERS"])
+    }
+
+    @Test fun putRejectsNewlineInjection() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val smuggled = c.putConfig("""{"settings":{"CORRAL_GRADLE_TASKS":"a\nCORRAL_ADB=/evil/adb"}}""")
+        assertEquals(HttpStatusCode.BadRequest, smuggled.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(smuggled.bodyAsText()).errors.any { it.contains("control") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+
+        val rulesInjection = c.putConfig("""{"rules":{"readonly":["a\nCORRAL_ADB=/evil"],"valueflags":[],"shell_skip":[],"init_floor":[]}}""")
+        assertEquals(HttpStatusCode.BadRequest, rulesInjection.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(rulesInjection.bodyAsText()).errors.any { it.contains("rules entries") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+
+        val ctrl = c.putConfig("""{"settings":{"CORRAL_GRADLE_TASKS":"a\u0007b"}}""")
+        assertEquals(HttpStatusCode.BadRequest, ctrl.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(ctrl.bodyAsText()).errors.any { it.contains("control") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun configPutRejectsForeignOrigin() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val body = """{"settings":{"CORRAL_SCREENSHOTS":"open"}}"""
+
+        val foreign = c.put("/api/config") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "https://evil.example")
+            setBody(body)
+        }
+        assertEquals(HttpStatusCode.Forbidden, foreign.status)
+
+        val sameOrigin = c.put("/api/config") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "http://127.0.0.1:8798")
+            header(HttpHeaders.Host, "127.0.0.1:8798")
+            setBody(body)
+        }
+        assertEquals(HttpStatusCode.OK, sameOrigin.status)
+
+        val otherPort = c.put("/api/config") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "http://127.0.0.1:3000")
+            header(HttpHeaders.Host, "127.0.0.1:8798")
+            setBody(body)
+        }
+        assertEquals(HttpStatusCode.Forbidden, otherPort.status)
+
+        val missing = c.putConfig(body)
+        assertEquals(HttpStatusCode.OK, missing.status)
+    }
+
+    @Test fun putRejectsTrailingBackslash() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_GRADLE_TASKS":"assembleDebug\\"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_GRADLE_TASKS") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putRejectsQuotedPathValue() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val db = createTempDirectory("corral-db").resolve("db/corral.db")
+        val envPath = DaemonConfig.defaultPath()
+        val rulesPath = RulesFile.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000"))
+        RulesFile.write(GateRules(setOf("-s"), setOf("-p")), rulesPath)
+        val envBefore = Files.readString(envPath)
+        val rulesBefore = Files.readString(rulesPath)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_DB":"\"$db\""}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_DB") })
+        assertEquals(envBefore, Files.readString(envPath))
+        assertEquals(rulesBefore, Files.readString(rulesPath))
+    }
+
+    @Test fun putUnwiredAnswers503() = withApi { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_PORT":"9001"}}""")
+        assertEquals(HttpStatusCode.ServiceUnavailable, r.status)
+        assertTrue(r.bodyAsText().contains("config not wired"))
+    }
+
+    @Test fun putNoWarningWhenReadonlyIsSafe() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"rules":{"readonly":["devices"],"valueflags":[],"shell_skip":[],"init_floor":[]}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(Json.decodeFromString<PutConfigResponse>(r.bodyAsText()).warnings.isEmpty())
     }
 
     @Test fun devicesListed() = withApi { c ->
@@ -148,6 +687,88 @@ class ApiTest {
             val r = client.get("/api/status")
             assertEquals(HttpStatusCode.OK, r.status)
             assertTrue(r.bodyAsText().contains("\"adb\":\"/custom/sdk/platform-tools/adb\""))
+        }
+    }
+
+    @Test fun doctorReportsThreeLayersAndAdb() {
+        val dir = createTempDirectory("doctor")
+        val realAdb = dir.resolve("platform-tools/adb.real")
+        Files.createDirectories(realAdb.parent)
+        Files.writeString(realAdb, "REAL ADB v1")
+        realAdb.toFile().setExecutable(true)
+        Files.writeString(realAdb.resolveSibling("adb"), "#!/usr/bin/env bash\n# corral adb wrapper: enforces leasing.\n")
+
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(GateRules(setOf("devices"), setOf("-P")), rulesPath)
+
+        testApplication {
+            application {
+                corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), adbPath = realAdb.toString()))
+            }
+            val r = client.get("/api/doctor")
+            assertEquals(HttpStatusCode.OK, r.status)
+            val body = Json.decodeFromString<DoctorResponse>(r.bodyAsText())
+            assertEquals(listOf("daemon", "sdk-shim", "rules"), body.layers.map { it.layer })
+            assertEquals("ok", body.layers.first { it.layer == "daemon" }.status)
+            assertEquals("ok", body.layers.first { it.layer == "sdk-shim" }.status)
+            assertEquals("ok", body.layers.first { it.layer == "rules" }.status)
+            assertEquals(realAdb.toString(), body.adb)
+        }
+    }
+
+    @Test fun doctorReportsRulesFailAndShimSkipped() {
+        Files.deleteIfExists(RulesFile.defaultPath())
+
+        testApplication {
+            application {
+                corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), adbPath = null))
+            }
+            val r = client.get("/api/doctor")
+            assertEquals(HttpStatusCode.OK, r.status)
+            val body = Json.decodeFromString<DoctorResponse>(r.bodyAsText())
+            assertEquals(listOf("daemon", "sdk-shim", "rules"), body.layers.map { it.layer })
+            assertEquals("ok", body.layers.first { it.layer == "daemon" }.status)
+            assertEquals("skipped", body.layers.first { it.layer == "sdk-shim" }.status)
+            assertEquals("fail", body.layers.first { it.layer == "rules" }.status)
+        }
+    }
+
+    @Test fun doctorRulesFailWhenValueflagsEmpty() {
+        // a present rules file with readonly but no valueflags must fail, matching `corral doctor`
+        RulesFile.write(GateRules(setOf("devices"), emptySet()), RulesFile.defaultPath())
+        testApplication {
+            application {
+                corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), adbPath = null))
+            }
+            val body = Json.decodeFromString<DoctorResponse>(client.get("/api/doctor").bodyAsText())
+            assertEquals("fail", body.layers.first { it.layer == "rules" }.status)
+        }
+    }
+
+    @Test fun doctorWarnsOnDeviceTouchingReadonly() {
+        RulesFile.write(GateRules(setOf("devices", "exec-in"), setOf("-P")), RulesFile.defaultPath())
+        testApplication {
+            application {
+                corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), adbPath = null))
+            }
+            val body = Json.decodeFromString<DoctorResponse>(client.get("/api/doctor").bodyAsText())
+            val rules = body.layers.first { it.layer == "rules" }
+            assertEquals("warn", rules.status)
+            assertTrue(rules.detail.contains("exec-in"), "detail must name the non-host-only command: ${rules.detail}")
+        }
+    }
+
+    @Test fun doctorWarnsOnIdentityListDivergence() {
+        RulesFile.write(GateRules(setOf("devices"), setOf("-P"), setOf("bash"), DEFAULT_INIT_FLOOR), RulesFile.defaultPath())
+        testApplication {
+            application {
+                corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), adbPath = null))
+            }
+            val body = Json.decodeFromString<DoctorResponse>(client.get("/api/doctor").bodyAsText())
+            val rules = body.layers.first { it.layer == "rules" }
+            assertEquals("warn", rules.status)
+            assertTrue(rules.detail.contains("identity"), "detail must mention the identity divergence: ${rules.detail}")
         }
     }
 

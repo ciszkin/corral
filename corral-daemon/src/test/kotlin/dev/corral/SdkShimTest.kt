@@ -76,6 +76,49 @@ class SdkShimTest {
     }
 
     @Test
+    fun probeOkWhenWrapperAndRealPresent() {
+        writeShim(wrapper)
+        Files.writeString(realAdb, "REAL ADB v1")
+        realAdb.toFile().setExecutable(true)
+        assertEquals("ok", SdkShim.probe(realAdb).first)
+    }
+
+    @Test
+    fun probeFailsWhenRealMissing() {
+        writeShim(wrapper)
+        val (status, detail) = SdkShim.probe(realAdb)
+        assertEquals("fail", status)
+        assertTrue(detail.contains(realAdb.toString()), "detail must name the missing real binary: $detail")
+    }
+
+    @Test
+    fun probeFailsWhenRealNotExecutable() {
+        writeShim(wrapper)
+        Files.writeString(realAdb, "REAL ADB v1")
+        realAdb.toFile().setExecutable(false)
+        if (realAdb.toFile().canExecute()) return   // platform cannot express non-executable: nothing to assert
+        val (status, detail) = SdkShim.probe(realAdb)
+        assertEquals("fail", status)
+        assertTrue(detail.contains(realAdb.toString()), "detail must name the non-executable binary: $detail")
+    }
+
+    @Test
+    fun probeFailsWhenNotTheWrapper() {
+        writeShim("REAL ADB v1")
+        Files.writeString(realAdb, "REAL ADB v1")
+        val (status, detail) = SdkShim.probe(realAdb)
+        assertEquals("fail", status)
+        assertTrue(detail.contains("not the corral wrapper"), "detail was: $detail")
+    }
+
+    @Test
+    fun probeSkipsUnmanagedAdb() {
+        val (status, detail) = SdkShim.probe(dir.resolve("platform-tools/adb"))
+        assertEquals("skipped", status)
+        assertTrue(detail.contains("unmanaged adb path"), "detail was: $detail")
+    }
+
+    @Test
     fun `shimPathOf maps a real path to its sibling shim and passes others through`() {
         assertEquals("/sdk/platform-tools/adb", shimPathOf("/sdk/platform-tools/adb.real"))
         assertEquals("/sdk/platform-tools/adb", shimPathOf("/sdk/platform-tools/adb"))

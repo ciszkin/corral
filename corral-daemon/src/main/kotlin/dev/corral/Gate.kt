@@ -24,7 +24,7 @@ object Gate {
             when {
                 a == "-s" -> { serial = argv.getOrNull(i + 1) ?: ""; i++ }   // bash: serial=${2:-}; shift 2 (or 1 when it is the last arg)
                 a.startsWith("-s") && a.length > 2 -> serial = a.substring(2)
-                a in rules.valueFlags -> i++
+                a.startsWith("-") && a in rules.valueFlags -> i++
                 a.startsWith("-") -> {}
                 sub.isNullOrEmpty() -> sub = a
             }

@@ -43,7 +43,7 @@
     <string name="rules_shell_skip">Спіс пропуску абходу ідэнтычнасці</string>
     <string name="rules_init_floor">Ніжняя мяжа абходу ідэнтычнасці</string>
     <string name="rules_file_only">толькі файл — змяніце %1$s свядома; API адмаўляе змены тут</string>
-    <string name="rules_cannot_clear">API дэмана не можа ачысціць спіс — пакіньце адзін запіс або змяніце файл правілаў</string>
+    <string name="rules_cannot_clear">Corral UI не ачысціць спіс — пакіньце адзін запіс або змяніце файл правілаў</string>
     <string name="rules_boundary_warning">гэта адключае ахову для непрышпіленай падкаманды — любы працэс зможа выканаць яе супраць падключанай прылады без арэнды і без запісу</string>
     <string name="rules_save">Захаваць</string>
     <string name="rules_discard">Адхіліць</string>

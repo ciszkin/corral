@@ -43,7 +43,7 @@
     <string name="rules_shell_skip">Identity walk skip list</string>
     <string name="rules_init_floor">Identity walk floor</string>
     <string name="rules_file_only">file-only — edit %1$s deliberately; the API refuses changes here</string>
-    <string name="rules_cannot_clear">the daemon API cannot clear a list — leave one entry selected or edit the rules file</string>
+    <string name="rules_cannot_clear">Corral UI won't empty a list — leave one entry selected or edit the rules file</string>
     <string name="rules_boundary_warning">this disables the unpinned guard for that subcommand — any process could then run it against a connected device with no lease and no record</string>
     <string name="rules_save">Save</string>
     <string name="rules_discard">Discard</string>

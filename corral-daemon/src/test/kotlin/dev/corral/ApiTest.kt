@@ -399,6 +399,28 @@ class ApiTest {
         assertTrue(Json.decodeFromString<ConfigErrors>(initFloor.bodyAsText()).errors.any { it.contains("init_floor") })
     }
 
+    @Test fun putRefusesIdentityRevertToDefaults() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(GateRules(setOf("devices"), setOf("-P"), setOf("python3")), rulesPath)
+        val before = Files.readString(rulesPath)
+
+        val revert = c.putConfig("""{"rules":${
+            Json.encodeToString(ConfigRules.serializer(), ConfigRules(
+                readonly = listOf("devices"), valueflags = listOf("-P"),
+                shell_skip = DEFAULT_SHELL_SKIP.toList()))
+        }}""")
+        assertEquals(HttpStatusCode.BadRequest, revert.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(revert.bodyAsText()).errors.any {
+            it.contains("shell_skip") && it.contains("file-only")
+        }, "a revert to the defaults must be refused as file-only, got ${revert.bodyAsText()}")
+        assertEquals(before, Files.readString(rulesPath), "a refused revert must not touch the file")
+
+        val echo = c.putConfig("""{"rules":{"readonly":["devices"],"valueflags":["-P"],"shell_skip":["python3"]}}""")
+        assertEquals(HttpStatusCode.OK, echo.status)
+        assertEquals(before, Files.readString(rulesPath), "an unchanged echo-back must not rewrite the file")
+    }
+
     @Test fun putAcceptsUnchangedHandEditedReadonly() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
         val rulesPath = RulesFile.defaultPath()
         Files.createDirectories(rulesPath.parent)

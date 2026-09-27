@@ -9,7 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC_DIR = os.path.join(ROOT, "docs", "assets", "lucide-src")
 OUT = os.path.join(
     ROOT, "corral-ui", "src", "main", "kotlin", "dev", "corral", "ui", "icons", "Lucide.kt")
-BASE_URL = "https://raw.githubusercontent.com/lucide-icons/lucide/main/icons"
+BASE_URL = "https://raw.githubusercontent.com/lucide-icons/lucide/66d8f9fc394b8530377e5f6112f0b8908ba01280/icons"
 SVG_NS = "{http://www.w3.org/2000/svg}"
 
 ICONS = [
@@ -199,10 +199,12 @@ def emit():
 
 def main():
     source, failed = emit()
+    if failed:
+        raise SystemExit(f"{failed} icon(s) missing; {OUT} not written")
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     with open(OUT, "w") as handle:
         handle.write(source)
-    print(f"wrote {OUT} ({len(ICONS) - failed} icons, {failed} missing)")
+    print(f"wrote {OUT} ({len(ICONS)} icons, 0 missing)")
 
 
 if __name__ == "__main__":

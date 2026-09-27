@@ -234,12 +234,15 @@ check "custom observer edit survives --no-ui reinstall" obs_is "$UNIT3" ""
 check "--no-ui leaves already-installed ui artifacts alone" bash -c \
   "[ -f '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ -x '$TMPHOME3/bin/corral-ui' ]"
 
+mkdir -p "$TMPHOME3/.config/corral"
+printf '{}\n' > "$TMPHOME3/.config/corral/ui.conf"
 bash "$SRC/install.sh" --home "$TMPHOME3" --uninstall >"$TMP/ui-uninstall.log" 2>&1; rcui=$?
 dump_on_fail "$rcui" "$TMP/ui-uninstall.log"
 check "uninstall removes ui artifacts" bash -c \
   "[ ! -e '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ ! -e '$TMPHOME3/bin/corral-ui' ]"
 check "uninstall removes the launcher" test ! -e "$DESKTOP3"
 check "uninstall removes the launcher icon" test ! -e "$TMPHOME3/.local/share/icons/corral.png"
+check "uninstall removes client prefs ui.conf" test ! -e "$TMPHOME3/.config/corral/ui.conf"
 
 # no CORRAL_UI_JAR and no jar beside install.sh: --ui must fall back to the source-tree build
 if [ "$BUILD" = 1 ]; then
@@ -267,6 +270,12 @@ check "bundle-mode default installs ui when jar present" bash -c \
   "[ -f '$TMPHOME4/.corral/corral-ui-all.jar' ] && [ -x '$TMPHOME4/bin/corral-ui' ]"
 check "bundle-mode observer seeded in [Service]" obs_is "$TMPHOME4/.config/systemd/user/corral.service" corral-ui
 check "bundle-mode installs the launcher too" test -f "$TMPHOME4/.local/share/applications/corral-ui.desktop"
+
+# a user-replaced icon must survive uninstall (absent-only install promises never to clobber it)
+printf 'user-icon\n' > "$TMPHOME4/.local/share/icons/corral.png"
+env -u CORRAL_UI_JAR bash "$BUNDLE3/install.sh" --home "$TMPHOME4" --uninstall >"$TMP/bundle-uninstall.log" 2>&1; rcbu=$?
+dump_on_fail "$rcbu" "$TMP/bundle-uninstall.log"
+check "uninstall keeps a user-replaced icon" grep -q 'user-icon' "$TMPHOME4/.local/share/icons/corral.png"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

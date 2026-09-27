@@ -85,10 +85,10 @@ the same device.
   the API `readonly` is an **allowlist** of host-only commands (`devices`, `start-server`,
   `kill-server`, `track-devices`, `version`, `help`) and `shell_skip` / `init_floor` are file-only:
   edit `~/.config/corral/rules` directly for a device-touching exemption or an identity change.
-  A rules `PUT` is idempotent for `GET`→`PUT` — an unchanged `readonly` or identity value is
-  accepted, so a save on a hand-edited host works; `readonly` / `valueflags` are a full replace
-  (an empty list clears them), while `shell_skip` / `init_floor` are file-only (an empty list
-  means "no change").
+  A rules `PUT` is idempotent for `GET`→`PUT` — a list equal to the file's current list, or an empty
+  list, means "no change", so a save on a hand-edited host works; otherwise `readonly` /
+  `valueflags` replace the whole list. `shell_skip` / `init_floor` are file-only: any submitted
+  change is refused, including a revert to the defaults.
   The response is honest about scope: `restartRequired` covers settings, while `rulesLive` marks
   rules the wrapper reads live. Settings persist to `~/.config/corral/daemon.env` (override
   `CORRAL_ENV_FILE`) with **file > inherited env > default** precedence — a deliberate edit beats

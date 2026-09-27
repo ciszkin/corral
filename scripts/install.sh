@@ -69,7 +69,9 @@ if [[ $UNINSTALL -eq 1 ]]; then
   if [[ $SANDBOX -eq 0 ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
   rm -f "$BIN_DIR/adb" "$BIN_DIR/corral" "$BIN_DIR/corral-ui"
   rm -f "$TARGET_HOME/.local/share/applications/corral-ui.desktop"
-  rm -f "$TARGET_HOME/.local/share/icons/corral.png"
+  if [ -f "$SCRIPT_DIR/corral.png" ] && cmp -s "$SCRIPT_DIR/corral.png" "$TARGET_HOME/.local/share/icons/corral.png"; then
+    rm -f "$TARGET_HOME/.local/share/icons/corral.png"
+  fi
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$TARGET_HOME/.local/share/applications" >/dev/null 2>&1 || true
   fi
@@ -77,6 +79,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   rm -f "$TARGET_HOME/.config/corral/gradle-tasks"
   rm -f "$TARGET_HOME/.config/corral/rules"
   rm -f "$TARGET_HOME/.config/corral/daemon.env"
+  rm -f "$TARGET_HOME/.config/corral/ui.conf"
   rm -rf "$CORRAL_HOME"
   # restore the SDK adb if it was shimmed (adb.real -> adb)
   for d in "$TARGET_HOME/Android/Sdk/platform-tools" "${ANDROID_HOME:-}/platform-tools" "${ANDROID_SDK_ROOT:-}/platform-tools"; do
@@ -86,7 +89,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
       echo "Restored SDK adb at $d/adb"
     fi
   done
-  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/bin/corral-ui, Corral launcher, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules, ~/.config/corral/daemon.env"
+  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/bin/corral-ui, Corral launcher, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules, ~/.config/corral/daemon.env, ~/.config/corral/ui.conf"
   echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
   rmdir "$TARGET_HOME/.gradle/init.d" "$TARGET_HOME/.config/corral" 2>/dev/null || true
   exit 0
@@ -176,7 +179,7 @@ if want_ui && [[ ! -f "$SCRIPT_DIR/corral-ui" ]]; then
   exit 1
 fi
 if want_ui && [[ ! -f "$SCRIPT_DIR/corral.png" ]]; then
-  echo "ERROR: scripts/corral.png missing (incomplete bundle); cannot install the launcher icon" >&2
+  echo "ERROR: $SCRIPT_DIR/corral.png missing (incomplete bundle); cannot install the launcher icon" >&2
   exit 1
 fi
 

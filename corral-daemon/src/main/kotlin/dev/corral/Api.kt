@@ -324,10 +324,10 @@ fun Application.corralModule(env: AppEnv) {
                     if (nonHostOnly.isNotEmpty())
                         errors += "readonly must only list host-only commands over the API (${nonHostOnly.sorted().joinToString(", ")}) — edit ${RulesFile.defaultPath()} to exempt a device-touching command deliberately"
                 }
-                // identity lists: file-only; a real (non-empty, changed) list is refused — an omitted/empty/echoed one is a no-op
-                if (shellSkip.isNotEmpty() && shellSkip != current.shellSkip && shellSkip != DEFAULT_SHELL_SKIP)
+                // identity lists: file-only; any real (non-empty, changed) list is refused — an omitted/empty/echoed one is a no-op
+                if (shellSkip.isNotEmpty() && shellSkip != current.shellSkip)
                     errors += "shell_skip is file-only; edit ${RulesFile.defaultPath()} to change the identity walk"
-                if (initFloor.isNotEmpty() && initFloor != current.initFloor && initFloor != DEFAULT_INIT_FLOOR)
+                if (initFloor.isNotEmpty() && initFloor != current.initFloor)
                     errors += "init_floor is file-only; edit ${RulesFile.defaultPath()} to change the identity walk"
                 rulesToWrite = readonly to valueflags
             }

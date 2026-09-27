@@ -99,31 +99,38 @@ the same device.
   `corral doctor`'s three layers (`daemon` / `sdk-shim` / `rules`) and is read-only; the `rules`
   layer reports `warn` when a hand-edited `readonly` holds a non-host-only command or the identity
   lists differ from the defaults.
-- **Desktop UI** — `corral-ui [--url http://127.0.0.1:port]` (else `CORRAL_URL`, default
-  `http://127.0.0.1:8798`; the daemon is loopback-only, so `--url` picks a non-default local
-  port unless the operator deliberately rebinds it) opens a Compose operator console: a device-card grid with live
-  thumbnails, holder and TTL countdown; the wait queue; force-free behind a confirm dialog
-  naming the holder; a scrcpy live view — strictly read-only (`--no-control`,
+- **Desktop UI** — `corral-ui [--url http://127.0.0.1:port]` (else `CORRAL_URL`, then the stored
+  pref, default `http://127.0.0.1:8798`; the daemon is loopback-only, so `--url` picks a
+  non-default local port unless the operator deliberately rebinds it) opens a Compose operator
+  console: one five-section screen with a left rail and scrollspy — **Devices** (card grid with
+  live thumbnails, holder and TTL countdown), **Queue** (the wait list), **Doctor** (per-layer
+  health with a rail badge on FAIL), **Rules** and **Settings** — plus a connection bar with the
+  last event `seq`. Rules and Settings are editors: the gate rules and daemon knobs go over the
+  daemon's config API (the `readonly`/`valueflags` lists, the knobs with the restart-required hint
+  and per-field validation), while the client's own `CORRAL_URL`/`CORRAL_OWNER`/`CORRAL_SCRCPY`
+  are local prefs applied live on save; `shell_skip`/`init_floor` are file-only, so edit
+  `~/.config/corral/rules` directly. The
+  theme (System/Light/Dark) and language (English/Беларуская) apply immediately and persist, with
+  the client's window geometry, to `~/.config/corral/ui.conf`. Force-free sits behind a confirm
+  dialog naming the holder, and a scrcpy live view is strictly read-only (`--no-control`,
   `--no-clipboard-autosync`, `--no-audio`), so an observer can watch a leased device but never
-  touch it; and a connection bar with the last event `seq`. The window's close button parks it in
-  the system tray where the platform has one (Windows, macOS, and Linux desktops that host an X
+  touch it. The window and tray use the Corral mark. The window's close button parks it in the
+  system tray where the platform has one (Windows, macOS, and Linux desktops that host an X
   tray — GNOME does via its appindicator support), and clicking the tray icon (either button)
   brings the window back; since close only parks it, the window's **Corral** menu holds **Quit**.
-  Where `isTraySupported` is false, close quits, and the **Corral**
-  launcher `install.sh --ui` drops into `~/.local/share/applications` (app grid, pinnable to the
-  dock) starts it again.
-  Its own traffic is HTTP/WS — the UI never talks adb itself — and it is an observer, not a
-  leaser: its identity is `CORRAL_OWNER` (default `corral-ui`). The one adb it can spawn is the
-  read-only scrcpy live view above: scrcpy resolves adb itself (a static build ships its own), so
-  that one path generally sits outside corral's lease gate — an acknowledged exception, not an
-  oversight (see `cutover.md` §4). Install it with
-  `install.sh --ui` (or `--no-ui` to
-  skip; the default follows whether a `corral-ui-all.jar` is found — beside the installer in the
-  bundle, or in `corral-ui/build/libs/` in a source checkout). Because screenshots
-  are strict by default, the installer seeds `CORRAL_SCREENSHOT_OBSERVERS=corral-ui` into the
-  daemon unit env **only when that line is absent** — visible and editable forever after
-  (emptying it disables observers and survives reinstalls); a
-  remote UI denied with `403` raises a banner naming the variable.
+  Where `isTraySupported` is false, close quits, and the **Corral** launcher `install.sh --ui`
+  drops into `~/.local/share/applications` (app grid, pinnable to the dock, `Icon=` the Corral
+  mark) starts it again. Its own traffic is HTTP/WS — the UI never talks adb itself — and it is an
+  observer, not a leaser: its identity is `CORRAL_OWNER` (default `corral-ui`). The one adb it can
+  spawn is the read-only scrcpy live view above: scrcpy resolves adb itself (a static build ships
+  its own), so that one path generally sits outside corral's lease gate — an acknowledged
+  exception, not an oversight (see `cutover.md` §4). Install it with `install.sh --ui` (or
+  `--no-ui` to skip; the default follows whether a `corral-ui-all.jar` is found — beside the
+  installer in the bundle, or in `corral-ui/build/libs/` in a source checkout). Because
+  screenshots are strict by default, the installer seeds `CORRAL_SCREENSHOT_OBSERVERS=corral-ui`
+  into the daemon unit env **only when that line is absent** — visible and editable forever after
+  (emptying it disables observers and survives reinstalls); a remote UI denied with `403` raises a
+  banner naming the variable.
 - **Loopback only** — the daemon binds `127.0.0.1` and refuses any non-local `Host`
   header with `403 corral: local only`, which also covers `/mcp`. A browser on the host
   cannot be tricked by DNS rebinding into driving the daemon.
@@ -146,13 +153,15 @@ harnesses; the queue was later reworked to client-polled tickets, so no request 
 server-side and a crashed client cannot stall it. Phase 3 — the MCP server
 over streamable HTTP at `/mcp` — is built and verified with fake devices via a scripted MCP
 handshake. Later phases are built too: M4 observability (screenshots + `/ws/events`), M5 the
-Compose Desktop UI, and M7 the config/doctor API. Corral replaces the `adb-lease` MVP
-(`adb-lease.md`).
+Compose Desktop UI — rebuilt into the five-section operator console with rules/settings editors,
+theme modes and English/Belarusian resources — and M7 the config/doctor API. Corral replaces the
+`adb-lease` MVP (`adb-lease.md`).
 
 ## Roadmap (Phase 3+)
 
-- ~~Compose Desktop UI, live view via scrcpy~~ — done (M5): a third `corral-ui` module, component
-  install, observer seeding
+- ~~Compose Desktop UI, live view via scrcpy~~ — done (M5): a third `corral-ui` module rebuilt
+  into the operator console (five sections, rules/settings editors, theme modes, en/be resources,
+  the Corral mark), component install, observer seeding
 - Emulator lifecycle management
 - Verified Windows/macOS support: the `.bat` delegates the gate to `corral gate`, the CLI
   walks ancestry via `ProcessHandle` where `/proc` is absent, and the bash wrapper delegates

@@ -69,6 +69,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   if [[ $SANDBOX -eq 0 ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
   rm -f "$BIN_DIR/adb" "$BIN_DIR/corral" "$BIN_DIR/corral-ui"
   rm -f "$TARGET_HOME/.local/share/applications/corral-ui.desktop"
+  rm -f "$TARGET_HOME/.local/share/icons/corral.png"
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$TARGET_HOME/.local/share/applications" >/dev/null 2>&1 || true
   fi
@@ -174,6 +175,10 @@ if want_ui && [[ ! -f "$SCRIPT_DIR/corral-ui" ]]; then
   echo "ERROR: scripts/corral-ui missing (incomplete bundle); cannot install the ui shim" >&2
   exit 1
 fi
+if want_ui && [[ ! -f "$SCRIPT_DIR/corral.png" ]]; then
+  echo "ERROR: scripts/corral.png missing (incomplete bundle); cannot install the launcher icon" >&2
+  exit 1
+fi
 
 echo "==> Installing to $TARGET_HOME"
 mkdir -p "$CORRAL_HOME" "$BIN_DIR" "$UNIT_DIR"
@@ -186,7 +191,13 @@ if want_ui; then
   install -m 755 "$SCRIPT_DIR/corral-ui" "$BIN_DIR/corral-ui" || { echo "ERROR: cannot install $BIN_DIR/corral-ui" >&2; exit 1; }
   echo "Installed: corral-ui (~/bin/corral-ui, jar in ~/.corral)"
   # Launcher for the app grid/dock. Exec uses the detected java + fat jar (not the shim) so a
-  # GUI session without the login shell's PATH/JDK still starts it. Icon is a stock placeholder.
+  # GUI session without the login shell's PATH/JDK still starts it. Icon is the Corral mark,
+  # installed absent-only so a user's own replacement is never clobbered.
+  ICON_DIR="$TARGET_HOME/.local/share/icons"
+  mkdir -p "$ICON_DIR"
+  if [[ ! -f "$ICON_DIR/corral.png" ]]; then
+    cp "$SCRIPT_DIR/corral.png" "$ICON_DIR/corral.png"
+  fi
   DESKTOP_DIR="$TARGET_HOME/.local/share/applications"
   mkdir -p "$DESKTOP_DIR"
   cat > "$DESKTOP_DIR/corral-ui.desktop" <<EOF
@@ -195,7 +206,7 @@ Type=Application
 Name=Corral
 Comment=Lease Android devices to coding agents — operator console
 Exec="$JAVA_BIN" -jar "$CORRAL_HOME/corral-ui-all.jar"
-Icon=phone
+Icon=$TARGET_HOME/.local/share/icons/corral.png
 Terminal=false
 Categories=Development;
 StartupWMClass=dev-corral-ui-CorralUiKt

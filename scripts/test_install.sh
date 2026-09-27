@@ -209,6 +209,8 @@ check "observer line seeded in [Service] when ui installs" obs_is "$UNIT3" corra
 check "generated unit passes systemd-analyze verify" verify_unit "$UNIT3"
 check "Corral launcher installed with --ui" bash -c \
   "[ -f '$DESKTOP3' ] && grep -q '^Name=Corral' '$DESKTOP3' && grep -q '^StartupWMClass=dev-corral-ui-CorralUiKt' '$DESKTOP3' && grep -q 'corral-ui-all.jar' '$DESKTOP3'"
+check "launcher icon installed and referenced" bash -c \
+  "[ -f '$TMPHOME3/.local/share/icons/corral.png' ] && grep -qF 'Icon=$TMPHOME3/.local/share/icons/corral.png' '$DESKTOP3'"
 check "launcher passes desktop-file-validate" verify_desktop "$DESKTOP3"
 
 # simulate a user edit, then reinstall --ui: the edit must survive verbatim, once, in [Service]
@@ -237,6 +239,7 @@ dump_on_fail "$rcui" "$TMP/ui-uninstall.log"
 check "uninstall removes ui artifacts" bash -c \
   "[ ! -e '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ ! -e '$TMPHOME3/bin/corral-ui' ]"
 check "uninstall removes the launcher" test ! -e "$DESKTOP3"
+check "uninstall removes the launcher icon" test ! -e "$TMPHOME3/.local/share/icons/corral.png"
 
 # no CORRAL_UI_JAR and no jar beside install.sh: --ui must fall back to the source-tree build
 if [ "$BUILD" = 1 ]; then
@@ -251,7 +254,7 @@ fi
 BUNDLE3="$TMP/bundle3"; TMPHOME4="$TMP/home4"; SDK4="$TMPHOME4/Android/Sdk/platform-tools"; FAKE_ADB4="$SDK4/adb"
 mkdir -p "$BUNDLE3" "$SDK4" "$TMPHOME4/bin"
 cp "$SRC/install.sh" "$SRC/adb-wrapper" "$SRC/corral" "$SRC/corral-ui" "$SRC/corral.service" \
-   "$SRC/corral-gate.gradle.kts" "$SRC/corral-rules" "$BUNDLE3/"
+   "$SRC/corral-gate.gradle.kts" "$SRC/corral-rules" "$SRC/corral.png" "$BUNDLE3/"
 cp "$JAR" "$BUNDLE3/corral-daemon-all.jar"; cp "$UI_JAR" "$BUNDLE3/corral-ui-all.jar"
 chmod +x "$BUNDLE3/corral-ui" "$BUNDLE3/adb-wrapper" "$BUNDLE3/corral"
 printf '%s\n' '#!/bin/sh' 'echo "fake-sdk-adb4 $@"' > "$FAKE_ADB4"

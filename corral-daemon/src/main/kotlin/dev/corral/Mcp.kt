@@ -208,7 +208,8 @@ fun corralMcpServer(env: AppEnv, sessions: ConcurrentHashMap<String, ServerSessi
                 ?: throw IllegalStateException(
                     if (usable.isEmpty()) "no usable connected device; call list_devices"
                     else "several devices connected; pass one of: " + usable.joinToString(", ") { it.serial })
-            (env.policy ?: ScreenshotPolicy()).denies(serial, env.leases.snapshot[serial], owner)
+            (env.policy ?: env.config?.let(::screenshotPolicy) ?: ScreenshotPolicy())
+                .denies(serial, env.leases.snapshot[serial], owner)
                 ?.let { throw IllegalStateException(it) }
             val shotter = env.screenshotter ?: throw IllegalStateException("screenshots not configured on the daemon")
             val png = shotter.capture(serial)

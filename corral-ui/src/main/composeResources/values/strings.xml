@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">corral</string>
+    <string name="menu_quit">Quit</string>
+
+    <string name="rail_devices">Devices</string>
+    <string name="rail_queue">Queue</string>
+    <string name="rail_doctor">Doctor</string>
+    <string name="rail_rules">Rules</string>
+    <string name="rail_settings">Settings</string>
+
+    <string name="section_collapse">Collapse %1$s</string>
+    <string name="section_expand">Expand %1$s</string>
+
+    <string name="status_connected">connected (seq %1$d)</string>
+    <string name="status_connecting">connecting…</string>
+    <string name="status_disconnected">disconnected — view is stale</string>
+    <string name="status_stale_updated">Daemon unreachable — showing the last known state · updated %1$s. Reconnecting automatically.</string>
+    <string name="banner_screenshots_denied">screenshots denied — is this client named in the daemon's CORRAL_SCREENSHOT_OBSERVERS?</string>
+
+    <string name="device_free">free</string>
+    <string name="device_offering">offering → %1$s</string>
+    <string name="device_expiring">expiring</string>
+    <string name="device_offline">offline</string>
+    <string name="device_unauthorized">unauthorized</string>
+
+    <string name="action_live_view">Live view</string>
+    <string name="action_force_free">Force free</string>
+    <string name="force_free_title">Force free %1$s?</string>
+    <string name="force_free_body">Held by %1$s — the holder loses the device immediately.</string>
+    <string name="confirm">Confirm</string>
+    <string name="cancel">Cancel</string>
+
+    <string name="queue_empty">no one is waiting</string>
+    <string name="queue_waited">waited %1$s</string>
+    <string name="queue_deadline">%1$s left</string>
+
+    <string name="doctor_recheck">Re-check</string>
+    <string name="devices_empty">No devices — plug one in, or the daemon may be running with CORRAL_FAKE_DEVICES.</string>
+
+    <string name="rules_readonly">Read-only subcommands</string>
+    <string name="rules_valueflags">Value flags</string>
+    <string name="rules_shell_skip">Identity walk skip list</string>
+    <string name="rules_init_floor">Identity walk floor</string>
+    <string name="rules_file_only">file-only — edit %1$s deliberately; the API refuses changes here</string>
+    <string name="rules_cannot_clear">the daemon API cannot clear a list — leave one entry selected or edit the rules file</string>
+    <string name="rules_boundary_warning">this disables the unpinned guard for that subcommand — any process could then run it against a connected device with no lease and no record</string>
+    <string name="rules_save">Save</string>
+    <string name="rules_discard">Discard</string>
+    <string name="rules_reset">Reset to file</string>
+    <string name="rules_dirty">unsaved changes</string>
+    <string name="rules_saved">saved</string>
+    <string name="rules_safe_defaults">Safe defaults</string>
+    <string name="rules_device_touching">Touches devices — guard applies (enabling one weakens the gate)</string>
+    <string name="rules_entries">%1$d entries</string>
+    <string name="rules_add_flag">Add flag</string>
+    <string name="rules_add">Add</string>
+    <string name="rules_pin_guard">-s is the pin, not a value flag</string>
+    <string name="rules_valueflag_invalid">value flags start with '-' and contain no spaces, ',' '#' or '='</string>
+    <string name="rules_valueflags_hint">A value flag consumes the next word as its argument — the gate parses around the flags listed here; a missing or wrong one can misread a command.</string>
+    <string name="rules_init_floor_warning">A wrong entry stops the walk early, and every session of that user silently collapses into one shared principal — only add processes that truly sit above every agent.</string>
+    <string name="config_warnings">Warnings from the daemon</string>
+    <string name="settings_save_failed">save failed — the daemon is unreachable</string>
+
+    <string name="settings_client">This client</string>
+    <string name="settings_daemon">Daemon</string>
+    <string name="settings_restart_hint">restart required — systemctl --user restart corral</string>
+    <string name="settings_reset_defaults">Reset to defaults</string>
+    <string name="settings_theme">Theme</string>
+    <string name="settings_language">Language</string>
+    <string name="settings_url">Daemon URL</string>
+    <string name="settings_saved">saved</string>
+    <string name="settings_paths">client prefs → ~/.config/corral/ui.conf · daemon prefs → daemon config</string>
+    <string name="settings_default">default: %1$s</string>
+    <string name="settings_default_empty">(empty)</string>
+    <string name="settings_url_desc">Daemon address. Applies live on save.</string>
+    <string name="settings_owner_desc">This client's identity in leases and screenshots. Applies next connection.</string>
+    <string name="settings_scrcpy_desc">scrcpy binary for live view — empty uses PATH. Applies next live view.</string>
+    <string name="settings_theme_desc">Applies immediately — shared with the status-bar toggle.</string>
+    <string name="settings_language_desc">Interface language. Applies immediately.</string>
+    <string name="settings_port_desc">Listen port (1024–65535).</string>
+    <string name="settings_screenshots_desc">strict: only the holder or named observers capture.</string>
+    <string name="settings_screenshots_strict">strict</string>
+    <string name="settings_screenshots_open">open</string>
+    <string name="settings_observers_desc">Extra names allowed to capture any screen.</string>
+    <string name="settings_adb_desc">adb binary the daemon drives.</string>
+    <string name="settings_db_desc">SQLite file for leases and queue.</string>
+    <string name="settings_gradle_tasks_desc">Tasks the gate treats as device-touching.</string>
+    <string name="settings_load_error">Could not load config.</string>
+    <string name="config_loading">loading…</string>
+
+    <string name="language_en">English</string>
+    <string name="language_be">Беларуская</string>
+
+    <string name="theme_system">System</string>
+    <string name="theme_dark">Dark</string>
+    <string name="theme_light">Light</string>
+
+    <string name="scrcpy_missing">scrcpy not found — set CORRAL_SCRCPY</string>
+    <string name="scrcpy_died">scrcpy exited immediately</string>
+    <string name="thumbnail_denied">denied</string>
+
+    <string name="device_usable">usable</string>
+    <string name="device_waiting_accept">waiting accept</string>
+    <string name="device_android">Android %1$s</string>
+    <string name="device_avd">AVD %1$s</string>
+    <string name="transport_usb">USB transport</string>
+    <string name="transport_wifi">Wi-Fi transport</string>
+    <string name="transport_emulator">Emulator transport</string>
+    <string name="devices_counts">%1$d free · %2$d held</string>
+    <string name="devices_empty_title">No devices connected</string>
+
+    <string name="queue_waiting">%1$d waiting</string>
+    <string name="queue_position">#%1$d</string>
+    <string name="queue_expired">expired</string>
+    <string name="duration_min_sec">%1$dm %2$ds</string>
+    <string name="duration_min">%1$dm</string>
+    <string name="selector_any">any device</string>
+    <string name="selector_serial">serial %1$s</string>
+    <string name="selector_model">model %1$s</string>
+    <string name="selector_os">os ≥ %1$s</string>
+    <string name="selector_avd">avd %1$s</string>
+    <string name="selector_type">type %1$s</string>
+
+    <string name="doctor_title">Doctor</string>
+    <string name="doctor_events">events: seq %1$d</string>
+    <string name="doctor_skipped">skipped — daemon unreachable</string>
+    <string name="doctor_daemon_adb">Daemon's adb</string>
+    <string name="doctor_layer_daemon">Daemon</string>
+    <string name="doctor_layer_sdk_shim">SDK adb shim</string>
+    <string name="doctor_layer_rules">Gate rules</string>
+    <string name="doctor_status_ok">OK</string>
+    <string name="doctor_status_fail">FAIL</string>
+    <string name="doctor_status_skipped">SKIPPED</string>
+    <string name="doctor_status_warn">WARN</string>
+    <string name="doctor_status_info">info</string>
+
+    <string name="status_stale_watermark">STALE</string>
+    <string name="force_free_nobody">nobody</string>
+    <string name="force_free_failed">Force free failed — the daemon refused the request.</string>
+    <string name="retry">Retry</string>
+</resources>

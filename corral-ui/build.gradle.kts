@@ -8,6 +8,10 @@ plugins {
 
 kotlin { jvmToolchain(17) }
 
+compose.resources {
+    packageOfResClass = "dev.corral.ui.resources"
+}
+
 dependencies {
     implementation(project(":corral-common"))
     implementation(libs.kotlinx.coroutines.core)
@@ -16,6 +20,8 @@ dependencies {
     implementation(libs.ktor.client.websockets)
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.compose.desktop)
+    implementation(compose.components.resources)
+    implementation(libs.koin.core)
     runtimeOnly(compose.desktop.currentOs)
     testImplementation(kotlin("test"))
     testImplementation(libs.kotlinx.coroutines.test)

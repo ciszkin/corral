@@ -27,6 +27,9 @@ internal fun resolveDbPath(config: DaemonConfig): Path {
     return Path.of(chosen)
 }
 
+internal fun screenshotPolicy(config: DaemonConfig): ScreenshotPolicy =
+    ScreenshotPolicy(config.get("CORRAL_SCREENSHOTS"), config.get("CORRAL_SCREENSHOT_OBSERVERS"))
+
 internal fun resolveAdb(config: DaemonConfig): String {
     val raw = config.get("CORRAL_ADB")
     if (adbValueUsable(raw)) return raw
@@ -101,7 +104,7 @@ fun main() {
         { monitor.devices.map { DeviceStatus(it.serial, leases.snapshot[it.serial]) } },
         { leases.queueSnapshot() },
         scope)
-    val env = AppEnv({ monitor.devices }, leases, adb, Screenshotter({ monitor.devices }, adb), ScreenshotPolicy(), events, config)
+    val env = AppEnv({ monitor.devices }, leases, adb, Screenshotter({ monitor.devices }, adb), screenshotPolicy(config), events, config)
     events.start()
     embeddedServer(CIO, port = port, host = "127.0.0.1") {
         guardLocalHost()

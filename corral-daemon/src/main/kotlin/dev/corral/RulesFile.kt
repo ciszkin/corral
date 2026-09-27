@@ -64,11 +64,12 @@ object RulesFile {
     fun load(path: Path = defaultPath()): GateRules =
         runCatching { Files.readString(path) }.getOrNull()?.let(::parse) ?: GateRules.EMPTY
 
-    /** Upsert only the gate keys, preserving the identity lists (and every other line) verbatim. */
-    fun writeGate(readonly: Set<String>, valueFlags: Set<String>, path: Path = defaultPath()) =
-        upsert(path, linkedMapOf(
-            "readonly" to readonly.joinToString(","),
-            "valueflags" to valueFlags.joinToString(",")))
+    /** Upsert only the given gate keys (`null` leaves that key untouched), preserving every other line verbatim. */
+    fun writeGate(readonly: Set<String>?, valueFlags: Set<String>?, path: Path = defaultPath()) =
+        upsert(path, buildMap<String, String> {
+            readonly?.let { put("readonly", it.joinToString(",")) }
+            valueFlags?.let { put("valueflags", it.joinToString(",")) }
+        })
 
     /** Upsert the four known keys, preserving every other line (comments, unknown keys) verbatim. Atomic. */
     fun write(rules: GateRules, path: Path = defaultPath()) =

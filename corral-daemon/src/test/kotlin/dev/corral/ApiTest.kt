@@ -419,16 +419,49 @@ class ApiTest {
         assertTrue("shell_skip=python3" in Files.readString(rulesPath), "the unchanged identity line must survive")
     }
 
-    @Test fun putEmptyReadonlyClearsTheGateList() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+    @Test fun putRulesEchoBackIsANoop() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        Files.writeString(rulesPath,
+            "readonly=devices,exec-in\nvalueflags=-P\nshell_skip=python3,claude\ninit_floor=myinit\n# keep me\n")
+        val before = Files.readString(rulesPath)
+
+        val rules = Json.decodeFromString<ConfigResponse>(c.get("/api/config").bodyAsText()).rules
+        val r = c.putConfig("""{"rules":${Json.encodeToString(ConfigRules.serializer(), rules)}}""")
+
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(Json.decodeFromString<PutConfigResponse>(r.bodyAsText()).warnings.isEmpty())
+        assertEquals(before, Files.readString(rulesPath), "an unchanged echo-back must not rewrite the file")
+    }
+
+    @Test fun putEmptyRulesListMeansNoChange() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
         val rulesPath = RulesFile.defaultPath()
         Files.createDirectories(rulesPath.parent)
         RulesFile.write(GateRules(setOf("devices"), setOf("-P")), rulesPath)
+        val before = Files.readString(rulesPath)
 
-        val r = c.putConfig("""{"rules":{"readonly":[],"valueflags":["-P"]}}""")
+        val r = c.putConfig("""{"rules":{"readonly":[]}}""")
         assertEquals(HttpStatusCode.OK, r.status)
-        assertTrue(RulesFile.load(rulesPath).readonly.isEmpty(), "an empty readonly must clear the gate list")
-        assertTrue(Files.readString(rulesPath).lineSequence().any { it == "readonly=" },
-            "the file must keep an explicit empty readonly line, not the old devices")
+        assertEquals(setOf("devices"), RulesFile.load(rulesPath).readonly)
+        assertEquals(before, Files.readString(rulesPath), "an empty list must not rewrite the file")
+    }
+
+    @Test fun putValueflagsRejectsThePin() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val rulesPath = RulesFile.defaultPath()
+        Files.createDirectories(rulesPath.parent)
+        RulesFile.write(GateRules(setOf("devices"), setOf("-P")), rulesPath)
+        val before = Files.readString(rulesPath)
+
+        for (pin in listOf("-s", "-sdirect")) {
+            val r = c.putConfig("""{"rules":{"valueflags":["$pin","-P"]}}""")
+            assertEquals(HttpStatusCode.BadRequest, r.status, "$pin must be refused")
+            assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("-s is the pin") },
+                "the error must name the pin, got ${r.bodyAsText()}")
+        }
+        assertEquals(before, Files.readString(rulesPath))
+
+        val ok = c.putConfig("""{"rules":{"valueflags":["-P"]}}""")
+        assertEquals(HttpStatusCode.OK, ok.status)
     }
 
     @Test fun putStillRefusesAReadonlyChange() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->

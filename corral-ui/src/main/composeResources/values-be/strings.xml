@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">corral</string>
+    <string name="menu_quit">Выйсці</string>
+
+    <string name="rail_devices">Прылады</string>
+    <string name="rail_queue">Чарга</string>
+    <string name="rail_doctor">Доктар</string>
+    <string name="rail_rules">Правілы</string>
+    <string name="rail_settings">Налады</string>
+
+    <string name="section_collapse">Згарнуць %1$s</string>
+    <string name="section_expand">Разгарнуць %1$s</string>
+
+    <string name="status_connected">злучана (seq %1$d)</string>
+    <string name="status_connecting">злучэнне…</string>
+    <string name="status_disconnected">адключана — дадзеныя састарэлыя</string>
+    <string name="status_stale_updated">Дэман недаступны — паказваецца апошні вядомы стан · абноўлена %1$s. Перападключэнне аўтаматычнае.</string>
+    <string name="banner_screenshots_denied">здымкі экрана забаронены — ці ўказаны гэты кліент у CORRAL_SCREENSHOT_OBSERVERS дэмана?</string>
+
+    <string name="device_free">вольная</string>
+    <string name="device_offering">прапануецца → %1$s</string>
+    <string name="device_expiring">заканчваецца</string>
+    <string name="device_offline">не ў сетцы</string>
+    <string name="device_unauthorized">неаўтарызаваная</string>
+
+    <string name="action_live_view">Жывы прагляд</string>
+    <string name="action_force_free">Вызваліць прымусова</string>
+    <string name="force_free_title">Вызваліць %1$s прымусова?</string>
+    <string name="force_free_body">Утрымлівае %1$s — утрымальнік адразу страціць прыладу.</string>
+    <string name="confirm">Пацвердзіць</string>
+    <string name="cancel">Адмяніць</string>
+
+    <string name="queue_empty">ніхто не чакае</string>
+    <string name="queue_waited">пачакаў %1$s</string>
+    <string name="queue_deadline">засталося %1$s</string>
+
+    <string name="doctor_recheck">Пераправерыць</string>
+    <string name="devices_empty">Няма прылад — падключыце адну, або дэман можа працаваць з CORRAL_FAKE_DEVICES.</string>
+
+    <string name="rules_readonly">Падкаманды толькі для чытання</string>
+    <string name="rules_valueflags">Сцягі значэнняў</string>
+    <string name="rules_shell_skip">Спіс пропуску абходу ідэнтычнасці</string>
+    <string name="rules_init_floor">Ніжняя мяжа абходу ідэнтычнасці</string>
+    <string name="rules_file_only">толькі файл — змяніце %1$s свядома; API адмаўляе змены тут</string>
+    <string name="rules_cannot_clear">API дэмана не можа ачысціць спіс — пакіньце адзін запіс або змяніце файл правілаў</string>
+    <string name="rules_boundary_warning">гэта адключае ахову для непрышпіленай падкаманды — любы працэс зможа выканаць яе супраць падключанай прылады без арэнды і без запісу</string>
+    <string name="rules_save">Захаваць</string>
+    <string name="rules_discard">Адхіліць</string>
+    <string name="rules_reset">Скінуць да файла</string>
+    <string name="rules_dirty">несахраненыя змены</string>
+    <string name="rules_saved">захавана</string>
+    <string name="rules_safe_defaults">Бяспечныя па змаўчанні</string>
+    <string name="rules_device_touching">Зачэплівае прылады — ахова дзейнічае (уключэнне паслабляе шлюз)</string>
+    <string name="rules_entries">%1$d запісаў</string>
+    <string name="rules_add_flag">Дадаць сцяг</string>
+    <string name="rules_add">Дадаць</string>
+    <string name="rules_pin_guard">-s — гэта шпілька, а не сцяг значэння</string>
+    <string name="rules_valueflag_invalid">сцягі значэнняў пачынаюцца з '-' і не ўтрымліваюць прабелаў, ',' '#' ці '='</string>
+    <string name="rules_valueflags_hint">Сцяг значэння спажывае наступнае слова як аргумент — шлюз разбірае каманду вакол пералічаных тут сцягоў; адсутны ці няправільны сцяг можа прывесці да памылковага чытання.</string>
+    <string name="rules_init_floor_warning">Няправільны запіс спыняе абход раней, і ўсе сесіі гэтага карыстальніка моўчкі зліваюцца ў аднаго галоўнага — дадавайце толькі тыя працэсы, што сапраўды стаяць над усімі агентамі.</string>
+    <string name="config_warnings">Папярэджанні ад дэмана</string>
+    <string name="settings_save_failed">не ўдалося захаваць — дэман недасяжны</string>
+
+    <string name="settings_client">Гэты кліент</string>
+    <string name="settings_daemon">Дэман</string>
+    <string name="settings_restart_hint">патрабуецца перазапуск — systemctl --user restart corral</string>
+    <string name="settings_reset_defaults">Скінуць да стандартных</string>
+    <string name="settings_theme">Тэма</string>
+    <string name="settings_language">Мова</string>
+    <string name="settings_url">URL дэмана</string>
+    <string name="settings_saved">захавана</string>
+    <string name="settings_paths">налады кліента → ~/.config/corral/ui.conf · налады дэмана → канфіг дэмана</string>
+    <string name="settings_default">стандартна: %1$s</string>
+    <string name="settings_default_empty">(пуста)</string>
+    <string name="settings_url_desc">Адрас дэмана. Ужываецца адразу пры захаванні.</string>
+    <string name="settings_owner_desc">Ідэнтычнасць гэтага кліента ў арэндах і здымках. Ужываецца пры наступным злучэнні.</string>
+    <string name="settings_scrcpy_desc">Бінарнік scrcpy для жывога прагляду — пуста значыць PATH. Ужываецца пры наступным праглядзе.</string>
+    <string name="settings_theme_desc">Ужываецца адразу — агульнае з пераключальнікам у радку стану.</string>
+    <string name="settings_language_desc">Мова інтэрфейсу. Ужываецца адразу.</string>
+    <string name="settings_port_desc">Порт праслухоўвання (1024–65535).</string>
+    <string name="settings_screenshots_desc">strict: здымаюць толькі ўтрымальнік або названыя назіральнікі.</string>
+    <string name="settings_screenshots_strict">строгі</string>
+    <string name="settings_screenshots_open">адкрыты</string>
+    <string name="settings_observers_desc">Дадатковыя імёны, якім дазволена здымаць любы экран.</string>
+    <string name="settings_adb_desc">Бінарнік adb, які выкарыстоўвае дэман.</string>
+    <string name="settings_db_desc">Файл SQLite для арэнд і чаргі.</string>
+    <string name="settings_gradle_tasks_desc">Заданні, якія шлюз лічыць якія зачэпліваюць прылады.</string>
+    <string name="settings_load_error">Не ўдалося загрузіць канфіг.</string>
+    <string name="config_loading">загрузка…</string>
+
+    <string name="language_en">English</string>
+    <string name="language_be">Беларуская</string>
+
+    <string name="theme_system">Сістэмная</string>
+    <string name="theme_dark">Цёмная</string>
+    <string name="theme_light">Светлая</string>
+
+    <string name="scrcpy_missing">scrcpy не знойдзены — задайце CORRAL_SCRCPY</string>
+    <string name="scrcpy_died">scrcpy адразу завяршыўся</string>
+    <string name="thumbnail_denied">забаронена</string>
+
+    <string name="device_usable">даступная</string>
+    <string name="device_waiting_accept">чакае прыняцця</string>
+    <string name="device_android">Android %1$s</string>
+    <string name="device_avd">AVD %1$s</string>
+    <string name="transport_usb">Транспарт USB</string>
+    <string name="transport_wifi">Транспарт Wi-Fi</string>
+    <string name="transport_emulator">Транспарт эмулятара</string>
+    <string name="devices_counts">%1$d вольных · %2$d занятых</string>
+    <string name="devices_empty_title">Няма падключаных прылад</string>
+
+    <string name="queue_waiting">%1$d чакаюць</string>
+    <string name="queue_position">#%1$d</string>
+    <string name="queue_expired">тэрмін мінуў</string>
+    <string name="duration_min_sec">%1$dхв %2$dс</string>
+    <string name="duration_min">%1$dхв</string>
+    <string name="selector_any">любая прылада</string>
+    <string name="selector_serial">серыйны %1$s</string>
+    <string name="selector_model">мадэль %1$s</string>
+    <string name="selector_os">os ≥ %1$s</string>
+    <string name="selector_avd">avd %1$s</string>
+    <string name="selector_type">тып %1$s</string>
+
+    <string name="doctor_title">Доктар</string>
+    <string name="doctor_events">падзеі: seq %1$d</string>
+    <string name="doctor_skipped">прапушчана — дэман недасяжны</string>
+    <string name="doctor_daemon_adb">adb дэмана</string>
+    <string name="doctor_layer_daemon">Дэман</string>
+    <string name="doctor_layer_sdk_shim">adb-шым SDK</string>
+    <string name="doctor_layer_rules">Правілы шлюза</string>
+    <string name="doctor_status_ok">OK</string>
+    <string name="doctor_status_fail">ЗБОЙ</string>
+    <string name="doctor_status_skipped">ПРАПУШЧАНА</string>
+    <string name="doctor_status_warn">УВАГА</string>
+    <string name="doctor_status_info">інфа</string>
+
+    <string name="status_stale_watermark">СТАРОЕ</string>
+    <string name="force_free_nobody">ніхто</string>
+    <string name="force_free_failed">Не ўдалося вызваліць — дэман адхіліў запыт.</string>
+    <string name="retry">Паўтарыць</string>
+</resources>

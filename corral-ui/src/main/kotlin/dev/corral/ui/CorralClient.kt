@@ -1,8 +1,15 @@
 package dev.corral.ui
 
+import dev.corral.Device
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
 import dev.corral.corralJson
+import dev.corral.ui.data.ConfigErrors
+import dev.corral.ui.data.ConfigResponse
+import dev.corral.ui.data.ConfigRules
+import dev.corral.ui.data.DoctorResponse
+import dev.corral.ui.data.PutConfigRequest
+import dev.corral.ui.data.PutConfigResponse
 import io.ktor.client.HttpClient
 import io.ktor.client.HttpClientConfig
 import io.ktor.client.call.body
@@ -13,6 +20,7 @@ import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.request.url
 import io.ktor.client.statement.bodyAsBytes
@@ -51,6 +59,7 @@ class CorralClient internal constructor(
     constructor(baseUrl: String, owner: String) : this(baseUrl, owner, HttpClient(CIO) { corralClientConfig() })
 
     override suspend fun status(): StatusResponse = http.get("$baseUrl/api/status").body()
+    override suspend fun devices(): List<Device> = http.get("$baseUrl/api/devices").body()
     override suspend fun queue(): List<QueueEntry> = http.get("$baseUrl/api/queue").body()
     override suspend fun screenshot(serial: String): ByteArray = try {
         http.get("$baseUrl/api/devices/${serial.encodeURLParameter()}/screenshot?owner=${owner.encodeURLParameter()}").bodyAsBytes()
@@ -65,6 +74,23 @@ class CorralClient internal constructor(
         }
     }
 
+    override suspend fun config(): ConfigResponse = http.get("$baseUrl/api/config").body()
+
+    override suspend fun putConfig(settings: Map<String, String>, rules: ConfigRules?): Result<PutConfigResponse> = try {
+        Result.success(http.put("$baseUrl/api/config") {
+            contentType(ContentType.Application.Json)
+            setBody(PutConfigRequest(settings, rules))
+        }.body())
+    } catch (e: ClientRequestException) {
+        if (e.response.status == HttpStatusCode.BadRequest) {
+            val errors = runCatching { e.response.body<ConfigErrors>().errors }
+                .getOrElse { listOf(e.message ?: "bad request") }
+            Result.failure(ConfigApiException(errors, e))
+        } else throw e
+    }
+
+    override suspend fun doctor(): DoctorResponse = http.get("$baseUrl/api/doctor").body()
+
     override fun events(): Flow<String> = flow {
         val ws = http.webSocketSession { url("$wsBase/ws/events") }
         try { for (frame in ws.incoming) if (frame is Frame.Text) emit(frame.readText()) }
@@ -72,6 +98,8 @@ class CorralClient internal constructor(
     }
 
     override fun capabilities(): Capabilities = Capabilities(canForceFree = true)   // the future's only swap point
+
+    override fun close() { http.close() }
 }
 
 /** A bare `CORRAL_URL=host:port` would make every request URL unparseable — default the scheme. */

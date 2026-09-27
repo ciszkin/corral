@@ -22,4 +22,12 @@ class ScreenshotPolicyTest {
     @Test fun observerListTrimsAndIgnoresBlanks() = assertNull(ScreenshotPolicy("strict", " corral-ui , ,x ").denies("dev1", lease, "corral-ui"))
     @Test fun noBuiltInObserverWhenUnconfigured() =
         assertTrue(ScreenshotPolicy("strict", null).denies("dev1", lease, "corral-ui") != null)
+
+    @Test fun policyHonorsAFileObserverWhenTheEnvVarIsAbsent() {
+        val config = DaemonConfig(
+            fileValues = mapOf("CORRAL_SCREENSHOT_OBSERVERS" to "corral-ui"),
+            inherited = emptyMap(),
+        )
+        assertNull(screenshotPolicy(config).denies("dev1", lease, "corral-ui"))
+    }
 }

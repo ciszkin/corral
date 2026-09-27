@@ -247,6 +247,7 @@ fun Application.corralModule(env: AppEnv) {
             val errors = mutableListOf<String>()
             val warnings = mutableListOf<String>()
             val clean = mutableMapOf<String, String>()
+            var rulesToWrite: Pair<Set<String>?, Set<String>?>? = null
             req.settings.forEach { (k, raw) ->
                 when (k) {
                     "CORRAL_PORT" -> parsePort(raw.trim())?.let { clean[k] = it.toString() }
@@ -304,29 +305,36 @@ fun Application.corralModule(env: AppEnv) {
                     errors += "rules entries must be non-blank and free of whitespace, ',' '#' '=' (${badEntries.joinToString(", ")})"
                 if (r.valueflags.any { !it.startsWith("-") })
                     errors += "valueflags entries must start with '-' (${r.valueflags.filter { !it.startsWith("-") }.joinToString(", ") { "'$it'" }})"
+                if (r.valueflags.any { it.startsWith("-s") })
+                    errors += "-s is the pin, not a value flag"
+
                 val current = RulesFile.load()
-                val reqReadonly = r.readonly.map(String::trim).filter(String::isNotEmpty).toSet()
-                val reqShellSkip = r.shell_skip.map(String::trim).filter(String::isNotEmpty).toSet()
-                val reqInitFloor = r.init_floor.map(String::trim).filter(String::isNotEmpty).toSet()
+                // an empty list or one equal to the file's list means "no change" — a UI echo-back
+                // is a silent no-op, so only a real change is validated and written
+                val readonly = r.readonly.map(String::trim).filter(String::isNotEmpty).toSet()
+                    .takeIf { it.isNotEmpty() && it != current.readonly }
+                val valueflags = r.valueflags.map(String::trim).filter(String::isNotEmpty).toSet()
+                    .takeIf { it.isNotEmpty() && it != current.valueFlags }
+                val shellSkip = r.shell_skip.map(String::trim).filter(String::isNotEmpty).toSet()
+                val initFloor = r.init_floor.map(String::trim).filter(String::isNotEmpty).toSet()
 
                 // readonly: only a CHANGE that introduces a non-host-only command is refused
-                if (reqReadonly != current.readonly) {
-                    val nonHostOnly = reqReadonly - SAFE_READONLY
+                readonly?.let {
+                    val nonHostOnly = it - SAFE_READONLY
                     if (nonHostOnly.isNotEmpty())
                         errors += "readonly must only list host-only commands over the API (${nonHostOnly.sorted().joinToString(", ")}) — edit ${RulesFile.defaultPath()} to exempt a device-touching command deliberately"
                 }
-                // identity lists: file-only; writeGate never writes them, so an omitted/empty, unchanged,
-                // or built-in default list is accepted — only a non-empty list differing from both is refused
-                if (reqShellSkip.isNotEmpty() && reqShellSkip != current.shellSkip && reqShellSkip != DEFAULT_SHELL_SKIP)
+                // identity lists: file-only; a real (non-empty, changed) list is refused — an omitted/empty/echoed one is a no-op
+                if (shellSkip.isNotEmpty() && shellSkip != current.shellSkip && shellSkip != DEFAULT_SHELL_SKIP)
                     errors += "shell_skip is file-only; edit ${RulesFile.defaultPath()} to change the identity walk"
-                if (reqInitFloor.isNotEmpty() && reqInitFloor != current.initFloor && reqInitFloor != DEFAULT_INIT_FLOOR)
+                if (initFloor.isNotEmpty() && initFloor != current.initFloor && initFloor != DEFAULT_INIT_FLOOR)
                     errors += "init_floor is file-only; edit ${RulesFile.defaultPath()} to change the identity walk"
+                rulesToWrite = readonly to valueflags
             }
             if (errors.isNotEmpty()) { call.respond(HttpStatusCode.BadRequest, ConfigErrors(errors)); return@put }
             if (clean.isNotEmpty()) EnvFile.write(DaemonConfig.defaultPath(), clean)
-            req.rules?.let { RulesFile.writeGate(
-                it.readonly.map(String::trim).filter(String::isNotEmpty).toSet(),
-                it.valueflags.map(String::trim).filter(String::isNotEmpty).toSet()) }
+            rulesToWrite?.let { (readonly, valueflags) ->
+                if (readonly != null || valueflags != null) RulesFile.writeGate(readonly, valueflags) }
             call.respond(PutConfigResponse(
                 restartRequired = clean.isNotEmpty(), rulesLive = req.rules != null, warnings = warnings))
         }
@@ -334,7 +342,7 @@ fun Application.corralModule(env: AppEnv) {
             val serial = call.parameters["serial"]!!
             val shotter = env.screenshotter
                 ?: run { call.respondText("corral: screenshots not configured", status = HttpStatusCode.ServiceUnavailable); return@get }
-            val policy = env.policy ?: ScreenshotPolicy()
+            val policy = env.policy ?: env.config?.let(::screenshotPolicy) ?: ScreenshotPolicy()
             val owner = call.request.queryParameters["owner"] ?: ""
             val denial = policy.denies(serial, env.leases.snapshot[serial], owner)
             if (denial != null) { call.respondText(denial, status = HttpStatusCode.Forbidden); return@get }

@@ -7,6 +7,7 @@ serialization = "1.9.0"
 sqlite = "3.50.3.0"
 shadow = "8.3.6"
 mcp = "0.10.0"
+koin = "4.2.2"
 
 [libraries]
 ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
@@ -25,6 +26,7 @@ mcp-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref
 mcp = { module = "io.modelcontextprotocol:kotlin-sdk", version.ref = "mcp" }
 mcp-testing = { module = "io.modelcontextprotocol:kotlin-sdk-testing", version.ref = "mcp" }
 compose-desktop = { module = "org.jetbrains.compose.desktop:desktop", version.ref = "compose" }
+koin-core = { module = "io.insert-koin:koin-core", version.ref = "koin" }
 
 [plugins]
 kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

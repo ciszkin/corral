@@ -11,7 +11,7 @@ import dev.corral.ui.components.CorralPill
 import dev.corral.ui.components.DeviceCard
 import dev.corral.ui.components.DevicesEmptyState
 import dev.corral.ui.components.SectionHeader
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.devices_counts
 import dev.corral.ui.resources.rail_devices
@@ -32,7 +32,7 @@ fun DevicesSection(
 ) {
     val colors = LocalExtendedColors.current
     Column(Modifier.fillMaxWidth()) {
-        SectionHeader(Lucide.Smartphone, stringResource(Res.string.rail_devices), expanded, onToggle) {
+        SectionHeader(Icons.Smartphone, stringResource(Res.string.rail_devices), expanded, onToggle) {
             val free = state.devices.count { it.lease == null }
             CorralPill(
                 text = stringResource(Res.string.devices_counts, free, state.devices.size - free),

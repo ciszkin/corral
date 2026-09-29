@@ -12,7 +12,7 @@ class DimensInvariantTest {
     @Test fun hardcodedDimensionsStayInDimens() {
         val sourceRoot = Path.of("src/main/kotlin/dev/corral/ui")
         val literal = Regex("""\d+\.(dp|sp)""")
-        val allowed = setOf("theme/Dimens.kt", "icons/Lucide.kt")
+        val allowed = setOf("theme/Dimens.kt")
         val offenders = sourceRoot.toFile().walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .filter { literal.containsMatchIn(it.readText()) }

@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
@@ -32,13 +31,13 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.decodeToImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import dev.corral.Lease
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.AppIcon
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.pool.DeviceView
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.action_force_free
@@ -60,6 +59,7 @@ import dev.corral.ui.resources.transport_wifi
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.LocalMonoFont
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
 
@@ -135,11 +135,11 @@ fun DeviceCard(
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onLive) {
-                Icon(Lucide.Airplay, contentDescription = stringResource(Res.string.action_live_view))
+                AppIcon(Icons.Airplay, contentDescription = stringResource(Res.string.action_live_view))
             }
             if (canForceFree && view.lease != null) {
                 IconButton(onForceFree) {
-                    Icon(Lucide.Unlock, contentDescription = stringResource(Res.string.action_force_free),
+                    AppIcon(Icons.Unlock, contentDescription = stringResource(Res.string.action_force_free),
                         tint = MaterialTheme.colors.error)
                 }
             }
@@ -155,13 +155,13 @@ private fun InlineError(text: String, onDismiss: () -> Unit) {
         Modifier.fillMaxWidth().background(colors.errorContainer, RoundedCornerShape(Dimens.radiusSm)).padding(Dimens.space8),
         verticalAlignment = Alignment.Top,
     ) {
-        Icon(Lucide.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+        AppIcon(Icons.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
             tint = colors.onErrorContainer)
         Spacer(Modifier.width(Dimens.space8))
         Text(text, style = MaterialTheme.typography.caption, color = colors.onErrorContainer,
             modifier = Modifier.weight(1f))
         IconButton(onDismiss, modifier = Modifier.size(Dimens.space28)) {
-            Icon(Lucide.X, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
+            AppIcon(Icons.X, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
                 tint = colors.onErrorContainer)
         }
     }
@@ -173,18 +173,18 @@ private fun HolderRow(lease: Lease?) {
     when {
         lease == null -> CorralPill(
             text = stringResource(Res.string.device_free),
-            icon = Lucide.CheckCircle,
+            icon = Icons.CheckCircle,
             container = colors.positiveContainer,
             content = colors.onPositiveContainer,
         )
         lease.pendingAccept -> CorralPill(
             text = stringResource(Res.string.device_offering, lease.owner),
-            icon = Lucide.Loader,
+            icon = Icons.Loader,
             container = colors.tertiaryContainer,
             content = colors.onTertiaryContainer,
         )
         else -> Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Lucide.User, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+            AppIcon(Icons.User, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                 tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(Dimens.space6))
             Text(lease.owner, fontFamily = LocalMonoFont.current,
@@ -211,16 +211,16 @@ private fun ModelRow(model: String?, osVersion: String?, avd: String?) {
 @Composable
 private fun TransportIcon(transport: String) {
     val icon = when (transport) {
-        "wifi" -> Lucide.Wifi
-        "emulator" -> Lucide.Monitor
-        else -> Lucide.Usb
+        "wifi" -> Icons.Wifi
+        "emulator" -> Icons.Monitor
+        else -> Icons.Usb
     }
     val label: StringResource = when (transport) {
         "wifi" -> Res.string.transport_wifi
         "emulator" -> Res.string.transport_emulator
         else -> Res.string.transport_usb
     }
-    Icon(icon, contentDescription = stringResource(label), modifier = Modifier.size(Dimens.iconSm),
+    AppIcon(icon, contentDescription = stringResource(label), modifier = Modifier.size(Dimens.iconSm),
         tint = LocalExtendedColors.current.onSurfaceVariant)
 }
 
@@ -229,11 +229,11 @@ private fun StateChip(state: String) {
     val colors = LocalExtendedColors.current
     when (state) {
         "offline" -> CorralPill(stringResource(Res.string.device_offline), colors.mutedContainer,
-            colors.onMutedContainer, icon = Lucide.MinusCircle)
+            colors.onMutedContainer, icon = Icons.MinusCircle)
         "unauthorized" -> CorralPill(stringResource(Res.string.device_unauthorized), colors.warningContainer,
-            colors.onWarningContainer, icon = Lucide.AlertTriangle)
+            colors.onWarningContainer, icon = Icons.AlertTriangle)
         "device" -> CorralPill(stringResource(Res.string.device_usable), colors.positiveContainer,
-            colors.onPositiveContainer, icon = Lucide.CheckCircle)
+            colors.onPositiveContainer, icon = Icons.CheckCircle)
         else -> CorralPill(state, colors.mutedContainer, colors.onMutedContainer)
     }
 }
@@ -256,10 +256,10 @@ private fun Thumbnail(bytes: ByteArray?, denied: Boolean) {
         contentAlignment = Alignment.Center,
     ) {
         when {
-            bytes == null && denied -> ThumbPlaceholder(Lucide.CameraOff,
+            bytes == null && denied -> ThumbPlaceholder(Icons.CameraOff,
                 stringResource(Res.string.thumbnail_denied), colors.warningContainer, colors.onWarningContainer)
             bytes == null -> Box(Modifier.fillMaxSize().background(colors.containerHigh))
-            bitmap == null -> ThumbPlaceholder(Lucide.Image, null, colors.containerHigh, colors.onSurfaceVariant)
+            bitmap == null -> ThumbPlaceholder(Icons.Image, null, colors.containerHigh, colors.onSurfaceVariant)
             else -> Image(bitmap, contentDescription = null, modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Fit)
         }
@@ -267,13 +267,13 @@ private fun Thumbnail(bytes: ByteArray?, denied: Boolean) {
 }
 
 @Composable
-private fun ThumbPlaceholder(icon: ImageVector, label: String?, container: Color, content: Color) {
+private fun ThumbPlaceholder(icon: DrawableResource, label: String?, container: Color, content: Color) {
     Column(
         Modifier.fillMaxSize().background(container).padding(Dimens.space6),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconLg), tint = content)
+        AppIcon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconLg), tint = content)
         if (label != null) {
             Spacer(Modifier.height(Dimens.space6))
             Text(label, style = MaterialTheme.typography.overline, color = content, textAlign = TextAlign.Center)

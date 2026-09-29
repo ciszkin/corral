@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Divider
-import androidx.compose.material.Icon
 import androidx.compose.material.IconButton
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
@@ -20,11 +19,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import dev.corral.ui.components.SectionHeader
 import dev.corral.ui.data.DoctorLayer
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.AppIcon
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.doctor_daemon_adb
 import dev.corral.ui.resources.doctor_events
@@ -42,18 +41,19 @@ import dev.corral.ui.resources.doctor_title
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.LocalMonoFont
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
 fun DoctorSection(state: PoolState, seq: Long, onIntent: (PoolIntent) -> Unit, expanded: Boolean, onToggle: () -> Unit) {
     val colors = LocalExtendedColors.current
     Column(Modifier.fillMaxWidth()) {
-        SectionHeader(Lucide.Activity, stringResource(Res.string.doctor_title), expanded, onToggle) {
+        SectionHeader(Icons.Activity, stringResource(Res.string.doctor_title), expanded, onToggle) {
             Text(stringResource(Res.string.doctor_events, seq), fontFamily = LocalMonoFont.current,
                 style = MaterialTheme.typography.caption, color = colors.onSurfaceVariant)
             Spacer(Modifier.width(Dimens.space8))
             IconButton({ onIntent(PoolIntent.RefreshDoctor) }) {
-                Icon(Lucide.RefreshCw, contentDescription = stringResource(Res.string.doctor_recheck))
+                AppIcon(Icons.RefreshCw, contentDescription = stringResource(Res.string.doctor_recheck))
             }
         }
         if (!expanded) return
@@ -66,7 +66,7 @@ fun DoctorSection(state: PoolState, seq: Long, onIntent: (PoolIntent) -> Unit, e
             val doctor = state.doctor
             when {
                 doctor == null -> DoctorRow(
-                    icon = Lucide.MinusCircle,
+                    icon = Icons.MinusCircle,
                     tint = colors.muted,
                     name = stringResource(Res.string.doctor_title),
                     detail = stringResource(Res.string.doctor_skipped),
@@ -82,7 +82,7 @@ fun DoctorSection(state: PoolState, seq: Long, onIntent: (PoolIntent) -> Unit, e
                     }
                     if (doctor.adb.isNotBlank()) {
                         DoctorRow(
-                            icon = Lucide.Info,
+                            icon = Icons.Info,
                             tint = colors.tertiary,
                             name = stringResource(Res.string.doctor_daemon_adb),
                             detail = doctor.adb,
@@ -100,11 +100,11 @@ fun DoctorSection(state: PoolState, seq: Long, onIntent: (PoolIntent) -> Unit, e
 private fun LayerRow(layer: DoctorLayer) {
     val colors = LocalExtendedColors.current
     val (icon, tint, word) = when (layer.status) {
-        "ok" -> Triple(Lucide.CheckCircle, colors.positive, stringResource(Res.string.doctor_status_ok))
-        "fail" -> Triple(Lucide.AlertTriangle, MaterialTheme.colors.error, stringResource(Res.string.doctor_status_fail))
-        "skipped" -> Triple(Lucide.MinusCircle, colors.muted, stringResource(Res.string.doctor_status_skipped))
-        "warn" -> Triple(Lucide.AlertTriangle, colors.warning, stringResource(Res.string.doctor_status_warn))
-        else -> Triple(Lucide.Info, colors.tertiary, layer.status.uppercase())
+        "ok" -> Triple(Icons.CheckCircle, colors.positive, stringResource(Res.string.doctor_status_ok))
+        "fail" -> Triple(Icons.AlertTriangle, MaterialTheme.colors.error, stringResource(Res.string.doctor_status_fail))
+        "skipped" -> Triple(Icons.MinusCircle, colors.muted, stringResource(Res.string.doctor_status_skipped))
+        "warn" -> Triple(Icons.AlertTriangle, colors.warning, stringResource(Res.string.doctor_status_warn))
+        else -> Triple(Icons.Info, colors.tertiary, layer.status.uppercase())
     }
     val name = when (layer.layer) {
         "daemon" -> stringResource(Res.string.doctor_layer_daemon)
@@ -117,7 +117,7 @@ private fun LayerRow(layer: DoctorLayer) {
 
 @Composable
 private fun DoctorRow(
-    icon: ImageVector,
+    icon: DrawableResource,
     tint: Color,
     name: String,
     detail: String,
@@ -128,7 +128,7 @@ private fun DoctorRow(
         Modifier.fillMaxWidth().padding(horizontal = Dimens.space16, vertical = Dimens.space10),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconLg), tint = tint)
+        AppIcon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconLg), tint = tint)
         Spacer(Modifier.width(Dimens.space12))
         Text(name, fontWeight = FontWeight.Medium, style = MaterialTheme.typography.body2,
             modifier = Modifier.width(Dimens.doctorNameWidth))

@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Button
-import androidx.compose.material.Icon
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Text
@@ -28,7 +27,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import dev.corral.ui.app.AppIntent
@@ -37,7 +35,8 @@ import dev.corral.ui.components.CorralPill
 import dev.corral.ui.components.SectionHeader
 import dev.corral.ui.data.ConfigSetting
 import dev.corral.ui.data.Prefs
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.AppIcon
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.config_loading
 import dev.corral.ui.resources.language_be
@@ -79,6 +78,7 @@ import dev.corral.ui.theme.Language
 import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.LocalMonoFont
 import dev.corral.ui.theme.ThemeMode
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
 
@@ -98,7 +98,7 @@ fun SettingsSection(
     val dirty = clientDirty || state.dirty
 
     Column(Modifier.fillMaxWidth()) {
-        SectionHeader(Lucide.Settings, stringResource(Res.string.rail_settings), expanded, onToggle)
+        SectionHeader(Icons.Settings, stringResource(Res.string.rail_settings), expanded, onToggle)
         if (expanded) {
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 val stacked = maxWidth < Dimens.layoutBreakpoint
@@ -156,7 +156,7 @@ private fun ClientGroup(
     onScrcpy: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    SectionGroup(stringResource(Res.string.settings_client), Lucide.Monitor, modifier) {
+    SectionGroup(stringResource(Res.string.settings_client), Icons.Monitor, modifier) {
         SettingField(url, stringResource(Res.string.settings_url),
             desc = stringResource(Res.string.settings_url_desc),
             default = stringResource(Res.string.settings_default, Prefs().url), onChange = onUrl)
@@ -174,9 +174,9 @@ private fun ClientGroup(
                 onSelect = { mode -> onAppIntent(AppIntent.SetTheme(mode)) },
                 icon = { mode ->
                     when (mode) {
-                        ThemeMode.SYSTEM -> Lucide.Monitor
-                        ThemeMode.LIGHT -> Lucide.Sun
-                        ThemeMode.DARK -> Lucide.Moon
+                        ThemeMode.SYSTEM -> Icons.Monitor
+                        ThemeMode.LIGHT -> Icons.Sun
+                        ThemeMode.DARK -> Icons.Moon
                     }
                 },
             ) { mode ->
@@ -206,7 +206,7 @@ private fun ClientGroup(
 private fun DaemonGroup(state: ConfigState, onConfigIntent: (ConfigIntent) -> Unit, modifier: Modifier = Modifier) {
     val colors = LocalExtendedColors.current
     val loaded = state.loaded
-    SectionGroup(stringResource(Res.string.settings_daemon), Lucide.Server, modifier) {
+    SectionGroup(stringResource(Res.string.settings_daemon), Icons.Server, modifier) {
         if (loaded == null) {
             val message = if (state.loadFailed) Res.string.settings_load_error else Res.string.config_loading
             Text(stringResource(message), style = MaterialTheme.typography.body2,
@@ -218,7 +218,7 @@ private fun DaemonGroup(state: ConfigState, onConfigIntent: (ConfigIntent) -> Un
                 Modifier.clip(RoundedCornerShape(Dimens.radiusSm)).background(colors.warningContainer).padding(Dimens.space8),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(Lucide.Power, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+                AppIcon(Icons.Power, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                     tint = colors.onWarningContainer)
                 Spacer(Modifier.width(Dimens.space6))
                 Text(stringResource(Res.string.settings_restart_hint), style = MaterialTheme.typography.caption,
@@ -302,7 +302,7 @@ private fun FieldBlock(
         content()
         if (error != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Lucide.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+                AppIcon(Icons.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                     tint = MaterialTheme.colors.error)
                 Spacer(Modifier.width(Dimens.space6))
                 Text(error, style = MaterialTheme.typography.caption, color = MaterialTheme.colors.error)
@@ -327,7 +327,7 @@ private fun <T> Segmented(
     options: List<T>,
     selected: T,
     onSelect: (T) -> Unit,
-    icon: (T) -> ImageVector? = { null },
+    icon: (T) -> DrawableResource? = { null },
     label: @Composable (T) -> String,
 ) {
     val colors = LocalExtendedColors.current
@@ -347,7 +347,7 @@ private fun <T> Segmented(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 icon(option)?.let { glyph ->
-                    Icon(glyph, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
+                    AppIcon(glyph, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
                         tint = if (on) colors.onSecondaryContainer else colors.onSurfaceVariant)
                     Spacer(Modifier.width(Dimens.space8))
                 }
@@ -359,7 +359,7 @@ private fun <T> Segmented(
 }
 
 @Composable
-private fun SectionGroup(title: String, icon: ImageVector, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+private fun SectionGroup(title: String, icon: DrawableResource, modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     val colors = LocalExtendedColors.current
     Column(
         modifier.fillMaxWidth()
@@ -369,7 +369,7 @@ private fun SectionGroup(title: String, icon: ImageVector, modifier: Modifier = 
         verticalArrangement = Arrangement.spacedBy(Dimens.space16),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconMd), tint = colors.onSurfaceVariant)
+            AppIcon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconMd), tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(Dimens.space8))
             Text(title, style = MaterialTheme.typography.subtitle1)
         }
@@ -400,10 +400,10 @@ private fun SettingsFooter(
             Spacer(Modifier.width(Dimens.space8))
             if (dirty) {
                 CorralPill(stringResource(Res.string.rules_dirty), colors.warningContainer,
-                    colors.onWarningContainer, icon = Lucide.Clock)
+                    colors.onWarningContainer, icon = Icons.Clock)
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Lucide.CheckCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
+                    AppIcon(Icons.CheckCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
                         tint = colors.positive)
                     Spacer(Modifier.width(Dimens.space6))
                     Text(stringResource(Res.string.settings_saved), style = MaterialTheme.typography.caption,
@@ -413,17 +413,17 @@ private fun SettingsFooter(
         }
         Spacer(Modifier.width(Dimens.space12))
         TextButton(onClick = onDiscard) {
-            Icon(Lucide.X, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
+            AppIcon(Icons.X, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
             Spacer(Modifier.width(Dimens.space8))
             Text(stringResource(Res.string.rules_discard), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }
         TextButton(onClick = onReset) {
-            Icon(Lucide.RefreshCcw, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
+            AppIcon(Icons.RefreshCcw, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
             Spacer(Modifier.width(Dimens.space8))
             Text(stringResource(Res.string.settings_reset_defaults), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }
         Button(onClick = onSave, enabled = dirty && !saving) {
-            Icon(Lucide.Save, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
+            AppIcon(Icons.Save, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
             Spacer(Modifier.width(Dimens.space8))
             Text(stringResource(Res.string.rules_save), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }

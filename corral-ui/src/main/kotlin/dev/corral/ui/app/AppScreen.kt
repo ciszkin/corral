@@ -23,7 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.AlertDialog
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
-import androidx.compose.material.Icon
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -43,7 +42,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import dev.corral.ui.config.ConfigEffect
@@ -51,7 +49,8 @@ import dev.corral.ui.config.ConfigIntent
 import dev.corral.ui.config.ConfigViewModel
 import dev.corral.ui.config.RulesSection
 import dev.corral.ui.config.SettingsSection
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.AppIcon
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.pool.DevicesSection
 import dev.corral.ui.pool.DoctorSection
 import dev.corral.ui.pool.PoolEffect
@@ -90,15 +89,16 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
 
-internal enum class AppSection(val label: StringResource, val icon: ImageVector) {
-    Devices(Res.string.rail_devices, Lucide.Smartphone),
-    Queue(Res.string.rail_queue, Lucide.List),
-    Doctor(Res.string.rail_doctor, Lucide.Activity),
-    Rules(Res.string.rail_rules, Lucide.Shield),
-    Settings(Res.string.rail_settings, Lucide.Settings),
+internal enum class AppSection(val label: StringResource, val icon: DrawableResource) {
+    Devices(Res.string.rail_devices, Icons.Smartphone),
+    Queue(Res.string.rail_queue, Icons.List),
+    Doctor(Res.string.rail_doctor, Icons.Activity),
+    Rules(Res.string.rail_rules, Icons.Shield),
+    Settings(Res.string.rail_settings, Icons.Settings),
 }
 
 internal val AppSections: List<AppSection> = AppSection.entries
@@ -185,7 +185,7 @@ fun AppScreen(
                 if (poolState.denied) {
                     val colors = LocalExtendedColors.current
                     Banner(
-                        icon = Lucide.CameraOff,
+                        icon = Icons.CameraOff,
                         text = stringResource(Res.string.banner_screenshots_denied),
                         container = colors.warningContainer,
                         content = colors.onWarningContainer,
@@ -194,7 +194,7 @@ fun AppScreen(
                 if (configSaveFailed) {
                     val colors = LocalExtendedColors.current
                     Banner(
-                        icon = Lucide.XCircle,
+                        icon = Icons.XCircle,
                         text = stringResource(Res.string.settings_save_failed),
                         container = colors.errorContainer,
                         content = colors.onErrorContainer,
@@ -203,7 +203,7 @@ fun AppScreen(
                 if (stale) {
                     val colors = LocalExtendedColors.current
                     Banner(
-                        icon = Lucide.Clock,
+                        icon = Icons.Clock,
                         text = stringResource(Res.string.status_stale_updated, updatedAt),
                         container = colors.warningContainer,
                         content = colors.onWarningContainer,
@@ -309,7 +309,7 @@ private fun ForceFreeDialog(
                             .padding(Dimens.space8),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Icon(Lucide.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+                        AppIcon(Icons.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                             tint = colors.onErrorContainer)
                         Spacer(Modifier.width(Dimens.space8))
                         Text(stringResource(Res.string.force_free_failed),
@@ -349,7 +349,7 @@ private fun RailItem(section: AppSection, active: Boolean, badge: Boolean, onCli
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box {
-            Icon(section.icon, contentDescription = null, tint = tint)
+            AppIcon(section.icon, contentDescription = null, tint = tint)
             if (badge) {
                 Box(
                     Modifier.align(Alignment.TopEnd).size(Dimens.space8)
@@ -388,13 +388,13 @@ private fun StatusBar(state: AppState, onTheme: (ThemeMode) -> Unit) {
                 .border(Dimens.border, colors.outlineVariant, RoundedCornerShape(Dimens.radiusPill))
                 .padding(Dimens.space2),
         ) {
-            ThemeOption(Lucide.Monitor, Res.string.theme_system, state.prefs.themeMode == ThemeMode.SYSTEM) {
+            ThemeOption(Icons.Monitor, Res.string.theme_system, state.prefs.themeMode == ThemeMode.SYSTEM) {
                 onTheme(ThemeMode.SYSTEM)
             }
-            ThemeOption(Lucide.Sun, Res.string.theme_light, state.prefs.themeMode == ThemeMode.LIGHT) {
+            ThemeOption(Icons.Sun, Res.string.theme_light, state.prefs.themeMode == ThemeMode.LIGHT) {
                 onTheme(ThemeMode.LIGHT)
             }
-            ThemeOption(Lucide.Moon, Res.string.theme_dark, state.prefs.themeMode == ThemeMode.DARK) {
+            ThemeOption(Icons.Moon, Res.string.theme_dark, state.prefs.themeMode == ThemeMode.DARK) {
                 onTheme(ThemeMode.DARK)
             }
         }
@@ -402,7 +402,7 @@ private fun StatusBar(state: AppState, onTheme: (ThemeMode) -> Unit) {
 }
 
 @Composable
-private fun ThemeOption(icon: ImageVector, label: StringResource, active: Boolean, onClick: () -> Unit) {
+private fun ThemeOption(icon: DrawableResource, label: StringResource, active: Boolean, onClick: () -> Unit) {
     val colors = LocalExtendedColors.current
     Box(
         Modifier.size(Dimens.space40, Dimens.space32)
@@ -411,18 +411,18 @@ private fun ThemeOption(icon: ImageVector, label: StringResource, active: Boolea
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(icon, contentDescription = stringResource(label), modifier = Modifier.size(Dimens.iconLg),
+        AppIcon(icon, contentDescription = stringResource(label), modifier = Modifier.size(Dimens.iconLg),
             tint = if (active) colors.onSecondaryContainer else colors.onSurfaceVariant)
     }
 }
 
 @Composable
-private fun Banner(icon: ImageVector, text: String, container: Color, content: Color) {
+private fun Banner(icon: DrawableResource, text: String, container: Color, content: Color) {
     Row(
         Modifier.fillMaxWidth().background(container).padding(horizontal = Dimens.space24, vertical = Dimens.space9),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconLg), tint = content)
+        AppIcon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconLg), tint = content)
         Spacer(Modifier.width(Dimens.space8))
         Text(text, style = MaterialTheme.typography.body2, color = content, modifier = Modifier.weight(1f))
     }

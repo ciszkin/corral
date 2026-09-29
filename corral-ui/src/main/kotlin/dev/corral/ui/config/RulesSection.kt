@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Button
-import androidx.compose.material.Icon
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Text
@@ -31,14 +30,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import dev.corral.ui.components.CorralPill
 import dev.corral.ui.components.SectionHeader
 import dev.corral.ui.data.ConfigResponse
 import dev.corral.ui.data.ConfigRules
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.AppIcon
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.config_loading
 import dev.corral.ui.resources.config_warnings
@@ -67,6 +66,7 @@ import dev.corral.ui.resources.rules_valueflag_invalid
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.LocalMonoFont
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
 
@@ -84,10 +84,10 @@ fun RulesSection(state: ConfigState, onIntent: (ConfigIntent) -> Unit, expanded:
     val loaded = state.loaded
     val editState = remember { RulesEditState() }
     Column(Modifier.fillMaxWidth()) {
-        SectionHeader(Lucide.Shield, stringResource(Res.string.rail_rules), expanded, onToggle) {
+        SectionHeader(Icons.Shield, stringResource(Res.string.rail_rules), expanded, onToggle) {
             if (loaded != null) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Lucide.FileText, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+                    AppIcon(Icons.FileText, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                         tint = LocalExtendedColors.current.onSurfaceVariant)
                     Spacer(Modifier.width(Dimens.space6))
                     Text(loaded.rulesPath, fontFamily = LocalMonoFont.current,
@@ -129,7 +129,7 @@ private fun ReadonlyCard(rules: ConfigRules, loaded: ConfigResponse, onIntent: (
         }
         val present = loaded.rules.readonly.filter { it !in SafeReadonly }
         if (present.isNotEmpty()) {
-            GroupLabel(stringResource(Res.string.rules_device_touching), Lucide.AlertTriangle)
+            GroupLabel(stringResource(Res.string.rules_device_touching), Icons.AlertTriangle)
             ChipFlow(present) { cmd -> ToggleChip(cmd, selected = true, enabled = false, onClick = {}) }
             FileOnlyNotice(loaded.rulesPath)
             WarningBanner(stringResource(Res.string.rules_boundary_warning))
@@ -180,7 +180,7 @@ private fun ValueFlagsCard(rules: ConfigRules, onIntent: (ConfigIntent) -> Unit,
         }
         editState.valueFlagError?.let { error ->
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Lucide.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+                AppIcon(Icons.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                     tint = MaterialTheme.colors.error)
                 Spacer(Modifier.width(Dimens.space6))
                 Text(stringResource(error), style = MaterialTheme.typography.caption,
@@ -216,7 +216,7 @@ private fun RulesFooter(state: ConfigState, path: String, onIntent: (ConfigInten
             .padding(horizontal = Dimens.space16, vertical = Dimens.space10),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Lucide.FileText, contentDescription = null, modifier = Modifier.size(Dimens.iconSm), tint = colors.onSurfaceVariant)
+        AppIcon(Icons.FileText, contentDescription = null, modifier = Modifier.size(Dimens.iconSm), tint = colors.onSurfaceVariant)
         Spacer(Modifier.width(Dimens.space6))
         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
             Text(path, fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.caption,
@@ -225,10 +225,10 @@ private fun RulesFooter(state: ConfigState, path: String, onIntent: (ConfigInten
             Spacer(Modifier.width(Dimens.space8))
             if (state.dirty) {
                 CorralPill(stringResource(Res.string.rules_dirty), colors.warningContainer,
-                    colors.onWarningContainer, icon = Lucide.Clock)
+                    colors.onWarningContainer, icon = Icons.Clock)
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Lucide.CheckCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
+                    AppIcon(Icons.CheckCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
                         tint = colors.positive)
                     Spacer(Modifier.width(Dimens.space6))
                     Text(stringResource(Res.string.rules_saved), style = MaterialTheme.typography.caption,
@@ -238,17 +238,17 @@ private fun RulesFooter(state: ConfigState, path: String, onIntent: (ConfigInten
         }
         Spacer(Modifier.width(Dimens.space12))
         TextButton(onClick = { onIntent(ConfigIntent.Discard) }) {
-            Icon(Lucide.X, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
+            AppIcon(Icons.X, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
             Spacer(Modifier.width(Dimens.space8))
             Text(stringResource(Res.string.rules_discard), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }
         TextButton(onClick = { onIntent(ConfigIntent.ResetRules) }) {
-            Icon(Lucide.RefreshCcw, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
+            AppIcon(Icons.RefreshCcw, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
             Spacer(Modifier.width(Dimens.space8))
             Text(stringResource(Res.string.rules_reset), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }
         Button(onClick = { onIntent(ConfigIntent.Save) }, enabled = state.dirty && !state.saving) {
-            Icon(Lucide.Save, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
+            AppIcon(Icons.Save, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
             Spacer(Modifier.width(Dimens.space8))
             Text(stringResource(Res.string.rules_save), maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
         }
@@ -278,7 +278,7 @@ private fun RuleCard(
                 .padding(horizontal = Dimens.space16, vertical = Dimens.space12),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Lucide.ChevronDown, contentDescription = null,
+            AppIcon(Icons.ChevronDown, contentDescription = null,
                 modifier = Modifier.size(Dimens.iconLg).rotate(if (open) 180f else 0f), tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(Dimens.space12))
             Text(title, style = MaterialTheme.typography.subtitle1)
@@ -328,7 +328,7 @@ private fun ToggleChip(text: String, selected: Boolean, enabled: Boolean = true,
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (selected) {
-            Icon(Lucide.Check, contentDescription = null, modifier = Modifier.size(Dimens.iconXs), tint = content)
+            AppIcon(Icons.Check, contentDescription = null, modifier = Modifier.size(Dimens.iconXs), tint = content)
             Spacer(Modifier.width(Dimens.space6))
         }
         Text(text, fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.caption, color = content)
@@ -350,11 +350,11 @@ private fun ReadOnlyChip(text: String) {
 }
 
 @Composable
-private fun GroupLabel(text: String, icon: ImageVector? = null) {
+private fun GroupLabel(text: String, icon: DrawableResource? = null) {
     val colors = LocalExtendedColors.current
     Row(verticalAlignment = Alignment.CenterVertically) {
         if (icon != null) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconXs), tint = colors.warning)
+            AppIcon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconXs), tint = colors.warning)
             Spacer(Modifier.width(Dimens.space6))
         }
         Text(text, style = MaterialTheme.typography.caption.copy(fontWeight = FontWeight.Medium),
@@ -370,7 +370,7 @@ private fun WarningBanner(text: String) {
             .background(colors.warningContainer).padding(Dimens.space10),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Lucide.AlertTriangle, contentDescription = null, modifier = Modifier.size(Dimens.iconLg),
+        AppIcon(Icons.AlertTriangle, contentDescription = null, modifier = Modifier.size(Dimens.iconLg),
             tint = colors.onWarningContainer)
         Spacer(Modifier.width(Dimens.space8))
         Text(text, style = MaterialTheme.typography.caption, color = colors.onWarningContainer)
@@ -381,7 +381,7 @@ private fun WarningBanner(text: String) {
 private fun FileOnlyNotice(path: String) {
     val colors = LocalExtendedColors.current
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(Lucide.Info, contentDescription = null, modifier = Modifier.size(Dimens.iconSm), tint = colors.onSurfaceVariant)
+        AppIcon(Icons.Info, contentDescription = null, modifier = Modifier.size(Dimens.iconSm), tint = colors.onSurfaceVariant)
         Spacer(Modifier.width(Dimens.space6))
         Text(stringResource(Res.string.rules_file_only, path), style = MaterialTheme.typography.caption,
             color = colors.onSurfaceVariant)
@@ -397,7 +397,7 @@ internal fun ConfigWarnings(messages: List<String>) {
         verticalArrangement = Arrangement.spacedBy(Dimens.space4),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Lucide.AlertTriangle, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
+            AppIcon(Icons.AlertTriangle, contentDescription = null, modifier = Modifier.size(Dimens.iconSm),
                 tint = colors.onWarningContainer)
             Spacer(Modifier.width(Dimens.space6))
             Text(stringResource(Res.string.config_warnings),
@@ -425,7 +425,7 @@ internal fun ConfigErrors(messages: List<String>) {
 @Composable
 internal fun ConfigError(message: String) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(Lucide.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+        AppIcon(Icons.XCircle, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
             tint = MaterialTheme.colors.error)
         Spacer(Modifier.width(Dimens.space6))
         Text(message, style = MaterialTheme.typography.caption, color = MaterialTheme.colors.error)

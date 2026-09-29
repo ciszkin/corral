@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Divider
-import androidx.compose.material.Icon
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
@@ -24,7 +23,8 @@ import dev.corral.ui.components.CorralPill
 import dev.corral.ui.components.QueueEmptyState
 import dev.corral.ui.components.SectionHeader
 import dev.corral.ui.components.SelectorText
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.AppIcon
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.duration_min
 import dev.corral.ui.resources.duration_min_sec
@@ -43,7 +43,7 @@ import org.jetbrains.compose.resources.stringResource
 fun QueueSection(state: PoolState, expanded: Boolean, onToggle: () -> Unit) {
     val colors = LocalExtendedColors.current
     Column(Modifier.fillMaxWidth()) {
-        SectionHeader(Lucide.List, stringResource(Res.string.rail_queue), expanded, onToggle) {
+        SectionHeader(Icons.List, stringResource(Res.string.rail_queue), expanded, onToggle) {
             CorralPill(
                 text = stringResource(Res.string.queue_waiting, state.queue.size),
                 container = colors.containerHigh,
@@ -79,7 +79,7 @@ private fun QueueRow(entry: QueueEntry) {
         Text(stringResource(Res.string.queue_position, entry.position), fontFamily = LocalMonoFont.current,
             color = colors.onSurfaceVariant, modifier = Modifier.width(Dimens.space30))
         Row(Modifier.width(Dimens.queueOwnerWidth), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Lucide.User, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+            AppIcon(Icons.User, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                 tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(Dimens.space6))
             Text(entry.owner, fontFamily = LocalMonoFont.current,
@@ -88,7 +88,7 @@ private fun QueueRow(entry: QueueEntry) {
         Spacer(Modifier.width(Dimens.space12))
         SelectorText(entry.selector, Modifier.weight(1f))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Lucide.Clock, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+            AppIcon(Icons.Clock, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                 tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(Dimens.space6))
             val waited = stringResource(Res.string.duration_min_sec, entry.waitedSeconds / 60, entry.waitedSeconds % 60)
@@ -99,7 +99,7 @@ private fun QueueRow(entry: QueueEntry) {
         Spacer(Modifier.width(Dimens.space16))
         if (entry.deadlineIn <= 0) {
             CorralPill(stringResource(Res.string.queue_expired), colors.warningContainer,
-                colors.onWarningContainer, icon = Lucide.Clock)
+                colors.onWarningContainer, icon = Icons.Clock)
         } else {
             Text(stringResource(Res.string.queue_deadline, stringResource(Res.string.duration_min, entry.deadlineIn / 60)),
                 fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.caption,

@@ -19,8 +19,7 @@ UI_BUNDLE_JAR="$BUNDLE/corral-ui-all.jar"
 # scripts/ files that are NOT shipped in the bundle:
 #   make-installer.sh  the mirroring tool itself (source-tree only)
 #   cutover.md         docs, mirrored by hand when the docs change
-#   gen-lucide.py      icon generator: fetches from the network and writes outside the bundle
-EXCLUDE="make-installer.sh cutover.md gen-lucide.py"
+EXCLUDE="make-installer.sh cutover.md"
 
 CHECK=0
 case "${1:-}" in

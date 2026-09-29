@@ -11,25 +11,25 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.Divider
-import androidx.compose.material.Icon
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
-import androidx.compose.ui.graphics.vector.ImageVector
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.AppIcon
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.section_collapse
 import dev.corral.ui.resources.section_expand
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.LocalExtendedColors
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
 fun SectionHeader(
-    icon: ImageVector,
+    icon: DrawableResource,
     title: String,
     expanded: Boolean,
     onToggle: () -> Unit,
@@ -37,7 +37,7 @@ fun SectionHeader(
 ) {
     Column(Modifier.fillMaxWidth().padding(bottom = Dimens.space16)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconXl),
+            AppIcon(icon, contentDescription = null, modifier = Modifier.size(Dimens.iconXl),
                 tint = MaterialTheme.colors.primary)
             Spacer(Modifier.width(Dimens.space12))
             Text(title, style = MaterialTheme.typography.h6)
@@ -48,7 +48,7 @@ fun SectionHeader(
                 Modifier.size(Dimens.iconXxl).clickable(onClick = onToggle),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Lucide.ChevronDown,
+                AppIcon(Icons.ChevronDown,
                     contentDescription = stringResource(
                         if (expanded) Res.string.section_collapse else Res.string.section_expand, title,
                     ),

@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.Icon
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
@@ -15,16 +14,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import dev.corral.Lease
-import dev.corral.ui.icons.Lucide
+import dev.corral.ui.icons.AppIcon
+import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.device_expiring
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.LocalMonoFont
 import java.util.Locale
+import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.stringResource
 
 internal fun ttlSeconds(lease: Lease?, nowMs: Long): Long? =
@@ -40,14 +40,14 @@ fun TTLText(lease: Lease?, now: Long, modifier: Modifier = Modifier) {
         val colors = LocalExtendedColors.current
         CorralPill(
             text = stringResource(Res.string.device_expiring),
-            icon = Lucide.Clock,
+            icon = Icons.Clock,
             container = colors.warningContainer,
             content = colors.onWarningContainer,
             modifier = modifier,
         )
     } else {
         Row(modifier, verticalAlignment = Alignment.CenterVertically) {
-            Icon(Lucide.Clock, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
+            AppIcon(Icons.Clock, contentDescription = null, modifier = Modifier.size(Dimens.iconXs),
                 tint = LocalExtendedColors.current.onSurfaceVariant)
             Spacer(Modifier.width(Dimens.space6))
             Text(formatDuration(seconds), fontFamily = LocalMonoFont.current,
@@ -62,7 +62,7 @@ internal fun CorralPill(
     container: Color,
     content: Color,
     modifier: Modifier = Modifier,
-    icon: ImageVector? = null,
+    icon: DrawableResource? = null,
 ) {
     Row(
         modifier.clip(RoundedCornerShape(Dimens.radiusPill)).background(container)
@@ -70,7 +70,7 @@ internal fun CorralPill(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(Dimens.space12), tint = content)
+            AppIcon(icon, contentDescription = null, modifier = Modifier.size(Dimens.space12), tint = content)
             Spacer(Modifier.width(Dimens.space5))
         }
         Text(text, style = MaterialTheme.typography.caption.copy(fontWeight = FontWeight.Medium), color = content)

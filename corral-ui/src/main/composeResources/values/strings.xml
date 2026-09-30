@@ -26,6 +26,8 @@
 
     <string name="action_live_view">Live view</string>
     <string name="action_force_free">Force free</string>
+    <string name="carousel_prev">Scroll devices left</string>
+    <string name="carousel_next">Scroll devices right</string>
     <string name="force_free_title">Force free %1$s?</string>
     <string name="force_free_body">Held by %1$s — the holder loses the device immediately.</string>
     <string name="confirm">Confirm</string>

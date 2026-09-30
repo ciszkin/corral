@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -81,6 +82,7 @@ fun DeviceCard(
     val accent = if (view.d.state == "unauthorized") colors.warning else colors.muted
     Column(
         Modifier.width(Dimens.cardMinWidth)
+            .heightIn(min = Dimens.cardHeight)
             .alpha(if (nonUsable) 0.9f else 1f)
             .background(colors.containerLow, RoundedCornerShape(Dimens.radiusMd))
             .drawBehind {
@@ -107,11 +109,10 @@ fun DeviceCard(
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(view.d.serial, fontFamily = LocalMonoFont.current, fontWeight = FontWeight.Medium,
-                style = MaterialTheme.typography.body1, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                style = MaterialTheme.typography.body1, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
             Spacer(Modifier.width(Dimens.space8))
             TransportIcon(view.d.transport)
-            Spacer(Modifier.weight(1f))
-            StateChip(view.d.state)
         }
         scrcpyReason?.let { reason ->
             InlineError(
@@ -119,9 +120,13 @@ fun DeviceCard(
                 onDismiss = onDismissScrcpy,
             )
         }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StateChip(view.d.state)
+            Spacer(Modifier.width(Dimens.space8))
+            Box(Modifier.weight(1f)) { HolderRow(view.lease) }
+        }
         Row {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Dimens.space6)) {
-                HolderRow(view.lease)
                 if (view.lease?.pendingAccept == true) {
                     Text(stringResource(Res.string.device_waiting_accept),
                         style = MaterialTheme.typography.caption, color = colors.onSurfaceVariant)
@@ -133,6 +138,7 @@ fun DeviceCard(
             Spacer(Modifier.width(Dimens.space12))
             Thumbnail(bytes, denied)
         }
+        Spacer(Modifier.weight(1f))
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onLive) {
                 AppIcon(Icons.Airplay, contentDescription = stringResource(Res.string.action_live_view))
@@ -188,7 +194,8 @@ private fun HolderRow(lease: Lease?) {
                 tint = colors.onSurfaceVariant)
             Spacer(Modifier.width(Dimens.space6))
             Text(lease.owner, fontFamily = LocalMonoFont.current,
-                style = MaterialTheme.typography.caption, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                style = MaterialTheme.typography.caption, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f))
         }
     }
 }

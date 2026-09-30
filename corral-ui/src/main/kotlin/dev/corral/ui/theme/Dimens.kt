@@ -36,6 +36,9 @@ object Dimens {
 
     val railWidth = 88.dp
     val cardMinWidth = 264.dp
+    val cardHeight = 288.dp
+    val carouselChevronSize = 32.dp
+    val carouselChevronInset = 8.dp
     val doctorNameWidth = 170.dp
     val valueFlagFieldWidth = 220.dp
     val queueOwnerWidth = 200.dp

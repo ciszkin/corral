@@ -26,6 +26,8 @@
 
     <string name="action_live_view">Жывы прагляд</string>
     <string name="action_force_free">Вызваліць прымусова</string>
+    <string name="carousel_prev">Пракруціць прылады ўлева</string>
+    <string name="carousel_next">Пракруціць прылады ўправа</string>
     <string name="force_free_title">Вызваліць %1$s прымусова?</string>
     <string name="force_free_body">Утрымлівае %1$s — утрымальнік адразу страціць прыладу.</string>
     <string name="confirm">Пацвердзіць</string>

@@ -11,7 +11,6 @@ class DimensTest {
         assertEquals(8.dp, Dimens.radiusSm)
         assertEquals(12.dp, Dimens.radiusMd)
         assertEquals(999.dp, Dimens.radiusPill)
-        assertEquals(88.dp, Dimens.railWidth)
         assertEquals(264.dp, Dimens.cardMinWidth)
         assertEquals(1024, Dimens.minWindowWidthPx)
         assertEquals(640, Dimens.minWindowHeightPx)

@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -53,6 +54,7 @@ import dev.corral.ui.icons.AppIcon
 import dev.corral.ui.icons.Icons
 import dev.corral.ui.pool.DevicesSection
 import dev.corral.ui.pool.DoctorSection
+import dev.corral.ui.pool.EmulatorsSection
 import dev.corral.ui.pool.PoolEffect
 import dev.corral.ui.pool.PoolIntent
 import dev.corral.ui.pool.PoolState
@@ -62,12 +64,14 @@ import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.banner_screenshots_denied
 import dev.corral.ui.resources.cancel
 import dev.corral.ui.resources.confirm
+import dev.corral.ui.resources.emulator_action_failed
 import dev.corral.ui.resources.force_free_body
 import dev.corral.ui.resources.force_free_failed
 import dev.corral.ui.resources.force_free_nobody
 import dev.corral.ui.resources.force_free_title
 import dev.corral.ui.resources.rail_devices
 import dev.corral.ui.resources.rail_doctor
+import dev.corral.ui.resources.rail_emulators
 import dev.corral.ui.resources.rail_queue
 import dev.corral.ui.resources.rail_rules
 import dev.corral.ui.resources.rail_settings
@@ -95,6 +99,7 @@ import org.jetbrains.compose.resources.stringResource
 
 internal enum class AppSection(val label: StringResource, val icon: DrawableResource) {
     Devices(Res.string.rail_devices, Icons.Smartphone),
+    Emulators(Res.string.rail_emulators, Icons.Cpu),
     Queue(Res.string.rail_queue, Icons.List),
     Doctor(Res.string.rail_doctor, Icons.Activity),
     Rules(Res.string.rail_rules, Icons.Shield),
@@ -121,6 +126,7 @@ fun AppScreen(
     var lastSectionHeightPx by remember { mutableStateOf(0) }
     var scrcpyFailure by remember { mutableStateOf<Pair<String, String>?>(null) }
     var forceFreeError by remember { mutableStateOf<String?>(null) }
+    var emulatorError by remember { mutableStateOf<String?>(null) }
     var configSaveFailed by remember { mutableStateOf(false) }
     val expandedSections = remember { mutableStateMapOf<AppSection, Boolean>() }
 
@@ -146,10 +152,12 @@ fun AppScreen(
             when (effect) {
                 is PoolEffect.ScrcpyFailed -> scrcpyFailure = effect.serial to effect.reason
                 is PoolEffect.ForceFreeFailed -> forceFreeError = effect.reason
+                is PoolEffect.EmulatorActionFailed -> emulatorError = effect.reason
             }
         }
     }
     LaunchedEffect(poolState.confirmFree) { forceFreeError = null }
+    LaunchedEffect(poolState.emulators) { emulatorError = null }
     LaunchedEffect(state.url, state.connection is Connection.Connected) {
         if (state.connection is Connection.Connected) config.onIntent(ConfigIntent.Load)
     }
@@ -164,7 +172,7 @@ fun AppScreen(
     Box(Modifier.fillMaxSize().background(MaterialTheme.colors.surface)) {
         Row(Modifier.fillMaxSize()) {
             Column(
-                Modifier.width(Dimens.railWidth)
+                Modifier.width(IntrinsicSize.Max)
                     .fillMaxHeight()
                     .background(MaterialTheme.colors.surface)
                     .padding(Dimens.space8),
@@ -196,6 +204,15 @@ fun AppScreen(
                     Banner(
                         icon = Icons.XCircle,
                         text = stringResource(Res.string.settings_save_failed),
+                        container = colors.errorContainer,
+                        content = colors.onErrorContainer,
+                    )
+                }
+                emulatorError?.let { reason ->
+                    val colors = LocalExtendedColors.current
+                    Banner(
+                        icon = Icons.XCircle,
+                        text = reason.ifBlank { stringResource(Res.string.emulator_action_failed) },
                         container = colors.errorContainer,
                         content = colors.onErrorContainer,
                     )
@@ -239,6 +256,7 @@ fun AppScreen(
                             }
                             AppSection.Queue -> QueueSection(poolState, expanded, toggle)
                             AppSection.Doctor -> DoctorSection(poolState, state.seq, pool::onIntent, expanded, toggle)
+                            AppSection.Emulators -> EmulatorsSection(poolState, pool::onIntent, expanded, toggle)
                             AppSection.Rules -> RulesSection(configState, config::onIntent, expanded, toggle)
                             AppSection.Settings -> Box(
                                 Modifier.onSizeChanged { lastSectionHeightPx = it.height },

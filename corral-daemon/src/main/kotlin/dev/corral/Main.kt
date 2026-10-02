@@ -58,6 +58,7 @@ fun main() {
     warnRejectedFileValue(config, "CORRAL_DB")
     warnRejectedFileValue(config, "CORRAL_ADB")
     warnRejectedFileValue(config, "CORRAL_SCREENSHOTS")
+    warnRejectedFileValue(config, "CORRAL_EMULATOR_LAUNCHER")
     val port = resolvePort(config)
     val dbPath = resolveDbPath(config)
     dbPath.parent?.let { Files.createDirectories(it) }
@@ -72,6 +73,10 @@ fun main() {
     val adb = resolveAdb(config)
     val db = Db(dbPath)
     val scope = CoroutineScope(Dispatchers.IO)
+    val emulators = Emulators(adb, { Emulators.resolveEmulatorPath(adb = adb) },
+        launcherFor(override = config.get("CORRAL_EMULATOR_LAUNCHER")))
+    // A graceful stop ends direct children; a SIGKILL can still orphan them.
+    Runtime.getRuntime().addShutdownHook(Thread { runCatching { emulators.shutdown() } })
 
     val monitor = DeviceMonitor(adb, System.getenv("CORRAL_FAKE_DEVICES"), scope)
     val leases = LeaseManager({ monitor.devices }, db)
@@ -98,13 +103,14 @@ fun main() {
     }
     selfHealRules()
 
-    scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; selfHealSdkShim(); selfHealRules() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
+    scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; runCatching { emulators.reapFailed() }; selfHealSdkShim(); selfHealRules() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
 
     val events = Events(
-        { monitor.devices.map { DeviceStatus(it.serial, leases.snapshot[it.serial]) } },
+        { monitor.devices.map { DeviceStatus(it.serial, leases.snapshot[it.serial], it.booted) } },
         { leases.queueSnapshot() },
         scope)
-    val env = AppEnv({ monitor.devices }, leases, adb, Screenshotter({ monitor.devices }, adb), screenshotPolicy(config), events, config)
+    val env = AppEnv({ monitor.devices }, leases, adb, Screenshotter({ monitor.devices }, adb), screenshotPolicy(config), events, config,
+        emulators)
     events.start()
     embeddedServer(CIO, port = port, host = "127.0.0.1") {
         guardLocalHost()

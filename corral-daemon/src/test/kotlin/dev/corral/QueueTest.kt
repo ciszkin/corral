@@ -375,4 +375,22 @@ class QueueTest {
         m.free("dev1", "A"); runCurrent()
         assertEquals("slow", (m.poll(slow.id, "slow") as Poll.Offered).lease.owner)
     }
+
+    @Test fun unbootedEmulatorIsNotUsable() = runTest {
+        devices = listOf(Device("emulator-5554", "device", booted = false))
+        val m = mgr()
+        assertNull(m.claim("emulator-5554", "A"))                 // direct serial path refuses it too
+        assertTrue(runCatching { m.requestClaim(Selector(serial = "emulator-5554"), "A") }
+            .exceptionOrNull() is LeaseBusyException)
+    }
+
+    @Test fun bootedGateFeedsTickets() = runTest {
+        devices = listOf(Device("emulator-5554", "device", booted = false))
+        val m = mgr()
+        val t = m.enqueue(Selector(transport = "emulator"), "W", 0, 1800, waitSeconds = 600)
+        assertTrue(m.poll(t.id, "W") is Poll.Queued)              // booting: not offered
+        devices = listOf(Device("emulator-5554", "device", booted = true))   // state unchanged
+        m.dispatchFreeDevices()
+        assertEquals("emulator-5554", (m.poll(t.id, "W") as Poll.Offered).lease.serial)
+    }
 }

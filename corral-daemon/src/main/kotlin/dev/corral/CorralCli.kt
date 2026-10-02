@@ -1,5 +1,6 @@
 package dev.corral
 
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -24,6 +25,10 @@ import java.net.http.HttpResponse
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import kotlin.system.exitProcess
+
+/** Percent-encodes a path segment; spaces must be `%20`, not the form-encoding `+`. */
+internal fun pathSegment(s: String): String =
+    URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20")
 
 /**
  * corral CLI — all logic in the jar (portable), launched by 3-line shims.
@@ -197,16 +202,32 @@ object CorralCli {
             Json.encodeToString(ClaimRequest(selector = selector, owner = owner, pid = pid, ttlSeconds = 1800)))
         if (r.statusCode() == 200)
             return Json.parseToJsonElement(r.body()).jsonObject["serial"]!!.jsonPrimitive.content
-        val matching = runCatching {
-            Json.parseToJsonElement(r.body()).jsonObject["matching"]!!.jsonPrimitive.content.toInt()
-        }.getOrNull()
+        val body = Json.parseToJsonElement(r.body()).jsonObject
+        val matching = runCatching { body["matching"]!!.jsonPrimitive.content.toInt() }.getOrNull()
+        val booting = runCatching { body["booting"]!!.jsonPrimitive.content.toInt() }.getOrNull() ?: 0
         if (matching == 0) System.err.println("corral: no connected device matches $selector")
+        else if (booting > 0)
+            System.err.println("corral: no free device matches $selector ($booting emulator(s) booting) — corral wait --type emulator queues until boot")
         else System.err.println("corral: no free device matches $selector (${matching ?: "some"} connected, all leased) — corral wait to queue, corral status for holders")
         exitProcess(1)
     }
 
     private fun String.str(field: String) =
         Json.parseToJsonElement(this).jsonObject[field]!!.jsonPrimitive.content
+
+    /** Matching emulators still booting, read straight from the daemon's device list. */
+    private fun bootingMatches(selector: Selector): Int = runCatching {
+        Json.decodeFromString<List<Device>>(get("/api/devices"))
+            .count { it.transport == "emulator" && !it.booted && selector.matchesFields(it) }
+    }.getOrDefault(0)
+
+    /** A ticket that hit its deadline: say so, naming the selector and — for emulators — a booting match. */
+    private fun waitTimedOut(selector: Selector, waitSeconds: Long): Nothing {
+        val booting = bootingMatches(selector)
+        val tail = if (booting > 0) "; $booting matching emulator(s) still booting" else ""
+        System.err.println("corral: gave up after ${waitSeconds}s waiting for $selector$tail")
+        exitProcess(1)
+    }
 
     @JvmStatic
     fun main(args: Array<String>) {
@@ -434,7 +455,7 @@ object CorralCli {
                     when (r.statusCode()) {
                         200 -> { println(r.body().str("serial")); return }
                         202 -> Thread.sleep(runCatching { r.body().str("retryAfterMs").toLong() }.getOrDefault(1000L))
-                        else -> { System.err.println("corral: no free device matches $sel"); exitProcess(1) }
+                        else -> waitTimedOut(sel, waitSeconds)
                     }
                 }
             }
@@ -463,6 +484,31 @@ object CorralCli {
                 execRealAdb(rest)
             }
             "queue" -> println(get("/api/queue"))
+            "avd" -> {
+                when (args.getOrNull(1) ?: "list") {
+                    "list" -> {
+                        val avds = Json.parseToJsonElement(get("/api/emulators")).jsonArray
+                        if (avds.isEmpty()) println("no AVDs")
+                        else avds.forEach { o ->
+                            val obj = o.jsonObject
+                            val name = obj["avd"]!!.jsonPrimitive.content
+                            val serials = obj["runningSerials"]!!.jsonArray.map { it.jsonPrimitive.content }
+                            println((listOf(name) + serials).joinToString(" "))
+                        }
+                    }
+                    "start" -> {
+                        val avd = args.getOrNull(2) ?: usage(2)
+                        println(send("POST", "/api/emulators/${pathSegment(avd)}/start", "{}"))
+                    }
+                    "stop" -> {
+                        val avd = args.getOrNull(2) ?: usage(2)
+                        val force = args.drop(3).any { it == "--force" }
+                        println(send("POST", "/api/emulators/${pathSegment(avd)}/stop",
+                            Json.encodeToString(StopBody(force))))
+                    }
+                    else -> usage(2)
+                }
+            }
             "help" -> usage(0)
             else -> usage(2)
         }
@@ -492,6 +538,7 @@ object CorralCli {
             "|wait [--timeout S (max 600)] [selector]|lease [--all] [selector] -- <cmd>" +
             "|gate [--owner o] -- <adb args>" +
             "|screenshot <serial> [--out F]|events" +
+            "|avd [list|start A|stop A [--force]]" +
             "\n  selector: --serial S --model M --os V(min) --type usb|wifi|emulator --avd A")
         exitProcess(code)
     }

@@ -8,6 +8,7 @@
     <string name="rail_doctor">Doctor</string>
     <string name="rail_rules">Rules</string>
     <string name="rail_settings">Settings</string>
+    <string name="rail_emulators">Emulators</string>
 
     <string name="section_collapse">Collapse %1$s</string>
     <string name="section_expand">Expand %1$s</string>
@@ -23,6 +24,7 @@
     <string name="device_expiring">expiring</string>
     <string name="device_offline">offline</string>
     <string name="device_unauthorized">unauthorized</string>
+    <string name="device_booting">booting</string>
 
     <string name="action_live_view">Live view</string>
     <string name="action_force_free">Force free</string>
@@ -54,7 +56,10 @@
     <string name="rules_saved">saved</string>
     <string name="rules_safe_defaults">Safe defaults</string>
     <string name="rules_device_touching">Touches devices — guard applies (enabling one weakens the gate)</string>
-    <string name="rules_entries">%1$d entries</string>
+    <plurals name="rules_entries">
+        <item quantity="one">%1$d entry</item>
+        <item quantity="other">%1$d entries</item>
+    </plurals>
     <string name="rules_add_flag">Add flag</string>
     <string name="rules_add">Add</string>
     <string name="rules_pin_guard">-s is the pin, not a value flag</string>
@@ -86,6 +91,8 @@
     <string name="settings_screenshots_open">open</string>
     <string name="settings_observers_desc">Extra names allowed to capture any screen.</string>
     <string name="settings_adb_desc">adb binary the daemon drives.</string>
+    <string name="settings_emulator_desc">Emulator binary for start/stop — empty uses the SDK emulator or PATH.</string>
+    <string name="settings_launcher_desc">How a started emulator is run: "systemd" keeps it alive across daemon restarts via its own user unit; "direct" runs it as a child process; empty picks systemd when the daemon is the corral service, else direct.</string>
     <string name="settings_db_desc">SQLite file for leases and queue.</string>
     <string name="settings_gradle_tasks_desc">Tasks the gate treats as device-touching.</string>
     <string name="settings_load_error">Could not load config.</string>
@@ -109,10 +116,48 @@
     <string name="transport_usb">USB transport</string>
     <string name="transport_wifi">Wi-Fi transport</string>
     <string name="transport_emulator">Emulator transport</string>
-    <string name="devices_counts">%1$d free · %2$d held</string>
+    <plurals name="devices_free">
+        <item quantity="one">%1$d free</item>
+        <item quantity="other">%1$d free</item>
+    </plurals>
+    <plurals name="devices_held">
+        <item quantity="one">%1$d held</item>
+        <item quantity="other">%1$d held</item>
+    </plurals>
+    <plurals name="devices_offline">
+        <item quantity="one">%1$d offline</item>
+        <item quantity="other">%1$d offline</item>
+    </plurals>
+    <plurals name="devices_booting">
+        <item quantity="one">%1$d booting</item>
+        <item quantity="other">%1$d booting</item>
+    </plurals>
     <string name="devices_empty_title">No devices connected</string>
 
-    <string name="queue_waiting">%1$d waiting</string>
+    <plurals name="emulators_avds">
+        <item quantity="one">%1$d AVD</item>
+        <item quantity="other">%1$d AVDs</item>
+    </plurals>
+    <plurals name="emulators_running">
+        <item quantity="one">%1$d running</item>
+        <item quantity="other">%1$d running</item>
+    </plurals>
+    <string name="emulators_empty_title">No AVDs found</string>
+    <string name="emulators_empty">Create one with avdmanager, or point CORRAL_EMULATOR at the emulator binary.</string>
+    <string name="emulator_start">Start</string>
+    <string name="emulator_stop">Stop</string>
+    <string name="emulator_starting">starting</string>
+    <string name="emulator_running">running</string>
+    <string name="emulator_not_running">not running</string>
+    <string name="emulator_last_error">last error: %1$s</string>
+    <string name="emulator_force_stop_title">Force stop %1$s?</string>
+    <string name="emulator_force_stop_body">Leased by %1$s — forcing stop kills the running instance and the holder loses it.</string>
+    <string name="emulator_action_failed">Emulator action failed — the daemon refused the request.</string>
+
+    <plurals name="queue_waiting">
+        <item quantity="one">%1$d waiting</item>
+        <item quantity="other">%1$d waiting</item>
+    </plurals>
     <string name="queue_position">#%1$d</string>
     <string name="queue_expired">expired</string>
     <string name="duration_min_sec">%1$dm %2$ds</string>

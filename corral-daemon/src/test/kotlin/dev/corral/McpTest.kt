@@ -31,8 +31,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.coroutineContext
@@ -80,12 +82,52 @@ class McpTest {
         return s to leases
     }
 
+    private fun fakeEmulator(dir: Path, avds: String = "Pixel6AVD\nSmallAVD\n"): Path =
+        dir.resolve("emulator").also {
+            Files.writeString(it, """
+                #!/usr/bin/env bash
+                case "${'$'}1" in
+                  -list-avds) printf '$avds' ;;
+                  -avd) exec sleep 2 ;;
+                  *) exit 0 ;;
+                esac
+            """.trimIndent())
+            it.toFile().setExecutable(true)
+        }
+
+    private class RecordingLauncher : EmulatorLauncher {
+        val stopped = mutableListOf<String>()
+        override fun start(bin: String, avd: String, log: Path) {}
+        override fun isRunning(avd: String): Boolean = false
+        override fun stop(avd: String): String? { stopped += avd; return "unit ${systemdUnitName(avd)}" }
+        override fun lastExit(avd: String): Int? = null
+    }
+
+    private fun emulatorServer(
+        sessions: ConcurrentHashMap<String, ServerSession>,
+        devices: List<Device>,
+        binary: Boolean = true,
+        launcher: EmulatorLauncher = DefaultLauncher(),
+    ): Pair<Server, LeaseManager> {
+        val dir = createTempDirectory("mcp-emu")
+        val emu = if (binary) fakeEmulator(dir) else null
+        val adb = dir.resolve("fake-adb").also {
+            Files.writeString(it, "#!/usr/bin/env bash\nexit 0\n")
+            it.toFile().setExecutable(true)
+        }
+        val devs = { devices }
+        val leases = LeaseManager(devs, null)
+        val emulators = Emulators(adb.toString(), { emu?.toString() }, launcher)
+        return corralMcpServer(AppEnv(devs, leases, emulators = emulators), sessions) to leases
+    }
+
     private fun obj(vararg pairs: Pair<String, Any?>): JsonObject = buildJsonObject {
         pairs.forEach { (k, v) ->
             when (v) {
                 null -> put(k, null as String?)
                 is String -> put(k, v)
                 is Long -> put(k, v)
+                is Boolean -> put(k, v)
                 is JsonObject -> put(k, v)
             }
         }
@@ -95,13 +137,14 @@ class McpTest {
         callTool(CallToolRequest(CallToolRequestParams(name = name, arguments = args)))
 
     @Test
-    fun sixToolsListedAndClaimCarriesDerivedOwner() = runBlocking {
+    fun eightToolsListedAndClaimCarriesDerivedOwner() = runBlocking {
         val sessions = ConcurrentHashMap<String, ServerSession>()
         val s = server(sessions)
         val client = harness(sessions, s, "test-harness")
 
         assertEquals(
-            setOf("list_devices", "queue", "claim", "free", "renew", "screenshot"),
+            setOf("list_devices", "queue", "claim", "free", "renew", "screenshot",
+                "start_emulator", "stop_emulator"),
             client.listTools().tools.map { it.name }.toSet(),
         )
 
@@ -206,6 +249,190 @@ class McpTest {
 
         assertTrue(r.isError == true)
         assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("not configured"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun selectorTransportEmulatorDoesNotMatchPhysicalDevice() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val s = server(sessions)                       // dev1/dev2 are physical (usb), free
+        val client = harness(sessions, s, "emu-harness")
+
+        val selector = client.listTools().tools.single { it.name == "claim" }
+            .inputSchema.properties!!["selector"]!!.jsonObject
+        assertTrue(selector["properties"]!!.jsonObject.containsKey("transport"))
+
+        val res = client.tool("claim", obj("selector" to obj("transport" to "emulator")))
+        assertTrue(res.isError == true)                // must not fall back to matching any device
+        client.close(); s.close()
+    }
+
+    @Test
+    fun startReturnsStartedAndTeachesBootGate() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, _) = emulatorServer(sessions, devices = emptyList())
+        val client = harness(sessions, s, "emu-harness")
+        val home = createTempDirectory("home")
+        val previous = System.getProperty("user.home")
+        val res = try {
+            System.setProperty("user.home", home.toString())
+            client.tool("start_emulator", obj("avd" to "Pixel6AVD"))
+        } finally {
+            System.setProperty("user.home", previous)
+        }
+
+        assertFalse(res.isError == true)
+        val text = res.content.filterIsInstance<TextContent>().single().text
+        assertTrue(text.contains("\"started\":true"))
+        assertTrue(text.contains("claimable once booted"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun startAlreadyRunningWhenALiveSpawnIsNotInThePool() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val live = object : EmulatorLauncher {
+            override fun start(bin: String, avd: String, log: Path) {}
+            override fun isRunning(avd: String): Boolean = true
+            override fun stop(avd: String): String? = null
+            override fun lastExit(avd: String): Int? = null
+        }
+        val (s, _) = emulatorServer(sessions, devices = emptyList(), launcher = live)
+        val client = harness(sessions, s, "emu-harness")
+
+        val r = client.tool("start_emulator", obj("avd" to "Pixel6AVD"))
+
+        assertFalse(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("\"alreadyRunning\":true"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun startAlreadyRunningWhenTheLauncherRaces() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val racy = object : EmulatorLauncher {
+            override fun start(bin: String, avd: String, log: Path) { throw EmulatorAlreadyRunning() }
+            override fun isRunning(avd: String): Boolean = false
+            override fun stop(avd: String): String? = null
+            override fun lastExit(avd: String): Int? = null
+        }
+        val (s, _) = emulatorServer(sessions, devices = emptyList(), launcher = racy)
+        val client = harness(sessions, s, "emu-harness")
+
+        val r = client.tool("start_emulator", obj("avd" to "Pixel6AVD"))
+
+        assertFalse(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("\"alreadyRunning\":true"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun startWithoutBinaryIsError() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, _) = emulatorServer(sessions, devices = emptyList(), binary = false)
+        val client = harness(sessions, s, "emu-harness")
+
+        val r = client.tool("start_emulator", obj("avd" to "Pixel6AVD"))
+
+        assertTrue(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("CORRAL_EMULATOR"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun unknownAvdIsErrorListingAvds() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, _) = emulatorServer(sessions, devices = emptyList())
+        val client = harness(sessions, s, "emu-harness")
+
+        val r = client.tool("start_emulator", obj("avd" to "Nope"))
+
+        assertTrue(r.isError == true)
+        val text = r.content.filterIsInstance<TextContent>().single().text
+        assertTrue(text.contains("Pixel6AVD") && text.contains("SmallAVD"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun stopRefusedNamesHolder() = runBlocking {
+        val emuDevices = listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, leases) = emulatorServer(sessions, emuDevices)
+        val client = harness(sessions, s, "emu-harness")
+        leases.claim("emulator-5554", "other-agent")
+
+        val r = client.tool("stop_emulator", obj("avd" to "Pixel6AVD"))
+
+        assertTrue(r.isError == true)
+        val text = r.content.filterIsInstance<TextContent>().single().text
+        assertTrue(text.contains("other-agent"))
+        assertTrue(text.contains("free that lease first"), text)
+        assertTrue(!text.contains("force"), text)
+        client.close(); s.close()
+    }
+
+    @Test
+    fun stopToolHasNoForceOverride() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, leases) = emulatorServer(sessions, listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true)))
+        val client = harness(sessions, s, "emu-harness")
+        leases.claim("emulator-5554", "other-agent")
+
+        val schema = client.listTools().tools.single { it.name == "stop_emulator" }.inputSchema.properties!!
+        assertTrue(!schema.containsKey("force"), "force must be gone from the stop_emulator schema: $schema")
+
+        val r = client.tool("stop_emulator", obj("avd" to "Pixel6AVD", "force" to true))
+        assertTrue(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("other-agent"))
+        client.close(); s.close()
+    }
+
+    @Test
+    fun freeToolHasNoForceOverride() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val s = server(sessions)
+        val a = harness(sessions, s, "harness-a")
+        val b = harness(sessions, s, "harness-b")
+        a.tool("claim", obj("selector" to obj("serial" to "dev1")))
+
+        val schema = b.listTools().tools.single { it.name == "free" }.inputSchema.properties!!
+        assertFalse(schema.containsKey("force"), "force must be gone from the free schema: $schema")
+
+        val r = b.tool("free", obj("serial" to "dev1", "force" to true))
+        assertTrue(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("not yours"))
+        a.close(); b.close(); s.close()
+    }
+
+    @Test
+    fun stopEmulatorEndsTheUnitEvenWithNoRunningSerial() = runBlocking {
+        val launcher = RecordingLauncher()
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val (s, _) = emulatorServer(sessions, devices = emptyList(), launcher = launcher)
+        val client = harness(sessions, s, "emu-harness")
+
+        val r = client.tool("stop_emulator", obj("avd" to "Pixel6AVD"))
+
+        assertFalse(r.isError == true)
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text.contains("\"stopped\":[]"))
+        assertTrue(r.content.filterIsInstance<TextContent>().single().text
+            .contains("\"terminated\":\"unit ${systemdUnitName("Pixel6AVD")}\""),
+            r.content.filterIsInstance<TextContent>().single().text)
+        assertEquals(listOf("Pixel6AVD"), launcher.stopped)
+        client.close(); s.close()
+    }
+
+    @Test
+    fun emulatorToolsWithoutComponentAreError() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val s = server(sessions)
+        val client = harness(sessions, s, "emu-harness")
+
+        val start = client.tool("start_emulator", obj("avd" to "Pixel6AVD"))
+        val stop = client.tool("stop_emulator", obj("avd" to "Pixel6AVD"))
+
+        assertTrue(start.isError == true && stop.isError == true)
+        assertTrue(start.content.filterIsInstance<TextContent>().single().text.contains("not configured"))
         client.close(); s.close()
     }
 

@@ -20,6 +20,7 @@ import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
+import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.request.url
@@ -39,6 +40,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 
 @Serializable private data class FreeBody(val owner: String, val force: Boolean)
+
+@Serializable private data class StopBody(val force: Boolean)
 
 /** Shared client config: non-2xx throws, so callers (the store) can surface policy denials. */
 internal fun HttpClientConfig<*>.corralClientConfig() {
@@ -90,6 +93,19 @@ class CorralClient internal constructor(
     }
 
     override suspend fun doctor(): DoctorResponse = http.get("$baseUrl/api/doctor").body()
+
+    override suspend fun emulators(): List<AvdStatus> = http.get("$baseUrl/api/emulators").body()
+
+    override suspend fun emulatorStart(avd: String) {
+        http.post("$baseUrl/api/emulators/${avd.encodeURLParameter()}/start")
+    }
+
+    override suspend fun emulatorStop(avd: String, force: Boolean) {
+        http.post("$baseUrl/api/emulators/${avd.encodeURLParameter()}/stop") {
+            contentType(ContentType.Application.Json)
+            setBody(StopBody(force))
+        }
+    }
 
     override fun events(): Flow<String> = flow {
         val ws = http.webSocketSession { url("$wsBase/ws/events") }

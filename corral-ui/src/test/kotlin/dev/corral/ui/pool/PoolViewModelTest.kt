@@ -6,6 +6,7 @@ import dev.corral.EventFrame
 import dev.corral.Lease
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
+import dev.corral.ui.AvdStatus
 import dev.corral.ui.Capabilities
 import dev.corral.ui.CorralApi
 import dev.corral.ui.ScreenshotDeniedException
@@ -43,16 +44,22 @@ class PoolViewModelTest {
         var queueResponse: List<QueueEntry> = emptyList(),
         var doctorResponse: DoctorResponse = DoctorResponse("/adb", emptyList()),
         var caps: Capabilities = Capabilities(true),
+        var emulatorsResponse: List<AvdStatus> = emptyList(),
     ) : CorralApi {
         var devicesCalls = 0
         var statusCalls = 0
         var queueCalls = 0
         var doctorCalls = 0
+        var emulatorsCalls = 0
         val screenshots = mutableListOf<String>()
         val forced = mutableListOf<String>()
         val denied = mutableSetOf<String>()
         val failing = mutableSetOf<String>()
+        val started = mutableListOf<String>()
+        val stopped = mutableListOf<Pair<String, Boolean>>()
         var forceFail = false
+        var startFail = false
+        var stopFail = false
 
         override suspend fun devices(): List<Device> { devicesCalls++; return devicesResponse }
         override suspend fun status(): StatusResponse { statusCalls++; return statusResponse }
@@ -67,6 +74,15 @@ class PoolViewModelTest {
         override suspend fun forceFree(serial: String) {
             if (forceFail) throw RuntimeException("corral: refused")
             forced += serial
+        }
+        override suspend fun emulators(): List<AvdStatus> { emulatorsCalls++; return emulatorsResponse }
+        override suspend fun emulatorStart(avd: String) {
+            if (startFail) throw RuntimeException("corral: emulator for $avd exited immediately: boom")
+            started += avd
+        }
+        override suspend fun emulatorStop(avd: String, force: Boolean) {
+            if (stopFail) throw RuntimeException("corral: $avd is leased by mcp:claude — free it first, or POST {\"force\":true}")
+            stopped += avd to force
         }
         override suspend fun config(): ConfigResponse = error("unused")
         override suspend fun putConfig(settings: Map<String, String>, rules: ConfigRules?): Result<PutConfigResponse> =
@@ -340,6 +356,86 @@ class PoolViewModelTest {
         pool.onIntent(PoolIntent.ConfirmForceFree); runCurrent()
         assertNull(pool.state.value.confirmFree)
         assertEquals(listOf("dev1"), api.forced)
+    }
+
+    @Test fun emulatorsListedOnDevicesRefresh() = runTest {
+        val api = FakeApi(
+            devicesResponse = devicesOf("dev1"),
+            statusResponse = StatusResponse(listOf(DeviceStatus("dev1", null)), "/adb"),
+            emulatorsResponse = listOf(AvdStatus("Pixel6AVD", listOf("emulator-5554"))),
+        )
+        val (pool, app) = newPool(api)
+        runCurrent()
+        app.onIntent(AppIntent.Frame(hello)); runCurrent()
+        assertEquals(listOf(AvdStatus("Pixel6AVD", listOf("emulator-5554"))), pool.state.value.emulators)
+        assertTrue(api.emulatorsCalls >= 1)
+    }
+
+    @Test fun startStopIntentsCallTheApiAndRefresh() = runTest {
+        val api = FakeApi(emulatorsResponse = listOf(AvdStatus("Pixel6AVD", emptyList())))
+        val (pool, _) = newPool(api)
+        runCurrent()
+        pool.onIntent(PoolIntent.RefreshEmulators); runCurrent()
+        val emulatorFetches = api.emulatorsCalls
+        val deviceFetches = api.devicesCalls
+
+        pool.onIntent(PoolIntent.StartEmulator("Pixel6AVD")); runCurrent()
+        assertEquals(listOf("Pixel6AVD"), api.started)
+        assertTrue(api.emulatorsCalls > emulatorFetches)
+        assertTrue(api.devicesCalls > deviceFetches)
+
+        val afterStart = api.emulatorsCalls
+        pool.onIntent(PoolIntent.StopEmulator("Pixel6AVD", force = true)); runCurrent()
+        assertEquals(listOf("Pixel6AVD" to true), api.stopped)
+        assertTrue(api.emulatorsCalls > afterStart)
+    }
+
+    @Test fun stopRefusalSurfacesTheEffect() = runTest {
+        val api = FakeApi().apply { stopFail = true }
+        val (pool, _) = newPool(api)
+        runCurrent()
+        pool.onIntent(PoolIntent.StopEmulator("Pixel6AVD", force = false)); runCurrent()
+        val effect = pool.effect.first() as PoolEffect.EmulatorActionFailed
+        assertTrue(effect.reason.contains("mcp:claude"), effect.reason)
+        assertTrue(api.stopped.isEmpty())
+    }
+
+    @Test fun startingAnAvdMarksItAndGuardsRepeats() = runTest {
+        val api = FakeApi(emulatorsResponse = listOf(AvdStatus("Pixel6AVD", emptyList())))
+        val (pool, _) = newPool(api)
+        runCurrent()
+        pool.onIntent(PoolIntent.StartEmulator("Pixel6AVD"))
+        assertEquals(setOf("Pixel6AVD"), pool.state.value.startingEmulators)
+        pool.onIntent(PoolIntent.StartEmulator("Pixel6AVD")); runCurrent()
+        assertEquals(listOf("Pixel6AVD"), api.started)
+        assertEquals(setOf("Pixel6AVD"), pool.state.value.startingEmulators)
+    }
+
+    @Test fun aRefreshShowingARunningSerialClearsStarting() = runTest {
+        val api = FakeApi(emulatorsResponse = listOf(AvdStatus("Pixel6AVD", emptyList())))
+        val (pool, _) = newPool(api)
+        runCurrent()
+        pool.onIntent(PoolIntent.StartEmulator("Pixel6AVD")); runCurrent()
+        assertEquals(setOf("Pixel6AVD"), pool.state.value.startingEmulators)
+        api.emulatorsResponse = listOf(AvdStatus("Pixel6AVD", listOf("emulator-5554")))
+        pool.onIntent(PoolIntent.RefreshEmulators); runCurrent()
+        assertTrue(pool.state.value.startingEmulators.isEmpty())
+    }
+
+    @Test fun aFailingStartClearsStartingAndEmitsTheEffect() = runTest {
+        val api = FakeApi(emulatorsResponse = listOf(AvdStatus("Pixel6AVD", emptyList()))).apply { startFail = true }
+        val (pool, _) = newPool(api)
+        runCurrent()
+        pool.onIntent(PoolIntent.StartEmulator("Pixel6AVD")); runCurrent()
+        assertTrue(pool.state.value.startingEmulators.isEmpty())
+        val effect = pool.effect.first() as PoolEffect.EmulatorActionFailed
+        assertTrue(effect.reason.contains("exited immediately"), effect.reason)
+    }
+
+    @Test fun bootingChipState() = runTest {
+        assertTrue(DeviceView(Device("emulator-5554", "device", avd = "Pixel6AVD"), null).booting)
+        assertFalse(DeviceView(Device("dev1", "device"), null).booting)
+        assertFalse(DeviceView(Device("emulator-5554", "offline"), null).booting)
     }
 
     @Test fun tickDrivesNow() = runTest {

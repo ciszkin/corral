@@ -55,6 +55,8 @@ class LeaseManagerTest {
         mgr.claim("dev1", "agentA")
         val e = runCatching { mgr.free("dev1", "agentB") }.exceptionOrNull()!!
         assertTrue(e is IllegalStateException && "not yours" in e.message!!)
+        assertTrue("force=true" !in e.message!!, e.message!!)
+        assertTrue("force-freed from the console" in e.message!!, e.message!!)
         mgr.free("dev1", "agentB", force = true)
     }
 
@@ -104,6 +106,44 @@ class LeaseManagerTest {
         assertEquals("agentB", mgr.snapshot["dev2"]?.owner)
     }
 
+    @Test fun emulatorLeaseIsDroppedWhenItsSerialLeavesThePool() = runTest {
+        var pool = listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+        val mgr = LeaseManager({ pool }, null, { now })
+        mgr.claim("emulator-5554", "agentA", ttl = 99999)
+        pool = listOf(Device("emulator-5556", "device", avd = "SmallAVD", booted = true))
+        mgr.sweep()
+        assertNull(mgr.snapshot["emulator-5554"])
+    }
+
+    @Test fun emulatorLeaseSurvivesSweepWhileThePoolIsEmpty() = runTest {
+        var pool = listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+        val mgr = LeaseManager({ pool }, null, { now })
+        mgr.claim("emulator-5554", "agentA", ttl = 99999)
+        pool = emptyList()                    // daemon restart: no track-devices frame yet
+        mgr.sweep()
+        assertEquals("agentA", mgr.snapshot["emulator-5554"]?.owner)
+    }
+
+    @Test fun reusedEmulatorSerialIsFreeToClaimAgain() = runTest {
+        var pool = listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+        val mgr = LeaseManager({ pool }, null, { now })
+        mgr.claim("emulator-5554", "agentA", ttl = 99999)
+        pool = listOf(Device("emulator-5556", "device", avd = "OtherAVD", booted = true)); mgr.sweep()
+        pool = listOf(Device("emulator-5554", "device", avd = "SmallAVD", booted = true))
+        assertEquals("agentB", mgr.claim("emulator-5554", "agentB")?.owner)
+    }
+
+    @Test fun physicalAndWifiLeasesSurviveAReplug() = runTest {
+        var pool = listOf(Device("R58M123", "device"), Device("192.168.0.5:5555", "device"))
+        val mgr = LeaseManager({ pool }, null, { now })
+        mgr.claim("R58M123", "agentA", ttl = 99999)
+        mgr.claim("192.168.0.5:5555", "agentB", ttl = 99999)
+        pool = emptyList()
+        mgr.sweep()
+        assertEquals("agentA", mgr.snapshot["R58M123"]?.owner)
+        assertEquals("agentB", mgr.snapshot["192.168.0.5:5555"]?.owner)
+    }
+
     @Test fun recoverPersistedKeepsOnlyLive() = runTest {
         val db = Db(createTempDirectory("corral").resolve("leases.db"))
         db.upsertLease(Lease("dev1", "agentA", expiresAt = now + 100))
@@ -127,5 +167,25 @@ class LeaseManagerTest {
         assertEquals("dev2", mgr.claimAny("agentB")?.serial)
         val e = runCatching { mgr.claimAny("agentC") }.exceptionOrNull()!!
         assertTrue(e is LeaseBusyException)
+    }
+
+    @Test fun busyErrorNamesBootingEmulators() = runTest {
+        val mgr = LeaseManager({ listOf(Device("emulator-5554", "device", booted = false)) }, null, { now })
+        val e = runCatching { mgr.requestClaim(Selector(transport = "emulator"), "A") }.exceptionOrNull()!!
+        assertTrue(e is LeaseBusyException)
+        assertTrue("booting" in e.message!!, "must name booting: ${e.message}")
+        assertTrue("corral wait --type emulator" in e.message!!, "must teach the remedy: ${e.message}")
+    }
+
+    @Test fun busyErrorNamesBootingBesideALeasedEmulator() = runTest {
+        val pool = listOf(Device("emulator-5554", "device", booted = true),
+                          Device("emulator-5556", "device", booted = false))
+        val mgr = LeaseManager({ pool }, null, { now })
+        mgr.claim("emulator-5554", "A", ttl = 99999)
+        val e = runCatching { mgr.requestClaim(Selector(transport = "emulator"), "B") }.exceptionOrNull()!!
+        assertTrue(e is LeaseBusyException)
+        assertEquals(1, e.booting)
+        assertTrue("booting" in e.message!!, "must name booting beside a lease: ${e.message}")
+        assertTrue("corral wait --type emulator" in e.message!!, "must teach the remedy: ${e.message}")
     }
 }

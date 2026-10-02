@@ -57,7 +57,9 @@ class DaemonConfig(
         "CORRAL_PORT" -> parsePort(value) != null
         "CORRAL_DB" -> dbPathUsable(value)
         "CORRAL_ADB" -> adbValueUsable(value)
-        "CORRAL_SCREENSHOTS" -> value == "strict" || value == "open"
+        "CORRAL_EMULATOR" -> adbValueUsable(value)
+        "CORRAL_EMULATOR_LAUNCHER" -> value.trim().lowercase() in setOf("", "systemd", "direct")
+        "CORRAL_SCREENSHOTS" -> value.trim().lowercase() in setOf("strict", "open")
         else -> true
     }
 
@@ -89,6 +91,8 @@ class DaemonConfig(
             ConfigKey("CORRAL_SCREENSHOTS", "strict"),
             ConfigKey("CORRAL_SCREENSHOT_OBSERVERS", ""),
             ConfigKey("CORRAL_ADB", "adb"),
+            ConfigKey("CORRAL_EMULATOR", ""),
+            ConfigKey("CORRAL_EMULATOR_LAUNCHER", ""),
             ConfigKey("CORRAL_DB", Path.of(System.getProperty("user.home"), ".corral", "corral.db").toString()),
             ConfigKey("CORRAL_GRADLE_TASKS", ""),
         )

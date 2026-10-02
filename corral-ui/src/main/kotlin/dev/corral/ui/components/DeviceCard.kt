@@ -45,6 +45,7 @@ import dev.corral.ui.resources.action_force_free
 import dev.corral.ui.resources.action_live_view
 import dev.corral.ui.resources.device_android
 import dev.corral.ui.resources.device_avd
+import dev.corral.ui.resources.device_booting
 import dev.corral.ui.resources.device_free
 import dev.corral.ui.resources.device_offering
 import dev.corral.ui.resources.device_offline
@@ -98,7 +99,7 @@ fun DeviceCard(
                 if (nonUsable) {
                     drawRoundRect(
                         color = accent,
-                        topLeft = Offset(0f, Dimens.space10.toPx()),
+                        topLeft = Offset(Dimens.space6.toPx(), Dimens.space10.toPx()),
                         size = Size(Dimens.space3.toPx(), size.height - Dimens.space20.toPx()),
                         cornerRadius = CornerRadius(Dimens.space2.toPx()),
                     )
@@ -121,17 +122,21 @@ fun DeviceCard(
             )
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StateChip(view.d.state)
-            Spacer(Modifier.width(Dimens.space8))
-            Box(Modifier.weight(1f)) { HolderRow(view.lease) }
+            StateChip(view.d.state, view.booting)
+            if (!view.booting && (view.usable || view.lease != null)) {
+                Spacer(Modifier.width(Dimens.space8))
+                Box(Modifier.weight(1f)) { HolderRow(view.lease) }
+            }
         }
         Row {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Dimens.space6)) {
-                if (view.lease?.pendingAccept == true) {
-                    Text(stringResource(Res.string.device_waiting_accept),
-                        style = MaterialTheme.typography.caption, color = colors.onSurfaceVariant)
-                } else {
-                    TTLText(view.lease, now)
+                if (!view.booting) {
+                    if (view.lease?.pendingAccept == true) {
+                        Text(stringResource(Res.string.device_waiting_accept),
+                            style = MaterialTheme.typography.caption, color = colors.onSurfaceVariant)
+                    } else {
+                        TTLText(view.lease, now)
+                    }
                 }
                 ModelRow(view.d.model, view.d.osVersion, view.d.avd)
             }
@@ -140,8 +145,10 @@ fun DeviceCard(
         }
         Spacer(Modifier.weight(1f))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onLive) {
-                AppIcon(Icons.Airplay, contentDescription = stringResource(Res.string.action_live_view))
+            if (view.usable) {
+                IconButton(onLive) {
+                    AppIcon(Icons.Airplay, contentDescription = stringResource(Res.string.action_live_view))
+                }
             }
             if (canForceFree && view.lease != null) {
                 IconButton(onForceFree) {
@@ -232,14 +239,16 @@ private fun TransportIcon(transport: String) {
 }
 
 @Composable
-private fun StateChip(state: String) {
+private fun StateChip(state: String, booting: Boolean) {
     val colors = LocalExtendedColors.current
-    when (state) {
-        "offline" -> CorralPill(stringResource(Res.string.device_offline), colors.mutedContainer,
+    when {
+        booting -> CorralPill(stringResource(Res.string.device_booting), colors.warningContainer,
+            colors.onWarningContainer, icon = Icons.Loader)
+        state == "offline" -> CorralPill(stringResource(Res.string.device_offline), colors.mutedContainer,
             colors.onMutedContainer, icon = Icons.MinusCircle)
-        "unauthorized" -> CorralPill(stringResource(Res.string.device_unauthorized), colors.warningContainer,
+        state == "unauthorized" -> CorralPill(stringResource(Res.string.device_unauthorized), colors.warningContainer,
             colors.onWarningContainer, icon = Icons.AlertTriangle)
-        "device" -> CorralPill(stringResource(Res.string.device_usable), colors.positiveContainer,
+        state == "device" -> CorralPill(stringResource(Res.string.device_usable), colors.positiveContainer,
             colors.onPositiveContainer, icon = Icons.CheckCircle)
         else -> CorralPill(state, colors.mutedContainer, colors.onMutedContainer)
     }

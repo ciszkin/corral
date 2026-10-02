@@ -44,6 +44,9 @@ class PoolViewModel(
             PoolIntent.RefreshDevices -> fetch { refetchDevices() }
             PoolIntent.RefreshQueue -> fetch { refetchQueue() }
             PoolIntent.RefreshDoctor -> fetch { refetchDoctor() }
+            PoolIntent.RefreshEmulators -> fetch { refetchEmulators() }
+            is PoolIntent.StartEmulator -> startEmulator(intent.avd)
+            is PoolIntent.StopEmulator -> emulatorAction { it.emulatorStop(intent.avd, intent.force) }
             is PoolIntent.FetchThumbnail -> vmScope.launch { ensureThumbnail(intent.serial) }
             is PoolIntent.AskForceFree -> reduceState { copy(confirmFree = intent.serial) }
             PoolIntent.ConfirmForceFree -> confirmForceFree()
@@ -63,6 +66,40 @@ class PoolViewModel(
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun startEmulator(avd: String) {
+        if (avd in state.value.startingEmulators) return
+        reduceState { copy(startingEmulators = startingEmulators + avd) }
+        vmScope.launch {
+            val client = api() ?: run {
+                reduceState { copy(startingEmulators = startingEmulators - avd) }
+                return@launch
+            }
+            try {
+                client.emulatorStart(avd)
+                refetchDevices()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                sendEffect(PoolEffect.EmulatorActionFailed(e.message.orEmpty()))
+                reduceState { copy(startingEmulators = startingEmulators - avd) }
+            }
+        }
+    }
+
+    private fun emulatorAction(call: suspend (CorralApi) -> Unit) {
+        vmScope.launch {
+            val client = api() ?: return@launch
+            try {
+                call(client)
+                refetchDevices()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                sendEffect(PoolEffect.EmulatorActionFailed(e.message.orEmpty()))
             }
         }
     }
@@ -97,7 +134,18 @@ class PoolViewModel(
             )
         }
         devices.forEach { ensureThumbnail(it.serial) }
+        refetchEmulators()
         refetchDoctor()
+    }
+
+    private suspend fun refetchEmulators() {
+        val client = api() ?: return
+        runCatching { client.emulators() }.getOrNull()?.let { list ->
+            reduceState {
+                val running = list.filter { it.runningSerials.isNotEmpty() }.map { it.avd }.toSet()
+                copy(emulators = list, startingEmulators = startingEmulators - running)
+            }
+        }
     }
 
     private suspend fun refetchQueue() {

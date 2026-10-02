@@ -76,4 +76,15 @@ class EventsTest {
         assertTrue(nudges.receive().contains("\"seq\":1"))
         assertEquals(1, e.seq)
     }
+
+    @Test fun bootFlipFiresDevicesNudge() = runTest {
+        devices = listOf(DeviceStatus("emulator-5554", null, booted = false))
+        events(this)
+        runCurrent()
+        devices = listOf(DeviceStatus("emulator-5554", null, booted = true))
+        tick()
+        val frame = nudges.receive()
+        assertTrue(frame.contains("state.changed") && frame.contains("\"devices\""))
+        assertTrue(nudges.isEmpty)
+    }
 }

@@ -6,7 +6,8 @@ import kotlinx.serialization.Serializable
 data class Device(val serial: String, val state: String,
                   val transport: String = transportOf(serial),
                   val model: String? = null, val osVersion: String? = null,
-                  val avd: String? = null) {
+                  val avd: String? = null,
+                  val booted: Boolean = transport != "emulator") {
     companion object {
         fun transportOf(serial: String) = when {
             serial.startsWith("emulator-") -> "emulator"
@@ -21,7 +22,7 @@ data class Lease(val serial: String, val owner: String, val pid: Long = 0,
                  val expiresAt: Long, val pendingAccept: Boolean = false,
                  val offeredAt: Long = 0)
 
-@Serializable data class DeviceStatus(val serial: String, val lease: Lease?)
+@Serializable data class DeviceStatus(val serial: String, val lease: Lease?, val booted: Boolean = true)
 
 @Serializable data class StatusResponse(val devices: List<DeviceStatus>, val adb: String)
 

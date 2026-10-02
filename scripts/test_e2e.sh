@@ -7,8 +7,9 @@
 # this script): the bundle has no gradle project and no scripts/ subdirectory.
 #
 # Isolation: every path is redirected into a mktemp tree (CORRAL_DB/CORRAL_RULES/
-# CORRAL_FAKE_DEVICES/CORRAL_ADB/CORRAL_ENV_FILE); nothing touches ~/.corral,
-# ~/.config/corral or a real device. Daemons and waiters are killed by exact pid only —
+# CORRAL_FAKE_DEVICES/CORRAL_ADB/CORRAL_EMULATOR/CORRAL_ENV_FILE); start_daemon also repoints
+# the main daemon JVM's user.home there, so nothing touches ~/.corral, ~/.config/corral or a
+# real device. Daemons and waiters are killed by exact pid only —
 # never `pkill -f` a pattern that also appears in this script's own command line (a
 # `corral wait` JVM has "corral" in argv).
 set -u
@@ -56,16 +57,20 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$TMP/bin" "$TMP/sdk/platform-tools" "$TMP/bind"
+mkdir -p "$TMP/bin" "$TMP/sdk/platform-tools" "$TMP/bind" "$TMP/home"
 printf 'dev1 device Pixel_6 13\ndev2 device SM-S918B 13\n' > "$TMP/fake-devices"
+# boot gate marker: a file path so the flipping test needs no daemon restart
+printf '0\n' > "$TMP/booted"
 cat > "$TMP/fake-adb" <<'SH'
 #!/bin/sh
 case "$*" in
+  *sys.boot_completed*) if [ -f "${FAKE_ADB_BOOTED:-}" ]; then cat "$FAKE_ADB_BOOTED"; else echo "${FAKE_ADB_BOOTED:-1}"; fi;;
   *exec-out*screencap*) printf 'fake-screen';;
   *) echo "fake-adb $@";;
 esac
 SH
 chmod +x "$TMP/fake-adb"
+cp "$SRC/fake-emulator" "$TMP/fake-emulator"; chmod +x "$TMP/fake-emulator"
 cp "$SRC/adb-wrapper" "$TMP/bin/adb"; chmod +x "$TMP/bin/adb"
 cp "$SRC/corral" "$TMP/bin/corral"; chmod +x "$TMP/bin/corral"
 cp "$SRC/corral-rules" "$TMP/corral-rules"
@@ -76,15 +81,19 @@ printf '#!/bin/sh\necho "sdk-real $@"\n' > "$TMP/sdk/platform-tools/adb.real"; c
 export CORRAL_JAR="$JAR" CORRAL_URL CORRAL_OWNER=tester
 export CORRAL_REAL_ADB="$TMP/fake-adb" CORRAL_ADB="$TMP/fake-adb"
 export CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" CORRAL_RULES="$TMP/corral-rules"
+export CORRAL_EMULATOR="$TMP/fake-emulator" FAKE_EMULATOR_STARTED="$TMP/emulator-started"
+export FAKE_ADB_BOOTED="$TMP/booted"
 export CORRAL_ENV_FILE="$TMP/daemon.env"   # absent on purpose: inherited env must keep winning in tests
 export PATH="$TMP/bin:$PATH"
 unset ANDROID_SERIAL
 
 start_daemon() { # start_daemon [log] [db] [port]
   local log="${1:-$TMP/daemon.log}" db="${2:-$TMP/corral.db}" port="${3:-$PORT}"
-  setsid env CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$db" CORRAL_RULES="$TMP/corral-rules" \
+  # -u INVOCATION_ID: keep the daemon off the systemd launcher even when this harness itself runs
+  # as a systemd unit (a dev session), so the fake-emulator child path stays under test.
+  setsid env -u INVOCATION_ID CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$db" CORRAL_RULES="$TMP/corral-rules" \
     CORRAL_PORT="$port" \
-    java -Dcorral.test.tag=$$ -jar "$JAR" </dev/null >"$log" 2>&1 &
+    java -Dcorral.test.tag=$$ -Duser.home="$TMP/home" -jar "$JAR" </dev/null >"$log" 2>&1 &
   DAEMON_PID=$!
   wait_daemon "$port" "$log"
 }
@@ -320,6 +329,263 @@ check_11_events() {
   return 0
 }
 
+# --- 14.6/14.8/14.10: emulator lifecycle: fake-AVD start, boot gate, ticket on the boot flip,
+# then stop refused while leased and force-stop. Cleanup always runs (lease, fake-devices
+# line, spawned fake emulator) so later checks start clean. ---
+emulator_cleanup() {
+  curl -s -X DELETE "$CORRAL_URL/api/leases/emulator-5554" -H 'Content-Type: application/json' \
+    -d '{"owner":"boot","force":true}' >/dev/null 2>&1
+  if [ -f "$TMP/fake-devices" ] && grep -q 'emulator-5554' "$TMP/fake-devices"; then
+    grep -v 'emulator-5554' "$TMP/fake-devices" > "$TMP/fake-devices.tmp"
+    mv "$TMP/fake-devices.tmp" "$TMP/fake-devices"
+  fi
+  if [ -s "$FAKE_EMULATOR_STARTED" ]; then
+    local ep; ep=$(cat "$FAKE_EMULATOR_STARTED")
+    pkill -9 -P "$ep" 2>/dev/null          # the fake emulator's foreground `sleep`
+    kill -9 "$ep" 2>/dev/null
+    rm -f "$FAKE_EMULATOR_STARTED"
+  fi
+  free_all
+}
+
+emulator_lifecycle() {
+  local i code out tid got
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/Pixel6AVD/start")
+  [ "$code" = 202 ] || { echo "# 14.6/14.8/14.10 start: expected 202, got $code"; return 1; }
+  for i in $(seq 1 25); do [ -s "$FAKE_EMULATOR_STARTED" ] && break; sleep 0.2; done
+  [ -s "$FAKE_EMULATOR_STARTED" ] || { echo "# 14.6/14.8/14.10: fake emulator did not start"; return 1; }
+
+  printf 'emulator-5554 device Pixel_6 13 Pixel6AVD\n' >> "$TMP/fake-devices"
+  for i in $(seq 1 25); do
+    curl -s "$CORRAL_URL/api/devices" | grep -q 'emulator-5554' && break; sleep 0.2
+  done
+  curl -s "$CORRAL_URL/api/devices" | grep -q 'emulator-5554' \
+    || { echo "# 14.6/14.8/14.10: emulator never appeared in the pool"; return 1; }
+
+  # Task 5 CLI parity: the avd verb reads the same /api/emulators route as the REST check
+  corral avd list | grep -q 'Pixel6AVD' \
+    || { echo "# 14.6/14.8/14.10: corral avd list missing Pixel6AVD"; return 1; }
+
+  # boot gate: a plain claim is refused, and the remedy names booting + --type emulator
+  out=$(CORRAL_OWNER=boot corral claim --type emulator 2>&1)
+  printf '%s' "$out" | grep -q 'booting' || { echo "# 14.6/14.8/14.10 boot gate: $out"; return 1; }
+  printf '%s' "$out" | grep -q -- '--type emulator' || { echo "# 14.6/14.8/14.10 boot remedy: $out"; return 1; }
+
+  # §11.3: a wait timeout says so and names the still-booting match
+  out=$(CORRAL_OWNER=waiter corral wait --type emulator --timeout 1 2>&1)
+  printf '%s' "$out" | grep -q 'gave up after 1s' || { echo "# 11.3 wait timeout: $out"; return 1; }
+  printf '%s' "$out" | grep -q 'still booting' || { echo "# 11.3 wait timeout booting: $out"; return 1; }
+
+  # queue a ticket; while booted=0 it stays queued
+  tid=$(enqueue_ticket '{"selector":{"transport":"emulator"},"owner":"boot","waitSeconds":30}')
+  [ -n "$tid" ] || { echo "# 14.6/14.8/14.10: enqueue returned no ticket"; return 1; }
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/leases/tickets/$tid/poll" \
+    -H 'Content-Type: application/json' -d '{"owner":"boot"}')
+  [ "$code" = 202 ] || { echo "# 14.6/14.8/14.10: first poll expected 202, got $code"; return 1; }
+
+  # flip boot; the monitor's checkBoot dispatches the queued ticket (events nudge path)
+  printf '1\n' > "$TMP/booted"
+  got=""
+  for i in $(seq 1 30); do
+    code=$(curl -s -o "$TMP/offer.json" -w '%{http_code}' \
+      -X POST "$CORRAL_URL/api/leases/tickets/$tid/poll" \
+      -H 'Content-Type: application/json' -d '{"owner":"boot"}')
+    if [ "$code" = 200 ]; then got=$(grep -o '"serial":"[^"]*"' "$TMP/offer.json" | cut -d'"' -f4); break; fi
+    sleep 0.3
+  done
+  [ "$got" = "emulator-5554" ] \
+    || { echo "# 14.6/14.8/14.10: boot flip did not serve the ticket (code=$code, got=$got)"; return 1; }
+
+  code=$(curl -s -o "$TMP/stop.json" -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/Pixel6AVD/stop" \
+    -H 'Content-Type: application/json' -d '{"force":false}')
+  [ "$code" = 409 ] || { echo "# 14.6/14.8/14.10 stop: expected 409, got $code"; return 1; }
+  grep -q 'is leased by boot' "$TMP/stop.json" || { echo "# 14.6/14.8/14.10 stop body: $(cat "$TMP/stop.json")"; return 1; }
+  grep -q 'force' "$TMP/stop.json" || { echo "# 14.6/14.8/14.10 stop remedy: $(cat "$TMP/stop.json")"; return 1; }
+
+  code=$(curl -s -o "$TMP/stop-force.json" -w '%{http_code}' \
+    -X POST "$CORRAL_URL/api/emulators/Pixel6AVD/stop" \
+    -H 'Content-Type: application/json' -d '{"force":true}')
+  [ "$code" = 200 ] || { echo "# 14.6/14.8/14.10 force stop: expected 200, got $code"; return 1; }
+  grep -q 'emulator-5554' "$TMP/stop-force.json" \
+    || { echo "# 14.6/14.8/14.10 force body: $(cat "$TMP/stop-force.json")"; return 1; }
+  return 0
+}
+
+check_14_6_to_10() {
+  local rc=1
+  if emulator_lifecycle; then rc=0; fi
+  emulator_cleanup
+  return $rc
+}
+
+# --- pass-38: stopping a running AVD adb doesn't list ends the tracked spawn and says so,
+# distinct from the `{"stopped":[]}` no-op when nothing was running. SmallAVD is started but
+# never appended to fake-devices, so the route has no serial and must fall through to stopAvd. ---
+emulator_terminated() {
+  local i code
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/SmallAVD/start")
+  [ "$code" = 202 ] || { echo "# terminated start SmallAVD: expected 202, got $code"; return 1; }
+  for i in $(seq 1 25); do [ -s "$FAKE_EMULATOR_STARTED" ] && break; sleep 0.2; done
+  [ -s "$FAKE_EMULATOR_STARTED" ] || { echo "# terminated: fake emulator did not start"; return 1; }
+
+  code=$(curl -s -o "$TMP/terminated.json" -w '%{http_code}' \
+    -X POST "$CORRAL_URL/api/emulators/SmallAVD/stop" \
+    -H 'Content-Type: application/json' -d '{"force":false}')
+  [ "$code" = 200 ] || { echo "# terminated stop: expected 200, got $code"; return 1; }
+  grep -q '"stopped":\[\]' "$TMP/terminated.json" \
+    || { echo "# terminated stopped should be empty: $(cat "$TMP/terminated.json")"; return 1; }
+  grep -q '"terminated":"pid [0-9]*"' "$TMP/terminated.json" \
+    || { echo "# terminated body: $(cat "$TMP/terminated.json")"; return 1; }
+  return 0
+}
+
+check_emulator_terminated() {
+  local rc=1
+  if emulator_terminated; then rc=0; fi
+  emulator_cleanup
+  return $rc
+}
+
+# --- review-39 §2: concurrent starts of one AVD spawn exactly one instance. The per-AVD lock
+# makes the isRunning re-check and spawn atomic, so the losers answer `200 alreadyRunning`
+# (under systemd, "already exists" from systemd-run is answered the same way, not as a 502).
+# SmallAVD is known to the fake emulator but never appended to fake-devices, so no serial hides
+# the launcher path. Stops the AVD on the way out; the wrapper kills any spawn and frees leases. ---
+emulator_concurrent_starts() {
+  local i pids=() code n202=0 n200=0
+  rm -f "$TMP/start-code-"* "$TMP/start-body-"*
+  for i in $(seq 1 8); do
+    curl -s -o "$TMP/start-body-$i" -w '%{http_code}' \
+      -X POST "$CORRAL_URL/api/emulators/SmallAVD/start" > "$TMP/start-code-$i" &
+    pids+=($!)
+  done
+  wait "${pids[@]}"
+  for i in $(seq 1 8); do
+    code=$(cat "$TMP/start-code-$i" 2>/dev/null)
+    if [ "$code" = 202 ]; then
+      n202=$((n202 + 1))
+      grep -q '"alreadyRunning":false' "$TMP/start-body-$i" \
+        || { echo "# concurrent start 202 body: $(cat "$TMP/start-body-$i")"; return 1; }
+    elif [ "$code" = 200 ]; then
+      n200=$((n200 + 1))
+      grep -q '"alreadyRunning":true' "$TMP/start-body-$i" \
+        || { echo "# concurrent start 200 body: $(cat "$TMP/start-body-$i")"; return 1; }
+    else
+      echo "# concurrent start: unexpected HTTP $code"; return 1
+    fi
+  done
+  if [ "$n202" != 1 ] || [ "$n200" != 7 ]; then
+    echo "# concurrent start: expected 1x202 + 7x200, got ${n202}x202 + ${n200}x200"; return 1
+  fi
+  [ -s "$FAKE_EMULATOR_STARTED" ] || { echo "# concurrent start: no fake emulator spawned"; return 1; }
+  code=$(curl -s -o "$TMP/conc-stop.json" -w '%{http_code}' \
+    -X POST "$CORRAL_URL/api/emulators/SmallAVD/stop" -H 'Content-Type: application/json' -d '{"force":false}')
+  [ "$code" = 200 ] || { echo "# concurrent start stop: expected 200, got $code"; return 1; }
+  return 0
+}
+
+check_emulator_concurrent_starts() {
+  local rc=1
+  if emulator_concurrent_starts; then rc=0; fi
+  emulator_cleanup
+  return $rc
+}
+
+# --- review-39 §3: Corral's own stop clears the AVD log, so a clean stop must not surface its
+# last line as the AVD's `error` (the console's "last error"). Start, stop, then read the entry
+# straight from GET /api/emulators. ---
+emulator_clean_stop() {
+  local i code entry
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/SmallAVD/start")
+  [ "$code" = 202 ] || { echo "# clean stop start: expected 202, got $code"; return 1; }
+  for i in $(seq 1 25); do [ -s "$FAKE_EMULATOR_STARTED" ] && break; sleep 0.2; done
+  [ -s "$FAKE_EMULATOR_STARTED" ] || { echo "# clean stop: fake emulator did not start"; return 1; }
+  code=$(curl -s -o "$TMP/clean-stop.json" -w '%{http_code}' \
+    -X POST "$CORRAL_URL/api/emulators/SmallAVD/stop" -H 'Content-Type: application/json' -d '{"force":false}')
+  [ "$code" = 200 ] || { echo "# clean stop: expected 200, got $code"; return 1; }
+  entry=$(curl -s "$CORRAL_URL/api/emulators" | grep -o '{[^{}]*"avd":"SmallAVD"[^{}]*}')
+  [ -n "$entry" ] || { echo "# clean stop: SmallAVD missing from GET /api/emulators"; return 1; }
+  if printf '%s' "$entry" | grep -q '"error"'; then
+    echo "# clean stop: SmallAVD still reports an error: $entry"; return 1
+  fi
+  return 0
+}
+
+check_emulator_clean_stop() {
+  local rc=1
+  if emulator_clean_stop; then rc=0; fi
+  emulator_cleanup
+  return $rc
+}
+
+# --- review-41: `error` follows the exit status. FailAVD/CleanAVD are known to the fake emulator
+# but never appended to fake-devices, so they have no serial and the tracked-child path decides:
+# the direct launcher writes `<log>.exit` on exit, and a non-zero status surfaces the log tail as
+# `error` while a clean self-exit (window closed) leaves none. A fresh start deletes the old log
+# and status, so the previous failure is gone while the new run is live. ---
+wait_emulator_exit() { # wait_emulator_exit <avd> [ticks] -> bounded 4s on the 100ms sidecar poll
+  local avd="$1" n="${2:-40}" i
+  for i in $(seq 1 "$n"); do
+    [ -f "$TMP/home/.corral/emulator-$avd.log.exit" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+emulator_entry() { curl -s "$CORRAL_URL/api/emulators" | grep -o "{[^{}]*\"avd\":\"$1\"[^{}]*}"; }
+
+emulator_error_status() {
+  local code entry
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/FailAVD/start")
+  [ "$code" = 202 ] || { echo "# exit-status start FailAVD: expected 202, got $code"; return 1; }
+  wait_emulator_exit FailAVD || { echo "# exit-status: FailAVD did not exit within 4s"; return 1; }
+  entry=$(emulator_entry FailAVD)
+  [ -n "$entry" ] || { echo "# exit-status: FailAVD missing from GET /api/emulators"; return 1; }
+  printf '%s' "$entry" | grep -q 'simulated late failure' \
+    || { echo "# exit-status: non-zero exit did not surface error: $entry"; return 1; }
+
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/CleanAVD/start")
+  [ "$code" = 202 ] || { echo "# exit-status start CleanAVD: expected 202, got $code"; return 1; }
+  wait_emulator_exit CleanAVD || { echo "# exit-status: CleanAVD did not exit within 4s"; return 1; }
+  entry=$(emulator_entry CleanAVD)
+  [ -n "$entry" ] || { echo "# exit-status: CleanAVD missing from GET /api/emulators"; return 1; }
+  if printf '%s' "$entry" | grep -q '"error"'; then
+    echo "# exit-status: clean self-exit reported an error: $entry"; return 1
+  fi
+
+  # restart clears the recorded failure while the new run is live
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/FailAVD/start")
+  [ "$code" = 202 ] || { echo "# exit-status restart FailAVD: expected 202, got $code"; return 1; }
+  [ ! -f "$TMP/home/.corral/emulator-FailAVD.log.exit" ] \
+    || { echo "# exit-status: restart left the previous exit status"; return 1; }
+  entry=$(emulator_entry FailAVD)
+  if printf '%s' "$entry" | grep -q '"error"'; then
+    echo "# exit-status: fresh start did not clear the previous error: $entry"; return 1
+  fi
+  return 0
+}
+
+emulator_error_cleanup() {
+  for avd in FailAVD CleanAVD; do
+    curl -s -X POST "$CORRAL_URL/api/emulators/$avd/stop" -H 'Content-Type: application/json' \
+      -d '{"force":true}' >/dev/null 2>&1
+  done
+  if [ -s "$FAKE_EMULATOR_STARTED" ]; then
+    local ep; ep=$(cat "$FAKE_EMULATOR_STARTED")
+    pkill -9 -P "$ep" 2>/dev/null
+    kill -9 "$ep" 2>/dev/null
+    rm -f "$FAKE_EMULATOR_STARTED"
+  fi
+  free_all
+}
+
+check_emulator_error_status() {
+  local rc=1
+  if emulator_error_status; then rc=0; fi
+  emulator_error_cleanup
+  return $rc
+}
+
 # --- M7 Plan A: a PUT port change lands in daemon.env and survives a restart whose inherited
 # CORRAL_PORT differs — the file wins over the environment. This is the final check: it leaves
 # the daemon running on PORT+1 for the EXIT trap (nothing after it, so no port collision). ---
@@ -334,6 +600,9 @@ check_13_precedence() {
     java -Dcorral.test.tag=$$ -jar "$JAR" </dev/null >"$TMP/daemon-precedence.log" 2>&1 &
   DAEMON_PID=$!
   wait_daemon "$newp" "$TMP/daemon-precedence.log"   # daemon.env beats the inherited CORRAL_PORT
+  # the restart is the first load after the launcher PUT, so GET now reports the normalised file value
+  curl -sf "http://127.0.0.1:$newp/api/config" \
+    | grep -q '"key":"CORRAL_EMULATOR_LAUNCHER","value":"direct"' || return 1
 }
 
 # --- run ---
@@ -358,6 +627,12 @@ check "6.19 SDK-dir-first PATH: ~/bin wrapper never intercepts" check_6_19
 check "11.1/11.2 + CLI screenshot: holder reads PNG, stranger 403, CLI verb" check_11_screenshot
 check "11.9/11.10 ws events: hello frame, then state.changed on claim/free" check_11_events
 
+check "14.6/14.8/14.10 emulator lifecycle: start, boot gate, claim via queue, stop refusal" check_14_6_to_10
+check "stop of an unlisted running emulator reports the pid it terminated" check_emulator_terminated
+check "concurrent starts spawn one instance, the rest alreadyRunning" check_emulator_concurrent_starts
+check "a clean stop leaves no error in GET /api/emulators" check_emulator_clean_stop
+check "a non-zero exit surfaces its error; a clean self-exit shows none; restart clears it" check_emulator_error_status
+
 # --- M7 Plan A: config/doctor API. Run last: the round-trip row writes CORRAL_SCREENSHOTS=open
 # into the pinned env file, and the final precedence row restarts the daemon on PORT+1. ---
 check "config get/put round-trip and precedence" bash -c '
@@ -377,9 +652,33 @@ check "invalid put is 400 and writes nothing" bash -c '
   [ "$before" = "$after" ] || exit 1
   exit 0
 '
+check "emulator launcher put validates, writes nothing on 400, and normalises case" bash -c '
+  [ -f "$CORRAL_ENV_FILE" ] || exit 1
+  before=$(md5sum "$CORRAL_ENV_FILE" | cut -d" " -f1)
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" -d "{\"settings\":{\"CORRAL_EMULATOR_LAUNCHER\":\"bogus\"}}")
+  [ "$code" = 400 ] || exit 1
+  after=$(md5sum "$CORRAL_ENV_FILE" | cut -d" " -f1)
+  [ "$before" = "$after" ] || exit 1
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" -d "{\"settings\":{\"CORRAL_EMULATOR_LAUNCHER\":\"Direct\"}}")
+  [ "$code" = 200 ] || exit 1
+  grep -q "^CORRAL_EMULATOR_LAUNCHER=direct$" "$CORRAL_ENV_FILE" || exit 1
+  exit 0
+'
 check "doctor reports three layers" bash -c '
   body=$(curl -sf "$CORRAL_URL/api/doctor") || exit 1
   for l in daemon sdk-shim rules; do printf "%s" "$body" | grep -q "\"layer\":\"$l\"" || exit 1; done
+  exit 0
+'
+check "mutating routes refuse a foreign origin" bash -c '
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$CORRAL_URL/api/leases" \
+    -H "Content-Type: application/json" -H "Origin: https://evil.example" \
+    -d "{\"selector\":{\"serial\":\"dev1\"},\"owner\":\"evil\"}")
+  [ "$code" = 403 ] || exit 1
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$CORRAL_URL/api/emulators/Pixel6AVD/start" \
+    -H "Origin: https://evil.example")
+  [ "$code" = 403 ] || exit 1
   exit 0
 '
 check "config put refuses device-touching readonly" bash -c '

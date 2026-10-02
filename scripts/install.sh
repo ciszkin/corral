@@ -69,9 +69,11 @@ if [[ $UNINSTALL -eq 1 ]]; then
   if [[ $SANDBOX -eq 0 ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
   rm -f "$BIN_DIR/adb" "$BIN_DIR/corral" "$BIN_DIR/corral-ui"
   rm -f "$TARGET_HOME/.local/share/applications/corral-ui.desktop"
-  if [ -f "$SCRIPT_DIR/corral.png" ] && cmp -s "$SCRIPT_DIR/corral.png" "$TARGET_HOME/.local/share/icons/corral.png"; then
-    rm -f "$TARGET_HOME/.local/share/icons/corral.png"
+  ICON="$TARGET_HOME/.local/share/icons/corral.png"
+  if [[ -f "$ICON.sha" && "$(sha256sum "$ICON" 2>/dev/null | cut -d' ' -f1)" = "$(cat "$ICON.sha")" ]]; then
+    rm -f "$ICON"
   fi
+  rm -f "$ICON.sha"
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$TARGET_HOME/.local/share/applications" >/dev/null 2>&1 || true
   fi
@@ -194,12 +196,22 @@ if want_ui; then
   install -m 755 "$SCRIPT_DIR/corral-ui" "$BIN_DIR/corral-ui" || { echo "ERROR: cannot install $BIN_DIR/corral-ui" >&2; exit 1; }
   echo "Installed: corral-ui (~/bin/corral-ui, jar in ~/.corral)"
   # Launcher for the app grid/dock. Exec uses the detected java + fat jar (not the shim) so a
-  # GUI session without the login shell's PATH/JDK still starts it. Icon is the Corral mark,
-  # installed absent-only so a user's own replacement is never clobbered.
+  # GUI session without the login shell's PATH/JDK still starts it. Icon is the Corral mark: a
+  # hash sidecar lets us refresh it on upgrade while never clobbering a user's own replacement.
+  # Write the sidecar only when we installed/refreshed the icon, or when an existing icon already
+  # equals the shipped one (adopting a pre-sidecar install) — never for an icon we left alone.
   ICON_DIR="$TARGET_HOME/.local/share/icons"
   mkdir -p "$ICON_DIR"
-  if [[ ! -f "$ICON_DIR/corral.png" ]]; then
-    cp "$SCRIPT_DIR/corral.png" "$ICON_DIR/corral.png"
+  ICON="$ICON_DIR/corral.png"
+  new=$(sha256sum "$SCRIPT_DIR/corral.png" | cut -d' ' -f1)
+  if [[ ! -f "$ICON" ]]; then
+    cp "$SCRIPT_DIR/corral.png" "$ICON"; printf '%s\n' "$new" > "$ICON.sha"
+  elif [[ -f "$ICON.sha" && "$(sha256sum "$ICON" | cut -d' ' -f1)" = "$(cat "$ICON.sha")" ]]; then
+    cp "$SCRIPT_DIR/corral.png" "$ICON"; printf '%s\n' "$new" > "$ICON.sha"   # ours, refresh
+  elif [[ "$(sha256sum "$ICON" | cut -d' ' -f1)" = "$new" ]]; then
+    printf '%s\n' "$new" > "$ICON.sha"                                       # adopt a legacy icon already equal to the bundle's
+  else
+    :                                                                        # user-replaced: leave it, no sidecar
   fi
   DESKTOP_DIR="$TARGET_HOME/.local/share/applications"
   mkdir -p "$DESKTOP_DIR"
@@ -322,5 +334,5 @@ if [[ $SHIM -eq 1 ]]; then
   echo "SDK adb shim is active — gradle/AGP absolute-path adb calls are lease-gated."
 fi
 echo
-echo "Cutover (scripts/cutover.md): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi,"
+echo "Cutover checklist (in the corral source repo, scripts/cutover.md): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi,"
 echo "then verify a gradle installDebug allow/deny, retire the adb-lease hook, keep old scripts backed up a week."

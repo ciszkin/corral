@@ -7,6 +7,7 @@ import kotlinx.coroutines.launch
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStream
+import java.util.concurrent.TimeUnit
 import kotlin.coroutines.coroutineContext
 
 object TrackParser {
@@ -76,6 +77,8 @@ class DeviceMonitor(private val adbPath: String,
             devices.filter { it.state == "device" && it.model == null }.forEach { enrich(it.serial) }
             devices.filter { it.state == "device" && it.transport == "emulator" && it.avd == null }
                 .forEach { enrichAvd(it.serial) }
+            devices.filter { it.state == "device" && it.transport == "emulator" && !it.booted }
+                .forEach { checkBoot(it.serial) }
             onChange?.let { runCatching { it() } }
         }
     }
@@ -83,6 +86,7 @@ class DeviceMonitor(private val adbPath: String,
     private fun enrich(serial: String) = runCatching {
         val p = ProcessBuilder(adbPath, "-s", serial, "shell",
             "getprop ro.product.model; getprop ro.build.version.release").start()
+        if (!p.waitFor(2, TimeUnit.SECONDS)) { p.destroy(); return@runCatching }
         val out = p.inputStream.bufferedReader().readText().lines().filter { it.isNotBlank() }
         if (out.size == 2) devices = devices.map {
             if (it.serial == serial) it.copy(model = out[0].trim(), osVersion = out[1].trim()) else it }
@@ -90,9 +94,17 @@ class DeviceMonitor(private val adbPath: String,
 
     private fun enrichAvd(serial: String) = runCatching {
         val p = ProcessBuilder(adbPath, "-s", serial, "emu", "avd", "name").start()
+        if (!p.waitFor(2, TimeUnit.SECONDS)) { p.destroy(); return@runCatching }
         p.inputStream.bufferedReader().readLines().firstOrNull { it.isNotBlank() }?.let { name ->
             devices = devices.map { if (it.serial == serial) it.copy(avd = name.trim()) else it }
         }
+    }
+
+    private fun checkBoot(serial: String) = runCatching {
+        val p = ProcessBuilder(adbPath, "-s", serial, "shell", "getprop sys.boot_completed").start()
+        if (!p.waitFor(2, TimeUnit.SECONDS)) { p.destroy(); return@runCatching }
+        if (p.inputStream.bufferedReader().readText().trim() == "1")
+            devices = devices.map { if (it.serial == serial) it.copy(booted = true) else it }
     }
 
     private fun BufferedReader.read4Hex(): Int? {

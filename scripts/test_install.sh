@@ -271,11 +271,32 @@ check "bundle-mode default installs ui when jar present" bash -c \
 check "bundle-mode observer seeded in [Service]" obs_is "$TMPHOME4/.config/systemd/user/corral.service" corral-ui
 check "bundle-mode installs the launcher too" test -f "$TMPHOME4/.local/share/applications/corral-ui.desktop"
 
+# a changed bundle png must refresh the installed icon on upgrade (the sidecar marks ours as pristine)
+printf 'changed-icon\n' > "$BUNDLE3/corral.png"
+env -u CORRAL_UI_JAR HOME="$TMPHOME" bash "$BUNDLE3/install.sh" --java "$FAKE_JAVA" --adb "$FAKE_ADB4" \
+  --jar "$BUNDLE3/corral-daemon-all.jar" --home "$TMPHOME4" >"$TMP/bundle-refresh.log" 2>&1; rcr=$?
+dump_on_fail "$rcr" "$TMP/bundle-refresh.log"
+check "reinstall refreshes the installed icon when the bundle png changes" \
+  cmp -s "$BUNDLE3/corral.png" "$TMPHOME4/.local/share/icons/corral.png"
+
 # a user-replaced icon must survive uninstall (absent-only install promises never to clobber it)
 printf 'user-icon\n' > "$TMPHOME4/.local/share/icons/corral.png"
 env -u CORRAL_UI_JAR bash "$BUNDLE3/install.sh" --home "$TMPHOME4" --uninstall >"$TMP/bundle-uninstall.log" 2>&1; rcbu=$?
 dump_on_fail "$rcbu" "$TMP/bundle-uninstall.log"
 check "uninstall keeps a user-replaced icon" grep -q 'user-icon' "$TMPHOME4/.local/share/icons/corral.png"
+
+# a pre-sidecar install whose icon already equals the bundle's: install adopts it (writes the
+# sidecar), so uninstall then owns it and removes it
+TMPHOME5="$TMP/home5"; mkdir -p "$TMPHOME5/.local/share/icons"
+printf 'changed-icon\n' > "$TMPHOME5/.local/share/icons/corral.png"
+env -u CORRAL_UI_JAR HOME="$TMPHOME" bash "$BUNDLE3/install.sh" --java "$FAKE_JAVA" --adb "$FAKE_ADB4" \
+  --jar "$BUNDLE3/corral-daemon-all.jar" --home "$TMPHOME5" >"$TMP/bundle-adopt.log" 2>&1; rca=$?
+dump_on_fail "$rca" "$TMP/bundle-adopt.log"
+check "install adopts a pre-sidecar icon equal to the bundle (writes the sidecar)" \
+  test -f "$TMPHOME5/.local/share/icons/corral.png.sha"
+env -u CORRAL_UI_JAR bash "$BUNDLE3/install.sh" --home "$TMPHOME5" --uninstall >"$TMP/bundle-adopt-uninstall.log" 2>&1; rcau=$?
+dump_on_fail "$rcau" "$TMP/bundle-adopt-uninstall.log"
+check "uninstall removes an adopted icon" test ! -e "$TMPHOME5/.local/share/icons/corral.png"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

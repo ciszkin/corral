@@ -18,6 +18,8 @@ if [ "$ser" = "${FAKE_ADB_FAIL_SERIAL:-__none__}" ]; then exit 1; fi
 case "$sub" in
   shell)
     case "$last" in
+      # boot gate: emulators are not usable until proven booted; default 1 keeps existing callers green
+      *sys.boot_completed*) echo "${FAKE_ADB_BOOTED:-1}";;
       # DeviceMonitor.enrich passes both getprops in one shell payload; answer two lines
       *getprop*) printf '%s\n%s\n' "${FAKE_ADB_MODEL:-Pixel_6}" "${FAKE_ADB_OS:-13}";;
       *) echo "fake-adb $*";;

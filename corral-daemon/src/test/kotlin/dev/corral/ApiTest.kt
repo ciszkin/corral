@@ -30,10 +30,12 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
+import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.coroutineContext
 import kotlin.io.path.createTempDirectory
@@ -99,6 +101,57 @@ class ApiTest {
             }
             CoroutineScope(coroutineContext).block(client)
         }
+
+    private fun fakeEmulator(dir: Path, avds: String, exit: Int, avdScript: String): Path = dir.resolve("emulator").also {
+        Files.writeString(it, """
+            #!/usr/bin/env bash
+            case "${'$'}1" in
+              -list-avds) printf '$avds'; exit $exit ;;
+              -avd) $avdScript ;;
+              *) exit 0 ;;
+            esac
+        """.trimIndent())
+        it.toFile().setExecutable(true)
+    }
+
+    private class RecordingLauncher : EmulatorLauncher {
+        val stopped = mutableListOf<String>()
+        override fun start(bin: String, avd: String, log: Path) {}
+        override fun isRunning(avd: String): Boolean = false
+        override fun stop(avd: String): String? { stopped += avd; return "unit ${systemdUnitName(avd)}" }
+        override fun lastExit(avd: String): Int? = null
+    }
+
+    private fun exitLauncher(exit: Int) = object : EmulatorLauncher {
+        override fun start(bin: String, avd: String, log: Path) {}
+        override fun isRunning(avd: String): Boolean = false
+        override fun stop(avd: String): String? = null
+        override fun lastExit(avd: String): Int? = exit
+    }
+
+    private fun withEmulatorApi(
+        devices: List<Device>,
+        adbLog: Path? = null,
+        binary: Boolean = true,
+        avds: String = "Pixel6AVD\nSmallAVD\n",
+        listExit: Int = 0,
+        avdScript: String = "exec sleep 2",
+        launcher: EmulatorLauncher = DefaultLauncher(),
+        block: suspend CoroutineScope.(HttpClient) -> Unit,
+    ) = testApplication {
+        val dir = createTempDirectory("emu")
+        val emu = if (binary) fakeEmulator(dir, avds, listExit, avdScript) else null
+        val adb = dir.resolve("fake-adb").also {
+            Files.writeString(it, "#!/usr/bin/env bash\n" +
+                (adbLog?.let { log -> "echo \"${'$'}*\" >> '$log'\n" } ?: "") + "exit 0\n")
+            it.toFile().setExecutable(true)
+        }
+        val emulators = Emulators(adb.toString(), { emu?.toString() }, launcher)
+        application {
+            corralModule(AppEnv({ devices }, LeaseManager({ devices }, db = null), emulators = emulators))
+        }
+        CoroutineScope(coroutineContext).block(client)
+    }
 
     @Test fun configReportsEffectiveValuesDefaultsAndPaths() {
         val rules = GateRules(setOf("-s"), setOf("-p"), setOf("bash", "sh"), setOf("systemd"))
@@ -214,6 +267,29 @@ class ApiTest {
         val ok = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"OPEN"}}""")
         assertEquals(HttpStatusCode.OK, ok.status)
         assertEquals("open", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_SCREENSHOTS"])
+    }
+
+    @Test fun putRejectsABadEmulatorLauncherAndWritesNothing() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val envPath = DaemonConfig.defaultPath()
+        EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000", "KEEP" to "yes"))
+        val before = Files.readString(envPath)
+
+        val r = c.putConfig("""{"settings":{"CORRAL_EMULATOR_LAUNCHER":"auto"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        val errs = Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors
+        assertTrue(errs.any { it.contains("CORRAL_EMULATOR_LAUNCHER") && it.contains("systemd") }, errs.toString())
+        assertEquals(before, Files.readString(envPath))
+    }
+
+    @Test fun putAcceptsEmulatorLauncherValuesAndBlank() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        for (v in listOf("systemd", "direct")) {
+            val r = c.putConfig("""{"settings":{"CORRAL_EMULATOR_LAUNCHER":"$v"}}""")
+            assertEquals(HttpStatusCode.OK, r.status)
+            assertEquals(v, EnvFile.read(DaemonConfig.defaultPath())["CORRAL_EMULATOR_LAUNCHER"])
+        }
+        val blank = c.putConfig("""{"settings":{"CORRAL_EMULATOR_LAUNCHER":""}}""")
+        assertEquals(HttpStatusCode.OK, blank.status)
+        assertEquals("", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_EMULATOR_LAUNCHER"])
     }
 
     @Test fun putRejectsBlankPaths() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
@@ -637,6 +713,36 @@ class ApiTest {
         assertEquals(HttpStatusCode.OK, missing.status)
     }
 
+    @Test fun configEmulatorKeyAppearsWithItsDefault() = withConfigApi(
+        DaemonConfig(fileValues = mapOf("CORRAL_EMULATOR" to "my-emulator"), inherited = emptyMap())
+    ) { c ->
+        val body = Json.decodeFromString<ConfigResponse>(c.get("/api/config").bodyAsText())
+        val emu = body.settings.first { it.key == "CORRAL_EMULATOR" }
+        assertEquals("my-emulator", emu.value)
+        assertEquals("", emu.default)
+        assertTrue(emu.restartRequired)
+    }
+
+    @Test fun putEmulatorAcceptsAPathAndClearsOnBlank() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val emu = createTempDirectory("emulator").resolve("emulator")
+        Files.writeString(emu, "#!/bin/sh\n")
+        emu.toFile().setExecutable(true)
+
+        val ok = c.putConfig("""{"settings":{"CORRAL_EMULATOR":"$emu"}}""")
+        assertEquals(HttpStatusCode.OK, ok.status)
+        assertEquals(emu.toString(), EnvFile.read(DaemonConfig.defaultPath())["CORRAL_EMULATOR"])
+
+        val blank = c.putConfig("""{"settings":{"CORRAL_EMULATOR":""}}""")
+        assertEquals(HttpStatusCode.OK, blank.status)
+        assertEquals("", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_EMULATOR"])
+    }
+
+    @Test fun putEmulatorRejectsAnInvalidPath() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_EMULATOR":"/no/such/emulator"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_EMULATOR") })
+    }
+
     @Test fun putRejectsTrailingBackslash() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
         val envPath = DaemonConfig.defaultPath()
         val rulesPath = RulesFile.defaultPath()
@@ -736,6 +842,61 @@ class ApiTest {
         assertEquals(HttpStatusCode.Conflict, r.status)
     }
 
+    @Test fun mutatingRoutesRejectForeignOrigin() = withApi { c ->
+        assertEquals(HttpStatusCode.Forbidden, c.post("/api/leases") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "https://evil.example")
+            setBody("""{"selector":{"serial":"dev1"},"owner":"a"}""") }.status)
+        assertEquals(HttpStatusCode.Forbidden, c.post("/api/leases/tickets/x/poll") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "https://evil.example")
+            setBody("""{"owner":"a"}""") }.status)
+        assertEquals(HttpStatusCode.Forbidden, c.delete("/api/leases/tickets/x") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "https://evil.example")
+            setBody("""{"owner":"a"}""") }.status)
+        assertEquals(HttpStatusCode.Forbidden, c.delete("/api/leases/dev1") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "https://evil.example")
+            setBody("""{"owner":"a"}""") }.status)
+        assertEquals(HttpStatusCode.Forbidden, c.post("/api/leases/dev1/renew") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "https://evil.example")
+            setBody("""{"owner":"a"}""") }.status)
+    }
+
+    @Test fun mutatingRoutesAllowLoopbackOriginAndMissingOrigin() = withApi { c ->
+        val same = c.post("/api/leases") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "http://127.0.0.1:8798")
+            header(HttpHeaders.Host, "127.0.0.1:8798")
+            setBody("""{"selector":{"serial":"dev1"},"owner":"a"}""") }
+        assertEquals(HttpStatusCode.OK, same.status)
+
+        val missing = c.post("/api/leases") {
+            contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"dev2"},"owner":"a"}""") }
+        assertEquals(HttpStatusCode.OK, missing.status)
+
+        val otherPort = c.post("/api/leases") {
+            contentType(ContentType.Application.Json)
+            header(HttpHeaders.Origin, "http://127.0.0.1:3000")
+            header(HttpHeaders.Host, "127.0.0.1:8798")
+            setBody("""{"selector":{"serial":"dev1"},"owner":"b"}""") }
+        assertEquals(HttpStatusCode.Forbidden, otherPort.status)
+    }
+
+    @Test fun emulatorStartRejectsForeignOrigin() = withEmulatorApi(emptyList()) { c ->
+        val foreign = c.post("/api/emulators/Pixel6AVD/start") {
+            header(HttpHeaders.Origin, "https://evil.example") }
+        assertEquals(HttpStatusCode.Forbidden, foreign.status)
+
+        val matched = c.post("/api/emulators/Pixel6AVD/start") {
+            header(HttpHeaders.Origin, "http://127.0.0.1:8798")
+            header(HttpHeaders.Host, "127.0.0.1:8798") }
+        assertEquals(HttpStatusCode.Accepted, matched.status)
+    }
+
     @Test fun statusReportsTheDaemonsAdbPath() {
         testApplication {
             corral(adbPath = "/custom/sdk/platform-tools/adb")
@@ -743,6 +904,15 @@ class ApiTest {
             assertEquals(HttpStatusCode.OK, r.status)
             assertTrue(r.bodyAsText().contains("\"adb\":\"/custom/sdk/platform-tools/adb\""))
         }
+    }
+
+    @Test fun statusCarriesBooted() = withApi(
+        listOf(Device("emulator-5554", "device", booted = false), Device("dev1", "device"))
+    ) { c ->
+        val devices = Json.parseToJsonElement(c.get("/api/status").bodyAsText())
+            .jsonObject["devices"]!!.jsonArray
+        val emu = devices.first { it.jsonObject["serial"]!!.jsonPrimitive.content == "emulator-5554" }
+        assertFalse(emu.jsonObject["booted"]!!.jsonPrimitive.boolean)
     }
 
     @Test fun doctorReportsThreeLayersAndAdb() {
@@ -1148,6 +1318,337 @@ class ApiTest {
         withScreenshotApi(policy = ScreenshotPolicy("open"), failAdb = true) { c ->
             assertEquals(HttpStatusCode.BadGateway, c.get("/api/devices/dev1/screenshot?owner=me").status)
         }
+
+    @Test fun emulatorsListsWithRunningSerials() = withEmulatorApi(
+        listOf(Device("emulator-5554", "device", avd = "Pixel6AVD"))
+    ) { c ->
+        val r = c.get("/api/emulators")
+        assertEquals(HttpStatusCode.OK, r.status)
+        val list = Json.parseToJsonElement(r.bodyAsText()).jsonArray.map { it.jsonObject }
+        assertEquals(listOf("Pixel6AVD", "SmallAVD"), list.map { it["avd"]!!.jsonPrimitive.content })
+        val running = list.first { it["avd"]!!.jsonPrimitive.content == "Pixel6AVD" }["runningSerials"]!!
+        assertEquals(listOf("emulator-5554"), running.jsonArray.map { it.jsonPrimitive.content })
+        assertTrue(list.first { it["avd"]!!.jsonPrimitive.content == "SmallAVD" }["runningSerials"]!!
+            .jsonArray.isEmpty())
+    }
+
+    @Test fun startSpawnsUnknown404ListsAvds() = withEmulatorApi(emptyList()) { c ->
+        val unknown = c.post("/api/emulators/Nope/start")
+        assertEquals(HttpStatusCode.NotFound, unknown.status)
+        assertTrue(unknown.bodyAsText().contains("Pixel6AVD"))
+        val previous = System.getProperty("user.home")
+        System.setProperty("user.home", createTempDirectory("home").toString())
+        try {
+            val started = c.post("/api/emulators/Pixel6AVD/start")
+            assertEquals(HttpStatusCode.Accepted, started.status)
+            assertTrue(started.bodyAsText().contains("\"started\":true"))
+        } finally {
+            System.setProperty("user.home", previous)
+        }
+    }
+
+    @Test fun startIsIdempotentWhileRunningOrBooting() = withEmulatorApi(
+        listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = false))
+    ) { c ->
+        val r = c.post("/api/emulators/Pixel6AVD/start")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(r.bodyAsText().contains("\"alreadyRunning\":true"))
+    }
+
+    @Test fun startAnswersAlreadyRunningWhenALiveSpawnIsNotInThePool() {
+        val live = object : EmulatorLauncher {
+            override fun start(bin: String, avd: String, log: Path) {}
+            override fun isRunning(avd: String): Boolean = true
+            override fun stop(avd: String): String? = null
+            override fun lastExit(avd: String): Int? = null
+        }
+        withEmulatorApi(emptyList(), launcher = live) { c ->
+            val r = c.post("/api/emulators/Pixel6AVD/start")
+            assertEquals(HttpStatusCode.OK, r.status, r.bodyAsText())
+            assertTrue(r.bodyAsText().contains("\"alreadyRunning\":true"))
+        }
+    }
+
+    @Test fun startAnswersAlreadyRunningWhenTheLauncherRaces() {
+        val racy = object : EmulatorLauncher {
+            override fun start(bin: String, avd: String, log: Path) { throw EmulatorAlreadyRunning() }
+            override fun isRunning(avd: String): Boolean = false
+            override fun stop(avd: String): String? = null
+            override fun lastExit(avd: String): Int? = null
+        }
+        withEmulatorApi(emptyList(), launcher = racy) { c ->
+            val r = c.post("/api/emulators/Pixel6AVD/start")
+            assertEquals(HttpStatusCode.OK, r.status, r.bodyAsText())
+            assertTrue(r.bodyAsText().contains("\"alreadyRunning\":true"))
+        }
+    }
+
+    @Test fun startIsIdempotentWhileASpawnIsLiveButNotYetInThePool() = withEmulatorApi(emptyList()) { c ->
+        val previous = System.getProperty("user.home")
+        System.setProperty("user.home", createTempDirectory("home").toString())
+        try {
+            val first = c.post("/api/emulators/Pixel6AVD/start")
+            assertEquals(HttpStatusCode.Accepted, first.status)
+            assertTrue(first.bodyAsText().contains("\"alreadyRunning\":false"))
+            val second = c.post("/api/emulators/Pixel6AVD/start")
+            assertEquals(HttpStatusCode.OK, second.status, second.bodyAsText())
+            assertTrue(second.bodyAsText().contains("\"alreadyRunning\":true"), second.bodyAsText())
+        } finally {
+            System.setProperty("user.home", previous)
+        }
+    }
+
+    @Test fun startDeadOnArrivalIs502WithTheLogTail() = withEmulatorApi(
+        emptyList(), avdScript = "echo 'requires hardware acceleration' >&2; exit 1"
+    ) { c ->
+        val previous = System.getProperty("user.home")
+        val r = try {
+            System.setProperty("user.home", createTempDirectory("home").toString())
+            c.post("/api/emulators/Pixel6AVD/start")
+        } finally {
+            System.setProperty("user.home", previous)
+        }
+        assertEquals(HttpStatusCode.BadGateway, r.status, r.bodyAsText())
+        assertTrue(r.bodyAsText().contains("exited immediately"), r.bodyAsText())
+        assertTrue(r.bodyAsText().contains("hardware acceleration"), r.bodyAsText())
+    }
+
+    @Test fun stopForceFreesTheLeaseItKills() = withEmulatorApi(
+        listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+    ) { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"emulator-5554"},"owner":"a"}""") }
+        val r = c.post("/api/emulators/Pixel6AVD/stop") {
+            contentType(ContentType.Application.Json); setBody("""{"force":true}""") }
+        assertEquals(HttpStatusCode.OK, r.status)
+        val status = c.get("/api/status").bodyAsText()
+        assertTrue(!status.contains("\"owner\":\"a\""), "lease survived the stop: $status")
+    }
+
+    @Test fun stopKillsAllSerialsOfTheAvd() {
+        val log = createTempDirectory("emu").resolve("invocations")
+        withEmulatorApi(
+            listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true)), adbLog = log
+        ) { c ->
+            val r = c.post("/api/emulators/Pixel6AVD/stop") {
+                contentType(ContentType.Application.Json); setBody("{}") }
+            assertEquals(HttpStatusCode.OK, r.status)
+            assertTrue(r.bodyAsText().contains("\"stopped\":[\"emulator-5554\"]"))
+            assertEquals(listOf("-s emulator-5554 emu kill"), Files.readAllLines(log))
+        }
+    }
+
+    @Test fun stopRefusedWhileLeased() = withEmulatorApi(
+        listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+    ) { c ->
+        c.post("/api/leases") { contentType(ContentType.Application.Json)
+            setBody("""{"selector":{"serial":"emulator-5554"},"owner":"a"}""") }
+        val r = c.post("/api/emulators/Pixel6AVD/stop") {
+            contentType(ContentType.Application.Json); setBody("""{"force":false}""") }
+        assertEquals(HttpStatusCode.Conflict, r.status)
+        assertTrue(r.bodyAsText().contains("leased by a"))
+        assertTrue(r.bodyAsText().contains("force"))
+    }
+
+    @Test fun stopForceOverrides() {
+        val launcher = RecordingLauncher()
+        withEmulatorApi(
+            listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true)), launcher = launcher
+        ) { c ->
+            c.post("/api/leases") { contentType(ContentType.Application.Json)
+                setBody("""{"selector":{"serial":"emulator-5554"},"owner":"a"}""") }
+            val r = c.post("/api/emulators/Pixel6AVD/stop") {
+                contentType(ContentType.Application.Json); setBody("""{"force":true}""") }
+            assertEquals(HttpStatusCode.OK, r.status)
+            assertTrue(r.bodyAsText().contains("\"stopped\":[\"emulator-5554\"]"))
+            assertEquals(listOf("Pixel6AVD"), launcher.stopped)
+        }
+    }
+
+    @Test fun stopEndsTheUnitEvenWhenAdbDoesNotListIt() {
+        val launcher = RecordingLauncher()
+        withEmulatorApi(emptyList(), launcher = launcher) { c ->
+            val r = c.post("/api/emulators/SmallAVD/stop") {
+                contentType(ContentType.Application.Json); setBody("{}") }
+            assertEquals(HttpStatusCode.OK, r.status)
+            assertTrue(r.bodyAsText().contains("\"stopped\":[]"), r.bodyAsText())
+            assertTrue(r.bodyAsText().contains("\"terminated\":\"unit ${systemdUnitName("SmallAVD")}\""), r.bodyAsText())
+            assertEquals(listOf("SmallAVD"), launcher.stopped)
+        }
+    }
+
+    @Test fun emulatorsShowsTheLogTailAfterANonZeroExit() {
+        val crashed = exitLauncher(1)
+        withEmulatorApi(emptyList(), launcher = crashed) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"),
+                "loading\nERROR: x86_64 emulation requires hardware acceleration\n")
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                val body = c.get("/api/emulators").bodyAsText()
+                assertTrue(body.contains("\"error\":\"ERROR: x86_64 emulation requires hardware acceleration\""), body)
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    @Test fun emulatorsHidesTheLogTailAfterACleanSelfExit() {
+        withEmulatorApi(emptyList(), launcher = exitLauncher(0)) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"),
+                "INFO | Emulator window closed by user\n")
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                assertFalse(c.get("/api/emulators").bodyAsText().contains("\"error\""))
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    @Test fun emulatorsHidesTheLogTailWithoutAnExitSidecar() {
+        withEmulatorApi(emptyList()) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"), "stale line from an unknown run\n")
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                assertFalse(c.get("/api/emulators").bodyAsText().contains("\"error\""))
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    @Test fun emulatorsHidesTheLogTailWhileRunning() {
+        withEmulatorApi(listOf(Device("emulator-5554", "device", avd = "Pixel6AVD"))) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"), "ERROR stale\n")
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                val body = c.get("/api/emulators").bodyAsText()
+                assertFalse(body.contains("\"error\""), body)
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    @Test fun stopEndsTheUnitWhenEmuKillFails() {
+        val launcher = RecordingLauncher()
+        val dir = createTempDirectory("emu")
+        val adb = dir.resolve("fake-adb").also {
+            Files.writeString(it, "#!/usr/bin/env bash\necho 'no emu' >&2\nexit 3\n")
+            it.toFile().setExecutable(true)
+        }
+        val devs = listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+        val emulators = Emulators(adb.toString(), { null }, launcher)
+        testApplication {
+            application { corralModule(AppEnv({ devs }, LeaseManager({ devs }, db = null), emulators = emulators)) }
+            val r = client.post("/api/emulators/Pixel6AVD/stop") {
+                contentType(ContentType.Application.Json); setBody("""{"force":true}""") }
+            assertEquals(HttpStatusCode.BadGateway, r.status)
+            assertEquals(listOf("Pixel6AVD"), launcher.stopped)   // unit ended despite the failed kill
+        }
+    }
+
+    @Test fun emulatorsHidesAStaleErrorWhileASpawnIsLive() {
+        val live = object : EmulatorLauncher {
+            override fun start(bin: String, avd: String, log: Path) {}
+            override fun isRunning(avd: String): Boolean = true
+            override fun stop(avd: String): String? = null
+            override fun lastExit(avd: String): Int? = null
+        }
+        withEmulatorApi(emptyList(), launcher = live) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"), "ERROR stale\n")
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                assertFalse(c.get("/api/emulators").bodyAsText().contains("\"error\""))
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    @Test fun stopNotRunningIsNoOp() = withEmulatorApi(emptyList()) { c ->
+        val r = c.post("/api/emulators/SmallAVD/stop") {
+            contentType(ContentType.Application.Json); setBody("{}") }
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(r.bodyAsText().contains("\"stopped\":[]"))
+        assertFalse(r.bodyAsText().contains("\"terminated\""), r.bodyAsText())
+    }
+
+    @Test fun startWithoutBinaryIs502() = withEmulatorApi(emptyList(), binary = false) { c ->
+        val r = c.post("/api/emulators/Pixel6AVD/start")
+        assertEquals(HttpStatusCode.BadGateway, r.status)
+        assertTrue(r.bodyAsText().contains("CORRAL_EMULATOR"))
+    }
+
+    @Test fun listWithoutBinaryIsEmptyNotError() = withEmulatorApi(emptyList(), binary = false) { c ->
+        val r = c.get("/api/emulators")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertEquals("[]", r.bodyAsText())
+    }
+
+    @Test fun startWithBrokenBinaryIs502NotUnknown() = withEmulatorApi(
+        emptyList(), avds = "", listExit = 3
+    ) { c ->
+        val r = c.post("/api/emulators/Pixel6AVD/start")
+        assertEquals(HttpStatusCode.BadGateway, r.status)
+        assertTrue(r.bodyAsText().contains("CORRAL_EMULATOR"))
+        assertTrue(!r.bodyAsText().contains("unknown avd"))
+    }
+
+    @Test fun startAcceptsASpacedAvdName() = withEmulatorApi(
+        emptyList(), avds = "Pixel6AVD\nWide AVD\n"
+    ) { c ->
+        val previous = System.getProperty("user.home")
+        System.setProperty("user.home", createTempDirectory("home").toString())
+        try {
+            val r = c.post("/api/emulators/Wide%20AVD/start")
+            assertEquals(HttpStatusCode.Accepted, r.status, r.bodyAsText())
+            assertTrue(r.bodyAsText().contains("\"started\":true"), r.bodyAsText())
+        } finally {
+            System.setProperty("user.home", previous)
+        }
+    }
+
+    @Test fun stopAcceptsAFormEncodedSpace() {
+        val log = createTempDirectory("emu").resolve("invocations")
+        withEmulatorApi(
+            listOf(Device("emulator-5554", "device", avd = "Wide AVD", booted = true)), adbLog = log
+        ) { c ->
+            val r = c.post("/api/emulators/Wide+AVD/stop") {
+                contentType(ContentType.Application.Json); setBody("{}") }
+            assertEquals(HttpStatusCode.OK, r.status)
+            assertTrue(r.bodyAsText().contains("\"stopped\":[\"emulator-5554\"]"))
+            assertEquals(listOf("-s emulator-5554 emu kill"), Files.readAllLines(log))
+        }
+    }
+
+    @Test fun startKeepsALiteralPlusInTheAvdName() = withEmulatorApi(
+        emptyList(), avds = "a+b\n"
+    ) { c ->
+        val previous = System.getProperty("user.home")
+        System.setProperty("user.home", createTempDirectory("home").toString())
+        try {
+            val r = c.post("/api/emulators/a%2Bb/start")
+            assertEquals(HttpStatusCode.Accepted, r.status)
+        } finally {
+            System.setProperty("user.home", previous)
+        }
+    }
 
     @Test fun wsEventsSendsHelloThenNudges() = testApplication {
         val leases = LeaseManager(testDevices, db = null)

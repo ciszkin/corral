@@ -51,9 +51,11 @@ import dev.corral.ui.resources.settings_daemon
 import dev.corral.ui.resources.settings_db_desc
 import dev.corral.ui.resources.settings_default
 import dev.corral.ui.resources.settings_default_empty
+import dev.corral.ui.resources.settings_emulator_desc
 import dev.corral.ui.resources.settings_gradle_tasks_desc
 import dev.corral.ui.resources.settings_language
 import dev.corral.ui.resources.settings_language_desc
+import dev.corral.ui.resources.settings_launcher_desc
 import dev.corral.ui.resources.settings_load_error
 import dev.corral.ui.resources.settings_observers_desc
 import dev.corral.ui.resources.settings_owner_desc
@@ -435,6 +437,8 @@ private fun descriptionOf(key: String): StringResource? = when (key) {
     "CORRAL_SCREENSHOTS" -> Res.string.settings_screenshots_desc
     "CORRAL_SCREENSHOT_OBSERVERS" -> Res.string.settings_observers_desc
     "CORRAL_ADB" -> Res.string.settings_adb_desc
+    "CORRAL_EMULATOR" -> Res.string.settings_emulator_desc
+    "CORRAL_EMULATOR_LAUNCHER" -> Res.string.settings_launcher_desc
     "CORRAL_DB" -> Res.string.settings_db_desc
     "CORRAL_GRADLE_TASKS" -> Res.string.settings_gradle_tasks_desc
     else -> null

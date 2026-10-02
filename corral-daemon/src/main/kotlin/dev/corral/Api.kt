@@ -5,6 +5,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.call
 import io.ktor.server.application.install
@@ -25,11 +26,14 @@ import io.ktor.websocket.CloseReason
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import java.io.File
+import java.net.URLDecoder
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlinx.coroutines.launch
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
@@ -39,7 +43,19 @@ import kotlinx.serialization.json.Json
 
 @Serializable data class FreeRequest(val owner: String, val force: Boolean = false)
 
-@Serializable data class BusyResponse(val busy: List<BusyInfo>, val matching: Int, val timedOut: Boolean)
+@Serializable data class AvdStatus(val avd: String, val runningSerials: List<String>, val error: String? = null)
+
+@OptIn(ExperimentalSerializationApi::class)
+@Serializable data class Started(
+    @EncodeDefault val started: Boolean = true,
+    @EncodeDefault val alreadyRunning: Boolean = false)
+
+@Serializable data class Stopped(@SerialName("stopped") val serials: List<String>, val terminated: String? = null)
+
+@Serializable data class StopBody(val force: Boolean = false)
+
+@Serializable data class BusyResponse(val busy: List<BusyInfo>, val matching: Int, val timedOut: Boolean,
+                                       val booting: Int = 0)
 
 @Serializable data class TicketResponse(val ticket: String, val retryAfterMs: Long)
 
@@ -86,6 +102,7 @@ class AppEnv(
     val policy: ScreenshotPolicy? = null,
     val events: Events? = null,
     val config: DaemonConfig? = null,
+    val emulators: Emulators? = null,
 )
 
 /** Any control char (C0 + DEL) smuggled into a value could inject lines or corrupt env/rules files. */
@@ -127,10 +144,31 @@ private fun originAllowed(origin: String?, host: String?): Boolean {
     return authorityPort(origin) == authorityPort(host ?: "")
 }
 
+/** Refuses, with a 403, a browser Origin that is not loopback on the request's port; true when refused. */
+private suspend fun ApplicationCall.rejectsForeignOrigin(): Boolean {
+    if (originAllowed(request.header(HttpHeaders.Origin), request.header(HttpHeaders.Host))) return false
+    respondText("corral: local only", status = HttpStatusCode.Forbidden)
+    return true
+}
+
 /** Whether a bare command name resolves to an executable on PATH. */
 private fun onPath(name: String): Boolean =
     (System.getenv("PATH") ?: "").split(File.pathSeparator)
         .any { dir -> runCatching { Files.isExecutable(Path.of(dir, name)) }.getOrDefault(false) }
+
+/**
+ * Ktor decodes `%20` to a space in a path parameter but leaves a raw `+` as-is, while form-encoded
+ * clients send a space as `+`. Re-read the raw segment so a bare `+` also maps to a space, without
+ * turning an encoded literal `+` (`%2B`) into one.
+ */
+private fun ApplicationCall.emulatorAvd(): String {
+    val decoded = parameters["avd"]!!
+    if ('+' !in decoded) return decoded
+    val segments = request.local.uri.substringBefore('?').split('/')
+    val i = segments.indexOfLast { it == "emulators" }
+    val raw = if (i < 0) null else segments.getOrNull(i + 1)
+    return raw?.let { runCatching { URLDecoder.decode(it, StandardCharsets.UTF_8) }.getOrNull() } ?: decoded
+}
 
 /** Browser DNS-rebinding guard: every local client (CLI, wrapper, MCP) uses a localhost Host. */
 fun Application.guardLocalHost() = intercept(ApplicationCallPipeline.Plugins) {
@@ -157,7 +195,7 @@ fun Application.corralModule(env: AppEnv) {
         get("/api/devices") { call.respond(env.devices()) }
         get("/api/status") {
             call.respond(StatusResponse(
-                devices = env.devices().map { d -> DeviceStatus(d.serial, env.leases.snapshot[d.serial]) },
+                devices = env.devices().map { d -> DeviceStatus(d.serial, env.leases.snapshot[d.serial], d.booted) },
                 adb = env.adbPath ?: ""
             ))
         }
@@ -189,6 +227,7 @@ fun Application.corralModule(env: AppEnv) {
             call.respond(r)
         }
         post("/api/leases") {
+            if (call.rejectsForeignOrigin()) return@post
             val req = call.receive<ClaimRequest>()
             if (req.waitSeconds > 0) {
                 val t = env.leases.enqueue(req.selector, req.owner, req.pid, req.ttlSeconds, req.waitSeconds,
@@ -198,11 +237,12 @@ fun Application.corralModule(env: AppEnv) {
                 try {
                     call.respond(env.leases.requestClaim(req.selector, req.owner, req.pid, req.ttlSeconds))
                 } catch (e: LeaseBusyException) {
-                    call.respond(HttpStatusCode.Conflict, BusyResponse(e.busy, e.matching, e.timedOut))
+                    call.respond(HttpStatusCode.Conflict, BusyResponse(e.busy, e.matching, e.timedOut, e.booting))
                 }
             }
         }
         post("/api/leases/tickets/{ticket}/poll") {
+            if (call.rejectsForeignOrigin()) return@post
             val req = call.receive<TicketPollRequest>()
             when (val p = env.leases.poll(call.parameters["ticket"]!!, req.owner, req.pid)) {
                 is Poll.Offered -> call.respond(p.lease)
@@ -215,6 +255,7 @@ fun Application.corralModule(env: AppEnv) {
             }
         }
         delete("/api/leases/tickets/{ticket}") {
+            if (call.rejectsForeignOrigin()) return@delete
             val owner = runCatching { call.receive<TicketCancelRequest>().owner }
                 .getOrElse { call.request.queryParameters["owner"] ?: "" }
             if (owner.isBlank()) {
@@ -238,9 +279,7 @@ fun Application.corralModule(env: AppEnv) {
                 RulesFile.defaultPath().toString(), DaemonConfig.defaultPath().toString()))
         }
         put("/api/config") {
-            if (!originAllowed(call.request.header(HttpHeaders.Origin), call.request.header(HttpHeaders.Host))) {
-                call.respondText("corral: local only", status = HttpStatusCode.Forbidden); return@put
-            }
+            if (call.rejectsForeignOrigin()) return@put
             env.config ?: run {
                 call.respondText("corral: config not wired", status = HttpStatusCode.ServiceUnavailable); return@put }
             val req = call.receive<PutConfigRequest>()
@@ -254,6 +293,10 @@ fun Application.corralModule(env: AppEnv) {
                         ?: run { errors += "CORRAL_PORT must be 1024–65535" }
                     "CORRAL_SCREENSHOTS" -> raw.trim().lowercase().takeIf { it == "strict" || it == "open" }
                         ?.let { clean[k] = it } ?: run { errors += "CORRAL_SCREENSHOTS must be strict or open" }
+                    "CORRAL_EMULATOR_LAUNCHER" -> raw.trim().lowercase()
+                        .takeIf { it == "" || it == "systemd" || it == "direct" }
+                        ?.let { clean[k] = it }
+                        ?: run { errors += "CORRAL_EMULATOR_LAUNCHER must be blank, systemd or direct" }
                     "CORRAL_SCREENSHOT_OBSERVERS" -> {
                         val names = raw.split(',').map(String::trim).filter(String::isNotEmpty)
                         when {
@@ -277,6 +320,20 @@ fun Application.corralModule(env: AppEnv) {
                                 else -> errors += "CORRAL_ADB must be an existing executable path or a bare command name"
                             }
                         } ?: run { errors += "CORRAL_ADB must be a non-blank path" }
+                    "CORRAL_EMULATOR" -> {
+                        val v = raw.trim()
+                        when {
+                            v.isEmpty() -> clean[k] = ""   // blank clears it: resolve from the SDK sibling/PATH
+                            v.envUnsafe() -> errors += "$k must not end with '\\' or start/end with a quote"
+                            v.hasControlChars() -> errors += "CORRAL_EMULATOR must not contain control characters"
+                            adbValueUsable(v) -> {
+                                clean["CORRAL_EMULATOR"] = v
+                                if (!v.contains('/') && !v.contains('\\') && !onPath(v))
+                                    warnings += "CORRAL_EMULATOR '$v' is not on PATH — emulator start will fail"
+                            }
+                            else -> errors += "CORRAL_EMULATOR must be an existing executable path or a bare command name"
+                        }
+                    }
                     "CORRAL_DB" -> raw.trim().takeIf { it.isNotEmpty() }
                         ?.let {
                             when {
@@ -356,12 +413,67 @@ fun Application.corralModule(env: AppEnv) {
                 call.respondText(e.message ?: "screencap failed", status = HttpStatusCode.BadGateway)
             }
         }
+        get("/api/emulators") {
+            val e = env.emulators ?: run {
+                call.respondText("corral: emulators not configured", status = HttpStatusCode.ServiceUnavailable); return@get }
+            val running = env.devices().filter { it.transport == "emulator" }
+            call.respond((e.list() ?: emptyList()).map { avd ->
+                val serials = running.filter { it.avd == avd }.map { it.serial }
+                AvdStatus(avd, serials, error = if (serials.isEmpty()) e.lastError(avd) else null)
+            })
+        }
+        post("/api/emulators/{avd}/start") {
+            if (call.rejectsForeignOrigin()) return@post
+            val e = env.emulators ?: run {
+                call.respondText("corral: emulators not configured", status = HttpStatusCode.ServiceUnavailable); return@post }
+            val avd = call.emulatorAvd()
+            val running = env.devices().filter { it.transport == "emulator" && it.avd == avd }
+            val avds = e.list()
+            when {
+                running.isNotEmpty() || e.isRunning(avd) -> call.respond(Started(alreadyRunning = true))
+                avds == null ->
+                    call.respondText("corral: emulator binary not usable — set CORRAL_EMULATOR", status = HttpStatusCode.BadGateway)
+                avd !in avds ->
+                    call.respondText("corral: unknown avd $avd — known: ${avds.joinToString(", ")}", status = HttpStatusCode.NotFound)
+                else -> try {
+                    if (e.start(avd)) call.respond(HttpStatusCode.Accepted, Started())
+                    else call.respond(Started(alreadyRunning = true))
+                } catch (ex: EmulatorException) {
+                    call.respondText("corral: ${ex.message}", status = HttpStatusCode.BadGateway)
+                }
+            }
+        }
+        post("/api/emulators/{avd}/stop") {
+            if (call.rejectsForeignOrigin()) return@post
+            val e = env.emulators ?: run {
+                call.respondText("corral: emulators not configured", status = HttpStatusCode.ServiceUnavailable); return@post }
+            val avd = call.emulatorAvd()
+            val force = call.receive<StopBody>().force
+            val serials = env.devices().filter { it.transport == "emulator" && it.avd == avd }.map { it.serial }
+            val held = serials.firstNotNullOfOrNull { env.leases.snapshot[it]?.owner }
+            if (held != null && !force) {
+                call.respondText("corral: $avd is leased by $held — free it first, or POST {\"force\":true}",
+                    status = HttpStatusCode.Conflict); return@post
+            }
+            try {
+                serials.forEach { e.stop(it); env.leases.free(it, owner = "", force = true) }
+            } catch (ex: EmulatorException) {
+                // end the unit/process even when emu kill failed (wedged console), so the AVD
+                // doesn't stay stuck as "already running" with no way to stop it
+                e.stopAvd(avd)
+                call.respondText("corral: ${ex.message}", status = HttpStatusCode.BadGateway)
+                return@post
+            }
+            call.respond(Stopped(serials, e.stopAvd(avd)))
+        }
         delete("/api/leases/{serial}") {
+            if (call.rejectsForeignOrigin()) return@delete
             val req = call.receive<FreeRequest>()
             try { env.leases.free(call.parameters["serial"]!!, req.owner, req.force); call.respond(mapOf("freed" to true)) }
             catch (e: IllegalStateException) { call.respond(HttpStatusCode.Conflict, mapOf("error" to e.message)) }
         }
         post("/api/leases/{serial}/renew") {
+            if (call.rejectsForeignOrigin()) return@post
             val req = call.receive<RenewRequest>()
             try { call.respond(env.leases.renew(call.parameters["serial"]!!, req.owner, req.ttlSeconds)) }
             catch (e: IllegalStateException) { call.respond(HttpStatusCode.Conflict, mapOf("error" to e.message)) }

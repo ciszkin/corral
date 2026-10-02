@@ -86,6 +86,11 @@ for src in "$SCRIPT_DIR"/*; do
   mirror "$src" "$name"
 done
 
+# Repo README (first-class mirrored artifact, not a scripts/ entry): the bundle ships
+# no docs of its own, so this carries the emulator API, boot gate and lease semantics.
+[ -f "$REPO_ROOT/README.md" ] || { echo "ERROR: missing $REPO_ROOT/README.md" >&2; exit 1; }
+mirror "$REPO_ROOT/README.md" "README.md"
+
 if [ "$CHECK" = 0 ]; then
   mirror "$BUILD_JAR" "corral-daemon-all.jar"
   mirror "$UI_BUILD_JAR" "corral-ui-all.jar"

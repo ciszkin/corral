@@ -18,6 +18,7 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.runBlocking
 import org.jetbrains.compose.resources.getString
+import org.w3c.dom.Element
 
 class ComposeResourcesTest {
     @Test fun resourceAccessorsAndFontAreGenerated() {
@@ -49,9 +50,31 @@ class ComposeResourcesTest {
             stringKeys(Path.of("src/main/composeResources/values-be/strings.xml")))
     }
 
-    private fun stringKeys(path: Path): Set<String> {
+    @Test fun pluralQuantitiesMatchTheLanguage() {
+        val en = pluralQuantities(Path.of("src/main/composeResources/values/strings.xml"))
+        val be = pluralQuantities(Path.of("src/main/composeResources/values-be/strings.xml"))
+        assertTrue(en.isNotEmpty(), "expected plurals in the English table")
+        assertEquals(en.keys, be.keys, "plural names must match across languages")
+        en.forEach { (name, quantities) -> assertEquals(setOf("one", "other"), quantities, "en plural $name") }
+        be.forEach { (name, quantities) ->
+            assertEquals(setOf("one", "few", "many", "other"), quantities, "be plural $name")
+        }
+    }
+
+    private fun stringKeys(path: Path): Set<String> =
+        elements(path, "string").map { it.attributes.getNamedItem("name").nodeValue }.toSet()
+
+    private fun pluralQuantities(path: Path): Map<String, Set<String>> =
+        elements(path, "plurals").associate { node ->
+            val name = node.attributes.getNamedItem("name").nodeValue
+            val items = node.getElementsByTagName("item")
+            name to (0 until items.length)
+                .map { items.item(it).attributes.getNamedItem("quantity").nodeValue }.toSet()
+        }
+
+    private fun elements(path: Path, tag: String): List<Element> {
         val doc = DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(path.toFile())
-        val nodes = doc.getElementsByTagName("string")
-        return (0 until nodes.length).map { nodes.item(it).attributes.getNamedItem("name").nodeValue }.toSet()
+        val nodes = doc.getElementsByTagName(tag)
+        return (0 until nodes.length).map { nodes.item(it) as Element }
     }
 }

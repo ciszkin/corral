@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# fake emulator binary: -list-avds prints a fixed set; -avd X records the spawn and idles.
+case "$1" in
+  -list-avds) printf 'Pixel6AVD\nSmallAVD\nFailAVD\nCleanAVD\n' ;;
+  -avd)
+    case "$2" in
+      FailAVD) sleep 1.5; echo "ERROR | $2: simulated late failure" >&2; exit 1 ;;
+      CleanAVD) sleep 1.5; echo "INFO | $2: window closed"; exit 0 ;;
+      *) echo "$$" > "${FAKE_EMULATOR_STARTED:-/tmp/fake-emulator-started}"; exec sleep 300 ;;
+    esac ;;
+  *) exit 0 ;;
+esac

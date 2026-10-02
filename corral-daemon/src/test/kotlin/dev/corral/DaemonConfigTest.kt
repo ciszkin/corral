@@ -20,12 +20,33 @@ class DaemonConfigTest {
         assertEquals("strict", DaemonConfig(fileValues = emptyMap(), inherited = emptyMap()).get("CORRAL_SCREENSHOTS"))  // default
     }
 
-    @Test fun registryCoversTheSixKeysWithRestartFlags() {
+    @Test fun registryCoversTheDaemonKeysWithRestartFlags() {
         assertEquals(
             listOf("CORRAL_PORT", "CORRAL_SCREENSHOTS", "CORRAL_SCREENSHOT_OBSERVERS",
-                   "CORRAL_ADB", "CORRAL_DB", "CORRAL_GRADLE_TASKS"),
+                   "CORRAL_ADB", "CORRAL_EMULATOR", "CORRAL_EMULATOR_LAUNCHER", "CORRAL_DB", "CORRAL_GRADLE_TASKS"),
             DaemonConfig.KEYS.map { it.key })
         assertTrue(DaemonConfig.KEYS.all { it.restartRequired })
+    }
+
+    @Test fun emulatorLauncherDefaultsToBlankAndAcceptsOnlyKnownValues() {
+        assertEquals("", DaemonConfig(fileValues = emptyMap(), inherited = emptyMap()).get("CORRAL_EMULATOR_LAUNCHER"))
+        assertEquals("systemd", DaemonConfig(fileValues = mapOf("CORRAL_EMULATOR_LAUNCHER" to "systemd"))
+            .get("CORRAL_EMULATOR_LAUNCHER"))
+        assertEquals("SystemD", DaemonConfig(fileValues = mapOf("CORRAL_EMULATOR_LAUNCHER" to "SystemD"))
+            .get("CORRAL_EMULATOR_LAUNCHER"))   // usable case-insensitively, returned as written
+        val c = DaemonConfig(fileValues = emptyMap())
+        assertTrue(c.usable("CORRAL_EMULATOR_LAUNCHER", ""))
+        assertTrue(c.usable("CORRAL_EMULATOR_LAUNCHER", "systemd"))
+        assertTrue(c.usable("CORRAL_EMULATOR_LAUNCHER", "direct"))
+        assertTrue(c.usable("CORRAL_EMULATOR_LAUNCHER", "SystemD"))
+        assertFalse(c.usable("CORRAL_EMULATOR_LAUNCHER", "auto"))
+    }
+
+    @Test fun emulatorDefaultsToBlankAndTakesABareName() {
+        assertEquals("", DaemonConfig(fileValues = emptyMap(), inherited = emptyMap()).get("CORRAL_EMULATOR"))
+        val c = DaemonConfig(fileValues = mapOf("CORRAL_EMULATOR" to "my-emulator"))
+        assertEquals("my-emulator", c.get("CORRAL_EMULATOR"))
+        assertFalse(c.usable("CORRAL_EMULATOR", "/opt/missing/emulator"))
     }
 
     @Test fun envFileRoundTripsAndPreservesUnrelatedLines() {
@@ -65,6 +86,8 @@ class DaemonConfigTest {
         assertEquals("9000", c.settings().first { it.key == "CORRAL_PORT" }.value)  // GET reports the value in use
         assertFalse(c.usable("CORRAL_SCREENSHOTS", "weird"))
         assertTrue(c.usable("CORRAL_SCREENSHOTS", "open"))
+        assertTrue(c.usable("CORRAL_SCREENSHOTS", "OPEN"))   // same case rule as the launcher key
+        assertTrue(c.usable("CORRAL_SCREENSHOTS", " Open "))
     }
 
     @Test fun blankValuesFallThroughToEnvThenDefault() {

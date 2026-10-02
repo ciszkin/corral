@@ -5,6 +5,7 @@ import dev.corral.EventFrame
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
 import dev.corral.corralJson
+import dev.corral.ui.AvdStatus
 import dev.corral.ui.Capabilities
 import dev.corral.ui.CorralApi
 import dev.corral.ui.data.ConfigResponse
@@ -53,6 +54,9 @@ class AppViewModelTest {
         override suspend fun putConfig(settings: Map<String, String>, rules: ConfigRules?): Result<PutConfigResponse> =
             error("unused")
         override suspend fun doctor(): DoctorResponse = error("unused")
+        override suspend fun emulators(): List<AvdStatus> = error("unused")
+        override suspend fun emulatorStart(avd: String) = error("unused")
+        override suspend fun emulatorStop(avd: String, force: Boolean) = error("unused")
         override fun events(): Flow<String> {
             val drop = frameThenDrop
             return when {

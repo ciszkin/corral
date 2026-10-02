@@ -6,8 +6,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 
-class LeaseBusyException(val busy: List<BusyInfo>, val matching: Int = 0, val timedOut: Boolean = false) :
-    RuntimeException("busy: " + busy.joinToString { "${it.serial}/${it.owner}/${it.ttlLeft}s" })
+class LeaseBusyException(val busy: List<BusyInfo>, val matching: Int = 0, val timedOut: Boolean = false,
+                         val booting: Int = 0) :
+    RuntimeException("busy: " + busy.joinToString { "${it.serial}/${it.owner}/${it.ttlLeft}s" } +
+        if (booting > 0)
+            " — $booting emulator(s) booting — corral wait --type emulator queues until boot" else "")
 
 @Serializable data class BusyInfo(val serial: String, val owner: String, val ttlLeft: Long)
 @Serializable data class CheckResult(val allowed: Boolean, val reason: String)
@@ -142,7 +145,7 @@ class LeaseManager(private val devices: () -> List<Device>,
     }
 
     suspend fun claim(serial: String, owner: String, pid: Long = 0, ttl: Long = 1800): Lease? {
-        if (devices().none { it.serial == serial && it.state == "device" }) return null
+        if (devices().none { it.serial == serial && it.usable() }) return null
         return mutex.withLock {
             sweepLocked()   // expiry/dead-pid reclaim + ticket dispatch happen first
             if (leases.containsKey(serial)) throw busyFor(Selector(serial = serial))
@@ -157,7 +160,7 @@ class LeaseManager(private val devices: () -> List<Device>,
     suspend fun free(serial: String, owner: String, force: Boolean = false) = mutex.withLock {
         val l = leases[serial] ?: return
         if (l.owner != owner && !force)
-            throw IllegalStateException("lease on $serial is not yours (owner=${l.owner}); force=true overrides")
+            throw IllegalStateException("lease on $serial is not yours (owner=${l.owner}); it can be force-freed from the console")
         leases.remove(serial); db?.deleteLease(serial); db?.log("free", serial, owner, "force=$force")
         dispatchTicketsLocked()
         Unit
@@ -200,6 +203,18 @@ class LeaseManager(private val devices: () -> List<Device>,
     private fun sweepLocked() {
         leases.values.filter { it.expiresAt <= clock() || isDead(it) }.forEach {
             leases.remove(it.serial); db?.deleteLease(it.serial); db?.log("expire", it.serial, it.owner, null)
+        }
+        // an emulator serial is a reused console port: a lease must not attach to a later AVD that
+        // reuses it. Physical/wifi serials are stable, so their leases survive a replug. Only
+        // reconcile with a non-empty pool: at startup devices() is empty until the first
+        // track-devices frame, and sweeping then would wrongly free every recovered emulator lease.
+        if (devices().isNotEmpty()) {
+            leases.values.filter {
+                it.serial.startsWith("emulator-") && devices().none { d -> d.serial == it.serial }
+            }.forEach {
+                leases.remove(it.serial); db?.deleteLease(it.serial)
+                db?.log("expire", it.serial, it.owner, "emulator-gone")
+            }
         }
         dispatchTicketsLocked()
         sweepTicketsLocked()
@@ -276,7 +291,8 @@ class LeaseManager(private val devices: () -> List<Device>,
     private fun isDeadPid(pid: Long) = pid != 0L && ProcessHandle.of(pid).isEmpty
 
     private fun busyFor(selector: Selector, timedOut: Boolean = false): LeaseBusyException {
-        val matching = devices().filter { selector.matches(it) }
+        val matching = devices().filter { it.state == "device" && selector.matchesFields(it) }
+        val booting = matching.count { it.transport == "emulator" && !it.booted }
         val busy = matching.mapNotNull { d ->
             leases[d.serial]?.let { l ->
                 val ttlLeft = maxOf(0, l.expiresAt - clock())
@@ -284,8 +300,8 @@ class LeaseManager(private val devices: () -> List<Device>,
                 val offerLeft = if (l.pendingAccept) maxOf(0, offerHold - (clock() - l.offeredAt)) else ttlLeft
                 BusyInfo(d.serial, l.owner, minOf(ttlLeft, offerLeft))
             } }
-        return LeaseBusyException(busy, matching.size, timedOut)
+        return LeaseBusyException(busy, matching.size, timedOut, booting)
     }
 }
 
-fun Device.usable() = state == "device"
+fun Device.usable() = state == "device" && booted

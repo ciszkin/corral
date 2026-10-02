@@ -137,4 +137,43 @@ class DeviceMonitorTest {
         assertEquals("device", emu.state)
         assertNull(emu.model)
     }
+
+    private fun bootWrapper(dir: File, value: String) = dir.resolve("fake-adb-boot").apply {
+        writeText("#!/usr/bin/env bash\nFAKE_ADB_BOOTED=$value exec '${fakeAdb.path}' \"\$@\"\n")
+        setExecutable(true)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun emulatorFirstSightIsUnbootedThenFlips() = runTest {
+        val dir = createTempDirectory("corral").toFile()
+        val f = dir.resolve("devices")
+        f.writeText("emulator-5554 device\n")
+        val m = DeviceMonitor(bootWrapper(dir, "0").path, f.path, backgroundScope)
+        m.start()
+        runCurrent()
+        assertFalse(m.devices.first { it.serial == "emulator-5554" }.booted)
+
+        bootWrapper(dir, "1")
+        advanceTimeBy(2001); runCurrent()
+        assertTrue(m.devices.first { it.serial == "emulator-5554" }.booted)
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun physicalDevicesAreNeverBootPolled() = runTest {
+        val dir = createTempDirectory("corral").toFile()
+        val f = dir.resolve("devices")
+        f.writeText("dev1 device\ndev2 device\n")
+        val log = dir.resolve("adb.log")
+        val w = dir.resolve("fake-adb-log").apply {
+            writeText("#!/usr/bin/env bash\nFAKE_ADB_LOG='${log.path}' exec '${fakeAdb.path}' \"\$@\"\n")
+            setExecutable(true)
+        }
+        val m = DeviceMonitor(w.path, f.path, backgroundScope)
+        m.start()
+        runCurrent()
+        advanceTimeBy(2001); runCurrent()
+        val calls = log.readText()
+        assertTrue(calls.isNotBlank())
+        assertFalse(calls.lines().any { it.contains("sys.boot_completed") })
+    }
 }

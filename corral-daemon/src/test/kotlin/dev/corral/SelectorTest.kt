@@ -3,7 +3,7 @@ package dev.corral
 import kotlin.test.*
 
 class SelectorTest {
-    private val pixel = Device("emulator-5554", "device", model = "Pixel_6", osVersion = "13", avd = "Pixel6AVD")
+    private val pixel = Device("emulator-5554", "device", model = "Pixel_6", osVersion = "13", avd = "Pixel6AVD", booted = true)
     private val samsung = Device("devusb", "device", model = "SM-S918B", osVersion = "4.4")
 
     @Test fun emptyMatchesAnyUsable() {

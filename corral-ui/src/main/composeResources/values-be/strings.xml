@@ -8,6 +8,7 @@
     <string name="rail_doctor">Доктар</string>
     <string name="rail_rules">Правілы</string>
     <string name="rail_settings">Налады</string>
+    <string name="rail_emulators">Эмулятары</string>
 
     <string name="section_collapse">Згарнуць %1$s</string>
     <string name="section_expand">Разгарнуць %1$s</string>
@@ -23,6 +24,7 @@
     <string name="device_expiring">заканчваецца</string>
     <string name="device_offline">не ў сетцы</string>
     <string name="device_unauthorized">неаўтарызаваная</string>
+    <string name="device_booting">запускаецца</string>
 
     <string name="action_live_view">Жывы прагляд</string>
     <string name="action_force_free">Вызваліць прымусова</string>
@@ -54,7 +56,12 @@
     <string name="rules_saved">захавана</string>
     <string name="rules_safe_defaults">Бяспечныя па змаўчанні</string>
     <string name="rules_device_touching">Зачэплівае прылады — ахова дзейнічае (уключэнне паслабляе шлюз)</string>
-    <string name="rules_entries">%1$d запісаў</string>
+    <plurals name="rules_entries">
+        <item quantity="one">%1$d запіс</item>
+        <item quantity="few">%1$d запісы</item>
+        <item quantity="many">%1$d запісаў</item>
+        <item quantity="other">%1$d запісаў</item>
+    </plurals>
     <string name="rules_add_flag">Дадаць сцяг</string>
     <string name="rules_add">Дадаць</string>
     <string name="rules_pin_guard">-s — гэта шпілька, а не сцяг значэння</string>
@@ -86,6 +93,8 @@
     <string name="settings_screenshots_open">адкрыты</string>
     <string name="settings_observers_desc">Дадатковыя імёны, якім дазволена здымаць любы экран.</string>
     <string name="settings_adb_desc">Бінарнік adb, які выкарыстоўвае дэман.</string>
+    <string name="settings_emulator_desc">Бінарнік эмулятара для запуску/спынення — пуста значыць эмулятар з SDK або PATH.</string>
+    <string name="settings_launcher_desc">Як запускаецца эмулятар: "systemd" трымае яго жывым пасля перазапуску дэмана праз уласны карыстальніцкі unit; "direct" запускае як даччыны працэс; пуста выбірае systemd, калі дэман — служба corral, інакш direct.</string>
     <string name="settings_db_desc">Файл SQLite для арэнд і чаргі.</string>
     <string name="settings_gradle_tasks_desc">Заданні, якія шлюз лічыць якія зачэпліваюць прылады.</string>
     <string name="settings_load_error">Не ўдалося загрузіць канфіг.</string>
@@ -109,10 +118,62 @@
     <string name="transport_usb">Транспарт USB</string>
     <string name="transport_wifi">Транспарт Wi-Fi</string>
     <string name="transport_emulator">Транспарт эмулятара</string>
-    <string name="devices_counts">%1$d вольных · %2$d занятых</string>
+    <plurals name="devices_free">
+        <item quantity="one">%1$d вольная</item>
+        <item quantity="few">%1$d вольныя</item>
+        <item quantity="many">%1$d вольных</item>
+        <item quantity="other">%1$d вольных</item>
+    </plurals>
+    <plurals name="devices_held">
+        <item quantity="one">%1$d занятая</item>
+        <item quantity="few">%1$d занятыя</item>
+        <item quantity="many">%1$d занятых</item>
+        <item quantity="other">%1$d занятых</item>
+    </plurals>
+    <plurals name="devices_offline">
+        <item quantity="one">%1$d па-за сеткай</item>
+        <item quantity="few">%1$d па-за сеткай</item>
+        <item quantity="many">%1$d па-за сеткай</item>
+        <item quantity="other">%1$d па-за сеткай</item>
+    </plurals>
+    <plurals name="devices_booting">
+        <item quantity="one">%1$d запускаецца</item>
+        <item quantity="few">%1$d запускаюцца</item>
+        <item quantity="many">%1$d запускаюцца</item>
+        <item quantity="other">%1$d запускаюцца</item>
+    </plurals>
     <string name="devices_empty_title">Няма падключаных прылад</string>
 
-    <string name="queue_waiting">%1$d чакаюць</string>
+    <plurals name="emulators_avds">
+        <item quantity="one">%1$d AVD</item>
+        <item quantity="few">%1$d AVD</item>
+        <item quantity="many">%1$d AVD</item>
+        <item quantity="other">%1$d AVD</item>
+    </plurals>
+    <plurals name="emulators_running">
+        <item quantity="one">%1$d запушчаны</item>
+        <item quantity="few">%1$d запушчаныя</item>
+        <item quantity="many">%1$d запушчаных</item>
+        <item quantity="other">%1$d запушчаных</item>
+    </plurals>
+    <string name="emulators_empty_title">Няма знойдзеных AVD</string>
+    <string name="emulators_empty">Стварыце яго праз avdmanager або ўкажыце CORRAL_EMULATOR на бінарнік эмулятара.</string>
+    <string name="emulator_start">Запусціць</string>
+    <string name="emulator_stop">Спыніць</string>
+    <string name="emulator_starting">запускаецца</string>
+    <string name="emulator_running">запушчаны</string>
+    <string name="emulator_not_running">не запушчаны</string>
+    <string name="emulator_last_error">апошняя памылка: %1$s</string>
+    <string name="emulator_force_stop_title">Спыніць %1$s прымусова?</string>
+    <string name="emulator_force_stop_body">Арандуе %1$s — прымусовае спыненне забівае запушчаны асобнік, і ўтрымальнік страціць яго.</string>
+    <string name="emulator_action_failed">Не ўдалося выканаць дзеянне з эмулятарам — дэман адхіліў запыт.</string>
+
+    <plurals name="queue_waiting">
+        <item quantity="one">%1$d чакае</item>
+        <item quantity="few">%1$d чакаюць</item>
+        <item quantity="many">%1$d чакаюць</item>
+        <item quantity="other">%1$d чакаюць</item>
+    </plurals>
     <string name="queue_position">#%1$d</string>
     <string name="queue_expired">тэрмін мінуў</string>
     <string name="duration_min_sec">%1$dхв %2$dс</string>

@@ -68,6 +68,7 @@ import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.LocalMonoFont
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
+import org.jetbrains.compose.resources.pluralStringResource
 import org.jetbrains.compose.resources.stringResource
 
 private val SafeReadonly = listOf("devices", "start-server", "kill-server", "track-devices", "version", "help")
@@ -286,7 +287,7 @@ private fun RuleCard(
             Text(key, fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.caption,
                 color = MaterialTheme.colors.primary)
             Spacer(Modifier.weight(1f))
-            CorralPill(stringResource(Res.string.rules_entries, count), colors.containerHigh, colors.onSurfaceVariant)
+            CorralPill(pluralStringResource(Res.plurals.rules_entries, count, count), colors.containerHigh, colors.onSurfaceVariant)
         }
         if (open) {
             Column(

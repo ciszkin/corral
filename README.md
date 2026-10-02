@@ -19,6 +19,29 @@ the same device.
   that pauses keeps its position but loses offers, including to direct claims; a direct claim
   cannot overtake a ticket that is polling. Nothing is parked server-side, so a crashed client
   simply leaves an expiring ticket.
+- **Emulator lifecycle** — list, boot and stop existing AVDs (`emulator -list-avds` / `-avd`,
+  `adb emu kill`) through `corral avd list|start A|stop A [--force]`, `/api/emulators`, and the
+  MCP `start_emulator`/`stop_emulator` tools. The binary resolves from `CORRAL_EMULATOR`, else the
+  SDK `emulator/emulator` beside adb, else an `emulator` on PATH. A `start` dedupes on a live
+  spawn under a per-AVD lock, not just the pool, so concurrent or repeat starts of an
+  already-spawned or booting AVD answer `alreadyRunning` and exactly one process runs. By default
+  the emulator is a child process of the daemon, destroyed on a graceful daemon stop (a `SIGKILL`ed
+  daemon can orphan it untracked); when the daemon runs as the `corral.service` unit
+  (or `CORRAL_EMULATOR_LAUNCHER=systemd`), each AVD instead runs in its own transient
+  `systemd-run --user` unit that survives a daemon restart, with its output written to
+  `~/.corral/emulator-<avd>.log` (truncated per start) and the daemon's `ANDROID_*` environment
+  forwarded (`CORRAL_EMULATOR_LAUNCHER=direct` forces the child-process path; unset auto-detects).
+- **Emulator boot gate & stop** — a freshly started AVD appears in the pool **unbooted** — not
+  claimable until Android reports `sys.boot_completed=1`; a plain `corral claim --type emulator`
+  teaches that `corral wait --type emulator` queues until boot, and the queued ticket is served the
+  moment the flip lands. Stop is refused while the AVD is leased unless `--force` / `{"force":true}`
+  is given — the CLI and REST take a force; the MCP `stop_emulator` (and `free`) do not. Stopping
+  an emulator releases its lease, and an emulator lease is dropped when its serial leaves the pool,
+  while physical/WiFi leases survive a replug. `GET /api/emulators` carries an AVD's last log line
+  as `error` only when its last run exited non-zero — a late boot failure or crash. A run that ends
+  cleanly on its own (exit 0, e.g. the emulator window closed) and one Corral stopped both report
+  no `error`: `stop` rotates the log to `~/.corral/emulator-<avd>.log.1` (keeping the evidence) and
+  clears the exit status, and every start writes a fresh log.
 - **Exclusive leases** — TTL + holder-PID liveness: a crashed holder frees a device
   instantly (when a pid is recorded) or within a bounded TTL; leases survive daemon
   restarts via SQLite (WAL), with an append-only audit log.
@@ -53,12 +76,13 @@ the same device.
   every enforcement layer on demand.
 - **CLI** — `corral claim [--all|<serial>] [selector]`, `wait [--timeout S] [selector]`,
   `queue`, `free [--all|<serial>]`, `renew <serial>`, `lease [--all] [selector] -- <cmd>`,
-  `screenshot <serial> [--out F]`, `events`, `check`, `owner`, `doctor`, `devices`,
-  `status` — all logic in the jar behind 3-line
+  `screenshot <serial> [--out F]`, `events`, `check`, `owner`, `doctor`, `devices`, `status`,
+  `avd [list|start A|stop A [--force]]` — all logic in the jar behind 3-line
   launcher shims, so it works for humans and agents alike.
   Selector: `--serial S --model M --os V(min) --type usb|wifi|emulator --avd A`.
-- **MCP server** — the same lease API is exposed over streamable HTTP at `/mcp`
-  (`list_devices`, `queue`, `claim`, `free`, `renew`, `screenshot`), with one identity per MCP session:
+- **MCP server** — the same lease API is exposed over streamable HTTP at `/mcp` as eight tools
+  (`list_devices`, `queue`, `claim`, `free`, `renew`, `screenshot`, `start_emulator`,
+  `stop_emulator`), with one identity per MCP session:
   `claude mcp add --transport http corral http://127.0.0.1:8798/mcp`. `claim` with
   `waitSeconds > 0` returns a ticket; re-call `claim` with that ticket to pick up the device.
   Each ticket carries a poll cadence (MCP advertises 5 s; a client may propose its own,
@@ -93,8 +117,9 @@ the same device.
   rules the wrapper reads live. Settings persist to `~/.config/corral/daemon.env` (override
   `CORRAL_ENV_FILE`) with **file > inherited env > default** precedence — a deliberate edit beats
   the unit's `Environment` and survives restarts. The installer seeds the file absent-only and the
-  unit's `EnvironmentFile=-…` is optional, so a fresh host still starts; a `PUT` whose `Origin` is
-  not loopback or whose port differs from the request `Host` is `403`, and startup logs and falls
+  unit's `EnvironmentFile=-…` is optional, so a fresh host still starts; every mutating route
+  (claim, ticket, free, renew, emulator start/stop, config) rejects an `Origin` that is not
+  loopback or whose port differs from the request `Host` with `403`, and startup logs and falls
   back (rather than exiting) on an unusable `daemon.env` value. `GET /api/doctor` mirrors
   `corral doctor`'s three layers (`daemon` / `sdk-shim` / `rules`) and is read-only; the `rules`
   layer reports `warn` when a hand-edited `readonly` holds a non-host-only command or the identity
@@ -102,8 +127,10 @@ the same device.
 - **Desktop UI** — `corral-ui [--url http://127.0.0.1:port]` (else `CORRAL_URL`, then the stored
   pref, default `http://127.0.0.1:8798`; the daemon is loopback-only, so `--url` picks a
   non-default local port unless the operator deliberately rebinds it) opens a Compose operator
-  console: one five-section screen with a left rail and scrollspy — **Devices** (card grid with
-  live thumbnails, holder and TTL countdown), **Queue** (the wait list), **Doctor** (per-layer
+  console: one six-section screen with a left rail and scrollspy — **Devices** (horizontal card
+  carousel with paging chevrons, live thumbnails, holder and TTL countdown), **Emulators** (AVDs
+  with running serials, a boot chip while booting, and start/stop), **Queue** (the wait list),
+  **Doctor** (per-layer
   health with a rail badge on FAIL), **Rules** and **Settings** — plus a connection bar with the
   last event `seq`. Rules and Settings are editors: the gate rules and daemon knobs go over the
   daemon's config API (the `readonly`/`valueflags` lists, the knobs with the restart-required hint
@@ -153,16 +180,19 @@ harnesses; the queue was later reworked to client-polled tickets, so no request 
 server-side and a crashed client cannot stall it. Phase 3 — the MCP server
 over streamable HTTP at `/mcp` — is built and verified with fake devices via a scripted MCP
 handshake. Later phases are built too: M4 observability (screenshots + `/ws/events`), M5 the
-Compose Desktop UI — rebuilt into the five-section operator console with rules/settings editors,
-theme modes and English/Belarusian resources — and M7 the config/doctor API. Corral replaces the
+Compose Desktop UI — rebuilt into the six-section operator console with rules/settings editors,
+theme modes and English/Belarusian resources — M6 the emulator lifecycle (list/start/stop with the
+boot gate) and M7 the config/doctor API. Corral replaces the
 `adb-lease` MVP (`adb-lease.md`).
 
 ## Roadmap (Phase 3+)
 
 - ~~Compose Desktop UI, live view via scrcpy~~ — done (M5): a third `corral-ui` module rebuilt
-  into the operator console (five sections, rules/settings editors, theme modes, en/be resources,
+  into the operator console (six sections, rules/settings editors, theme modes, en/be resources,
   the Corral mark), component install, observer seeding
-- Emulator lifecycle management
+- ~~Emulator lifecycle management~~ — done (M6): list/start/stop AVDs over CLI, REST and MCP, the
+  `CORRAL_EMULATOR` resolution, the `booted` gate with its boot-wait queue, and the console
+  Emulators seat
 - Verified Windows/macOS support: the `.bat` delegates the gate to `corral gate`, the CLI
   walks ancestry via `ProcessHandle` where `/proc` is absent, and the bash wrapper delegates
   identity to `corral owner` there — real non-Linux-host verification is still outstanding

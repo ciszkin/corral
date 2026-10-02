@@ -3,6 +3,7 @@ package dev.corral.ui.config
 import dev.corral.Device
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
+import dev.corral.ui.AvdStatus
 import dev.corral.ui.Capabilities
 import dev.corral.ui.ConfigApiException
 import dev.corral.ui.CorralApi
@@ -50,6 +51,9 @@ class ConfigViewModelTest {
         override suspend fun screenshot(serial: String): ByteArray = error("unused")
         override suspend fun forceFree(serial: String) = error("unused")
         override suspend fun doctor(): DoctorResponse = error("unused")
+        override suspend fun emulators(): List<AvdStatus> = error("unused")
+        override suspend fun emulatorStart(avd: String) = error("unused")
+        override suspend fun emulatorStop(avd: String, force: Boolean) = error("unused")
         override fun events(): Flow<String> = flow { error("unused") }
         override fun capabilities(): Capabilities = Capabilities(true)
     }

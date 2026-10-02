@@ -19,6 +19,7 @@ import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.delete
 import io.ktor.server.routing.get
+import io.ktor.server.routing.post
 import io.ktor.server.routing.put
 import io.ktor.server.routing.routing
 import io.ktor.server.testing.ApplicationTestBuilder
@@ -30,10 +31,13 @@ import kotlinx.coroutines.flow.first
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CorralClientTest {
     private val freed = mutableListOf<Pair<String, String>>()
+    private val started = mutableListOf<String>()
+    private val stopped = mutableListOf<Pair<String, String>>()
 
     private fun ApplicationTestBuilder.cannedServer() {
         application {
@@ -80,6 +84,20 @@ class CorralClientTest {
                                 ContentType.Application.Json)
                     }
                 }
+                get("/api/emulators") {
+                    call.respondText(
+                        """[{"avd":"Pixel6AVD","runningSerials":["emulator-5554"]},""" +
+                        """{"avd":"BrokenAVD","runningSerials":[],"error":"emulator: ERROR: boom"}]""",
+                        ContentType.Application.Json)
+                }
+                post("/api/emulators/{avd}/start") {
+                    started += call.parameters["avd"]!!
+                    call.respondText("""{"started":true,"alreadyRunning":false}""", ContentType.Application.Json)
+                }
+                post("/api/emulators/{avd}/stop") {
+                    stopped += call.parameters["avd"]!! to call.receiveText()
+                    call.respondText("""{"stopped":["emulator-5554"]}""", ContentType.Application.Json)
+                }
                 get("/api/doctor") {
                     call.respondText(
                         """{"adb":"/fake/adb","layers":[{"layer":"daemon","status":"ok","detail":"serving 1 device(s)"},""" +
@@ -123,6 +141,31 @@ class CorralClientTest {
     @Test fun forceFreeSendsDeleteWithForceBody() = testApplication {
         client().forceFree("dev1")
         assertEquals(listOf("dev1" to """{"owner":"ui-owner","force":true}"""), freed)
+    }
+
+    @Test fun emulatorsParseRows() = testApplication {
+        assertEquals(
+            listOf(
+                AvdStatus("Pixel6AVD", listOf("emulator-5554")),
+                AvdStatus("BrokenAVD", emptyList(), "emulator: ERROR: boom"),
+            ),
+            client().emulators(),
+        )
+    }
+
+    @Test fun avdStatusLastErrorIgnoresAbsentAndBlank() {
+        assertNull(AvdStatus("A", emptyList()).lastError)
+        assertNull(AvdStatus("A", emptyList(), "  ").lastError)
+        assertEquals("boom", AvdStatus("A", emptyList(), "boom").lastError)
+    }
+
+    @Test fun emulatorStartAndStopHitTheRoutes() = testApplication {
+        client().apply {
+            emulatorStart("Pixel6AVD")
+            emulatorStop("Pixel6AVD", force = true)
+        }
+        assertEquals(listOf("Pixel6AVD"), started)
+        assertEquals(listOf("Pixel6AVD" to """{"force":true}"""), stopped)
     }
 
     @Test fun eventsFirstFrameIsHello() = testApplication {

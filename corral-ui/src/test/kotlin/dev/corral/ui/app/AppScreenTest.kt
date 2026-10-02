@@ -17,9 +17,12 @@ import kotlin.test.assertNotNull
 
 class AppScreenTest {
 
-    @Test fun railHasTheFiveSectionsInOrder() {
+    @Test fun railHasTheSixSectionsInOrder() {
         assertEquals(
-            listOf(AppSection.Devices, AppSection.Queue, AppSection.Doctor, AppSection.Rules, AppSection.Settings),
+            listOf(
+                AppSection.Devices, AppSection.Emulators, AppSection.Queue,
+                AppSection.Doctor, AppSection.Rules, AppSection.Settings,
+            ),
             AppSections,
         )
         AppSections.forEach {

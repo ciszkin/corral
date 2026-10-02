@@ -39,19 +39,28 @@ private const val SESSION_HEADER = "mcp-session-id"
 /** MCP agents act on a model turn; ask them to poll far less often than the CLI's 1 s. */
 private const val MCP_RETRY_AFTER_MS = 5000L
 
+private const val EMULATOR_START_NOTE = "a started emulator appears in the pool within seconds and is " +
+    "claimable once booted; claim with waitSeconds > 0 and transport=emulator to queue for boot"
+
 @Serializable
 data class ClaimArgs(val selector: Selector = Selector(), val ttlSeconds: Long = 1800,
                      val waitSeconds: Long = 0, val ticket: String? = null, val owner: String? = null,
                      val retryAfterMs: Long? = null)
 
 @Serializable
-data class FreeArgs(val serial: String, val force: Boolean = false)
+data class FreeArgs(val serial: String)
 
 @Serializable
 data class RenewArgs(val serial: String, val ttlSeconds: Long = 1800)
 
 @Serializable
 data class ShotArgs(val serial: String? = null)
+
+@Serializable
+data class EmuStartArgs(val avd: String? = null)
+
+@Serializable
+data class EmuStopArgs(val avd: String? = null)
 
 /**
  * MCP surface at /mcp: streamable HTTP, one Server per session. Manual wiring (not the
@@ -115,7 +124,7 @@ fun corralMcpServer(env: AppEnv, sessions: ConcurrentHashMap<String, ServerSessi
             toolAnnotations = ToolAnnotations(readOnlyHint = true, openWorldHint = false)) { _ -> toolResult { block() } }
 
     readOnly("list_devices", "List known devices with model, OS, transport and current lease holder.") {
-        mcpJson.encodeToString(env.devices().map { DeviceStatus(it.serial, env.leases.snapshot[it.serial]) })
+        mcpJson.encodeToString(env.devices().map { DeviceStatus(it.serial, env.leases.snapshot[it.serial], it.booted) })
     }
     readOnly("queue", "List agents waiting in the selector FIFO queue.") {
         mcpJson.encodeToString(env.leases.queueSnapshot())
@@ -132,12 +141,12 @@ fun corralMcpServer(env: AppEnv, sessions: ConcurrentHashMap<String, ServerSessi
         inputSchema = ToolSchema(properties = buildJsonObject {
             putJsonObject("selector") {
                 put("type", "object")
-                put("description", "Any combo of serial, model, os (minimum version), type (usb|wifi|emulator), avd")
+                put("description", "Any combo of serial, model, os (minimum version), transport (usb|wifi|emulator), avd")
                 putJsonObject("properties") {
                     putJsonObject("serial") { put("type", "string") }
                     putJsonObject("model") { put("type", "string") }
                     putJsonObject("os") { put("type", "string") }
-                    putJsonObject("type") { put("type", "string") }
+                    putJsonObject("transport") { put("type", "string") }
                     putJsonObject("avd") { put("type", "string") }
                 }
             }
@@ -174,17 +183,16 @@ fun corralMcpServer(env: AppEnv, sessions: ConcurrentHashMap<String, ServerSessi
 
     server.addTool(
         name = "free",
-        description = "Release the lease on a serial held by this session. Refuses if another owner holds it; force=true overrides.",
+        description = "Release the lease on a serial held by this session. Refuses if another owner holds it.",
         inputSchema = ToolSchema(properties = buildJsonObject {
             putJsonObject("serial") { put("type", "string") }
-            putJsonObject("force") { put("type", "boolean") }
         }),
         toolAnnotations = ToolAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false),
     ) { request ->
         toolResult {
             val args = request.arguments?.let { mcpJson.decodeFromJsonElement<FreeArgs>(it) }
                 ?: return@toolResult toolError("serial is required")
-            env.leases.free(args.serial, ownerOf(this, sessions, null), args.force)
+            env.leases.free(args.serial, ownerOf(this, sessions, null))
             "freed ${args.serial}"
         }
     }
@@ -239,6 +247,57 @@ fun corralMcpServer(env: AppEnv, sessions: ConcurrentHashMap<String, ServerSessi
         }
     }
 
+    server.addTool(
+        name = "start_emulator",
+        description = "Boot an AVD. A started emulator appears in the pool within seconds and is " +
+            "claimable once booted; claim with waitSeconds > 0 and transport=emulator to queue for boot.",
+        inputSchema = ToolSchema(properties = buildJsonObject {
+            putJsonObject("avd") { put("type", "string"); put("description", "AVD name") }
+        }),
+        toolAnnotations = ToolAnnotations(destructiveHint = false, idempotentHint = true, openWorldHint = false),
+    ) { request ->
+        toolResult {
+            val e = env.emulators ?: throw IllegalStateException("emulators not configured")
+            val args = request.arguments?.let { mcpJson.decodeFromJsonElement<EmuStartArgs>(it) } ?: EmuStartArgs()
+            val avd = args.avd ?: return@toolResult toolError("avd is required")
+            val running = env.devices().filter { it.transport == "emulator" && it.avd == avd }
+            val avds = e.list()
+            when {
+                running.isNotEmpty() || e.isRunning(avd) ->
+                    "${mcpJson.encodeToString(Started(alreadyRunning = true))}\n$EMULATOR_START_NOTE"
+                avds == null ->
+                    throw IllegalStateException("emulator binary not usable — set CORRAL_EMULATOR")
+                avd !in avds ->
+                    throw IllegalStateException("unknown avd $avd — known: ${avds.joinToString(", ")}")
+                else -> {
+                    if (e.start(avd)) "${mcpJson.encodeToString(Started())}\n$EMULATOR_START_NOTE"
+                    else "${mcpJson.encodeToString(Started(alreadyRunning = true))}\n$EMULATOR_START_NOTE"
+                }
+            }
+        }
+    }
+
+    server.addTool(
+        name = "stop_emulator",
+        description = "Stop every running instance of an AVD. Refuses while one is leased, naming the " +
+            "holder; free that lease first.",
+        inputSchema = ToolSchema(properties = buildJsonObject {
+            putJsonObject("avd") { put("type", "string"); put("description", "AVD name") }
+        }),
+        toolAnnotations = ToolAnnotations(destructiveHint = true, idempotentHint = false, openWorldHint = false),
+    ) { request ->
+        toolResult {
+            val e = env.emulators ?: throw IllegalStateException("emulators not configured")
+            val args = request.arguments?.let { mcpJson.decodeFromJsonElement<EmuStopArgs>(it) } ?: EmuStopArgs()
+            val avd = args.avd ?: return@toolResult toolError("avd is required")
+            val serials = env.devices().filter { it.transport == "emulator" && it.avd == avd }.map { it.serial }
+            val held = serials.firstNotNullOfOrNull { env.leases.snapshot[it]?.owner }
+            if (held != null) throw IllegalStateException("$avd is leased by $held — free that lease first")
+            serials.forEach { e.stop(it); env.leases.free(it, owner = "", force = true) }
+            mcpJson.encodeToString(Stopped(serials, e.stopAvd(avd)))
+        }
+    }
+
     return server
 }
 
@@ -254,12 +313,15 @@ private fun sessionOwner(session: ServerSession): String =
 private suspend fun toolResult(block: suspend () -> String): CallToolResult = try {
     CallToolResult(content = listOf(TextContent(text = block())))
 } catch (e: LeaseBusyException) {
-    val busy = mcpJson.encodeToString(BusyResponse(e.busy, e.matching, e.timedOut))
-    CallToolResult(content = listOf(TextContent(
-        text = "$busy\nAll matching devices are leased: claim with waitSeconds > 0 to queue, or refine the selector.")),
-        isError = true)
+    val busy = mcpJson.encodeToString(BusyResponse(e.busy, e.matching, e.timedOut, e.booting))
+    val remedy = if (e.booting > 0)
+        "${e.booting} emulator(s) booting: claim with waitSeconds > 0 and transport=emulator queues until boot."
+    else "All matching devices are leased: claim with waitSeconds > 0 to queue, or refine the selector."
+    CallToolResult(content = listOf(TextContent(text = "$busy\n$remedy")), isError = true)
 } catch (e: IllegalStateException) {
     CallToolResult(content = listOf(TextContent(text = e.message ?: "lease error")), isError = true)
+} catch (e: EmulatorException) {
+    CallToolResult(content = listOf(TextContent(text = e.message ?: "emulator error")), isError = true)
 }
 
 private fun toolError(message: String): String = throw IllegalStateException(message)

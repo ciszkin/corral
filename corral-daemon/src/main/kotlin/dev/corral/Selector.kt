@@ -10,8 +10,11 @@ data class Selector(val serial: String? = null, val model: String? = null,
     val isEmpty: Boolean
         get() = serial == null && model == null && minOs == null && transport == null && avd == null
 
-    fun matches(d: Device): Boolean = d.usable()
-        && (serial == null || serial == d.serial)
+    fun matches(d: Device): Boolean = d.usable() && matchesFields(d)
+
+    /** Selector fields only, readiness excluded — lets a busy error explain an unbooted emulator. */
+    fun matchesFields(d: Device): Boolean =
+        (serial == null || serial == d.serial)
         && (model == null || model == d.model)
         && (transport == null || transport == d.transport)
         && (avd == null || avd == d.avd)

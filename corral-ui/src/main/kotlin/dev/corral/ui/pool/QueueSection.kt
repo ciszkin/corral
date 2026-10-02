@@ -37,6 +37,7 @@ import dev.corral.ui.resources.rail_queue
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.LocalMonoFont
+import org.jetbrains.compose.resources.pluralStringResource
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
@@ -45,7 +46,7 @@ fun QueueSection(state: PoolState, expanded: Boolean, onToggle: () -> Unit) {
     Column(Modifier.fillMaxWidth()) {
         SectionHeader(Icons.List, stringResource(Res.string.rail_queue), expanded, onToggle) {
             CorralPill(
-                text = stringResource(Res.string.queue_waiting, state.queue.size),
+                text = pluralStringResource(Res.plurals.queue_waiting, state.queue.size, state.queue.size),
                 container = colors.containerHigh,
                 content = colors.onSurfaceVariant,
             )

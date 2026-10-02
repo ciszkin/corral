@@ -3,17 +3,23 @@ package dev.corral.ui.pool
 import dev.corral.Device
 import dev.corral.Lease
 import dev.corral.QueueEntry
+import dev.corral.ui.AvdStatus
 import dev.corral.ui.Capabilities
 import dev.corral.ui.architecture.MviEffect
 import dev.corral.ui.architecture.MviIntent
 import dev.corral.ui.architecture.MviState
 import dev.corral.ui.data.DoctorResponse
 
-data class DeviceView(val d: Device, val lease: Lease?)
+data class DeviceView(val d: Device, val lease: Lease?) {
+    val booting get() = d.state == "device" && !d.booted
+    val usable: Boolean get() = d.state == "device" && d.booted
+}
 
 data class PoolState(
     val devices: List<DeviceView> = emptyList(),
     val queue: List<QueueEntry> = emptyList(),
+    val emulators: List<AvdStatus> = emptyList(),
+    val startingEmulators: Set<String> = emptySet(),
     val doctor: DoctorResponse? = null,
     val thumbnails: Map<String, ByteArray?> = emptyMap(),
     val denied: Boolean = false,
@@ -26,6 +32,9 @@ sealed interface PoolIntent : MviIntent {
     data object RefreshDevices : PoolIntent
     data object RefreshQueue : PoolIntent
     data object RefreshDoctor : PoolIntent
+    data object RefreshEmulators : PoolIntent
+    data class StartEmulator(val avd: String) : PoolIntent
+    data class StopEmulator(val avd: String, val force: Boolean) : PoolIntent
     data class FetchThumbnail(val serial: String) : PoolIntent
     data class AskForceFree(val serial: String) : PoolIntent
     data object ConfirmForceFree : PoolIntent
@@ -36,4 +45,5 @@ sealed interface PoolIntent : MviIntent {
 sealed interface PoolEffect : MviEffect {
     data class ScrcpyFailed(val serial: String, val reason: String) : PoolEffect
     data class ForceFreeFailed(val reason: String) : PoolEffect
+    data class EmulatorActionFailed(val reason: String) : PoolEffect
 }

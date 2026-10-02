@@ -7,16 +7,20 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -25,6 +29,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import dev.corral.ui.components.CorralPill
 import dev.corral.ui.components.DeviceCard
 import dev.corral.ui.components.DevicesEmptyState
@@ -34,12 +40,16 @@ import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.carousel_next
 import dev.corral.ui.resources.carousel_prev
-import dev.corral.ui.resources.devices_counts
+import dev.corral.ui.resources.devices_booting
+import dev.corral.ui.resources.devices_free
+import dev.corral.ui.resources.devices_held
+import dev.corral.ui.resources.devices_offline
 import dev.corral.ui.resources.rail_devices
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.LocalExtendedColors
 import kotlinx.coroutines.launch
 import org.jetbrains.compose.resources.DrawableResource
+import org.jetbrains.compose.resources.pluralStringResource
 import org.jetbrains.compose.resources.stringResource
 
 @Composable
@@ -55,9 +65,17 @@ fun DevicesSection(
     val colors = LocalExtendedColors.current
     Column(Modifier.fillMaxWidth()) {
         SectionHeader(Icons.Smartphone, stringResource(Res.string.rail_devices), expanded, onToggle) {
-            val free = state.devices.count { it.lease == null }
+            val free = state.devices.count { it.usable && it.lease == null }
+            val held = state.devices.count { it.lease != null }
+            val offline = state.devices.count { it.d.state == "offline" }
+            val booting = state.devices.count { it.booting }
             CorralPill(
-                text = stringResource(Res.string.devices_counts, free, state.devices.size - free),
+                text = listOfNotNull(
+                    pluralStringResource(Res.plurals.devices_free, free, free),
+                    pluralStringResource(Res.plurals.devices_held, held, held),
+                    pluralStringResource(Res.plurals.devices_offline, offline, offline).takeIf { offline > 0 },
+                    pluralStringResource(Res.plurals.devices_booting, booting, booting).takeIf { booting > 0 },
+                ).joinToString(" · "),
                 container = colors.containerHigh,
                 content = colors.onSurfaceVariant,
             )
@@ -92,6 +110,7 @@ fun DevicesSection(
                     }
                 }
                 if (canLeft) {
+                    ChevronScrim(Alignment.CenterStart, Brush.horizontalGradient(listOf(MaterialTheme.colors.surface, Color.Transparent)))
                     CarouselChevron(
                         icon = Icons.ChevronDown,
                         contentDescription = stringResource(Res.string.carousel_prev),
@@ -101,6 +120,7 @@ fun DevicesSection(
                     ) { scope.launch { listState.animateScrollBy(-viewport.toFloat()) } }
                 }
                 if (canRight) {
+                    ChevronScrim(Alignment.CenterEnd, Brush.horizontalGradient(listOf(Color.Transparent, MaterialTheme.colors.surface)))
                     CarouselChevron(
                         icon = Icons.ChevronDown,
                         contentDescription = stringResource(Res.string.carousel_next),
@@ -116,6 +136,16 @@ fun DevicesSection(
             }
         }
     }
+}
+
+@Composable
+private fun BoxScope.ChevronScrim(alignment: Alignment, brush: Brush) {
+    Box(
+        Modifier.align(alignment)
+            .height(Dimens.cardHeight)
+            .width(Dimens.carouselScrimWidth)
+            .background(brush),
+    )
 }
 
 @Composable

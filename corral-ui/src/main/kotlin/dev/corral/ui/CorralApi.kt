@@ -8,6 +8,14 @@ import dev.corral.ui.data.ConfigRules
 import dev.corral.ui.data.DoctorResponse
 import dev.corral.ui.data.PutConfigResponse
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.Serializable
+
+/** Client mirror of the daemon's `/api/emulators` row. `error` is the last log line, set only when the AVD is stopped. */
+@Serializable
+data class AvdStatus(val avd: String, val runningSerials: List<String>, val error: String? = null)
+
+/** The daemon's last error line, or null when absent or blank. */
+val AvdStatus.lastError: String? get() = error?.takeIf { it.isNotBlank() }
 
 /** What the UI may do — v1 is the single-operator world; the future swaps the provider for /api/whoami. */
 data class Capabilities(val canForceFree: Boolean)
@@ -30,6 +38,9 @@ interface CorralApi {
     suspend fun config(): ConfigResponse
     suspend fun putConfig(settings: Map<String, String>, rules: ConfigRules?): Result<PutConfigResponse>
     suspend fun doctor(): DoctorResponse
+    suspend fun emulators(): List<AvdStatus>
+    suspend fun emulatorStart(avd: String)
+    suspend fun emulatorStop(avd: String, force: Boolean)
     /** One connection's frames; completes/throws on disconnect — reconnection is the store's job. */
     fun events(): Flow<String>
     fun capabilities(): Capabilities

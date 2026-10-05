@@ -579,6 +579,36 @@ emulator_error_cleanup() {
   free_all
 }
 
+# --- p41 §3 / p35: a direct-launched emulator dies with its daemon (the Main shutdown hook).
+# A dedicated daemon on a spare port, so the suite's own daemon is never disturbed. ---
+emulator_shutdown_hook() {
+  local port3=$((PORT + 2)) p3 i ep U3
+  U3="http://127.0.0.1:$port3"
+  rm -f "$FAKE_EMULATOR_STARTED"
+  setsid env -u INVOCATION_ID CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/hook/corral.db" \
+    CORRAL_RULES="$TMP/corral-rules" CORRAL_PORT="$port3" \
+    java -Dcorral.test.tag=$$ -Duser.home="$TMP/home" -jar "$JAR" </dev/null >"$TMP/hook.log" 2>&1 &
+  p3=$!
+  wait_daemon "$port3" "$TMP/hook.log" || { kill -9 "$p3" 2>/dev/null; return 1; }
+  curl -s -o /dev/null -X POST "$U3/api/emulators/Pixel6AVD/start"
+  for i in $(seq 1 25); do [ -s "$FAKE_EMULATOR_STARTED" ] && break; sleep 0.2; done
+  ep=$(cat "$FAKE_EMULATOR_STARTED" 2>/dev/null) || { echo "# shutdown-hook: emulator never started"; kill -9 "$p3" 2>/dev/null; return 1; }
+  kill -0 "$ep" 2>/dev/null || { echo "# shutdown-hook: emulator died before the test"; kill -9 "$p3" 2>/dev/null; return 1; }
+  kill -TERM "$p3"; wait "$p3" 2>/dev/null   # graceful stop -> the hook must destroy the tracked child
+  for i in $(seq 1 25); do ! kill -0 "$ep" 2>/dev/null && break; sleep 0.2; done
+  if kill -0 "$ep" 2>/dev/null; then
+    echo "# shutdown-hook: direct emulator survived its daemon"
+    kill -9 "$ep" 2>/dev/null; kill -9 "$p3" 2>/dev/null; return 1
+  fi
+  rm -f "$FAKE_EMULATOR_STARTED"
+}
+
+check_emulator_shutdown_hook() {
+  local rc=1
+  if emulator_shutdown_hook; then rc=0; fi
+  return $rc
+}
+
 check_emulator_error_status() {
   local rc=1
   if emulator_error_status; then rc=0; fi
@@ -632,6 +662,7 @@ check "stop of an unlisted running emulator reports the pid it terminated" check
 check "concurrent starts spawn one instance, the rest alreadyRunning" check_emulator_concurrent_starts
 check "a clean stop leaves no error in GET /api/emulators" check_emulator_clean_stop
 check "a non-zero exit surfaces its error; a clean self-exit shows none; restart clears it" check_emulator_error_status
+check "a direct-launched emulator dies with its daemon (shutdown hook)" check_emulator_shutdown_hook
 
 # --- M7 Plan A: config/doctor API. Run last: the round-trip row writes CORRAL_SCREENSHOTS=open
 # into the pinned env file, and the final precedence row restarts the daemon on PORT+1. ---

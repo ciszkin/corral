@@ -1,19 +1,6 @@
 package dev.corral.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.material.DropdownMenu
-import androidx.compose.material.DropdownMenuItem
-import androidx.compose.material.Text
-import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
@@ -23,11 +10,8 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.toAwtImage
-import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.isTraySupported
@@ -42,7 +26,6 @@ import dev.corral.ui.pool.PoolViewModel
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.corral_icon_128
 import dev.corral.ui.resources.corral_icon_48
-import dev.corral.ui.resources.menu_quit
 import dev.corral.ui.theme.CorralTheme
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.locale
@@ -53,7 +36,6 @@ import kotlin.system.exitProcess
 import kotlinx.coroutines.SupervisorJob
 import org.jetbrains.compose.resources.imageResource
 import org.jetbrains.compose.resources.painterResource
-import org.jetbrains.compose.resources.stringResource
 import org.koin.core.context.startKoin
 import java.awt.Dimension
 import java.awt.Frame
@@ -65,9 +47,6 @@ import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
 import java.util.Locale
-
-private val BarColor = Color(0xFF2B2B2B)
-private val BarTextColor = Color(0xFFEDEDED)
 
 fun main(args: Array<String>) {
     val argUrl = args.toList().zipWithNext().firstOrNull { it.first == "--url" }?.second
@@ -100,7 +79,6 @@ fun main(args: Array<String>) {
         var windowVisible by remember { mutableStateOf(true) }
         var trayReady by remember { mutableStateOf(false) }
         var showRequests by remember { mutableStateOf(0) }
-        var menuOpen by remember { mutableStateOf(false) }
         val state by app.state.collectAsState()
         var awtWindow by remember { mutableStateOf<AwtWindow?>(null) }
         var offsetX by remember { mutableStateOf(0) }
@@ -164,31 +142,14 @@ fun main(args: Array<String>) {
             Locale.setDefault(language.locale())
             key(language) {
                 CorralTheme(state.useDark) {
-                    Box(Modifier.fillMaxSize()) {
-                        Column(Modifier.fillMaxSize()) {
-                            AppMenuBar(
-                                open = menuOpen,
-                                onOpenChange = { menuOpen = it },
-                                onQuit = {
-                                    saveGeometry(prefsStore, app.state.value.prefs, awtWindow, offsetX, offsetY)
-                                    exitApplication()
-                                },
-                            )
-                            Box(Modifier.weight(1f)) {
-                                AppScreen(app, pool, config, listState, scrcpy = { serial -> scrcpy.launch(serial) })
-                            }
-                        }
-                        // Clicking anywhere outside the menu closes it. The DropdownMenu itself is a
-                        // separate popup window, so this scrim only covers the app window.
-                        if (menuOpen) {
-                            Box(
-                                Modifier.fillMaxSize().clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null,
-                                ) { menuOpen = false },
-                            )
-                        }
-                    }
+                    AppScreen(
+                        app, pool, config, listState,
+                        onQuit = {
+                            saveGeometry(prefsStore, app.state.value.prefs, awtWindow, offsetX, offsetY)
+                            exitApplication()
+                        },
+                        scrcpy = { serial -> scrcpy.launch(serial) },
+                    )
                 }
             }
         }
@@ -241,31 +202,6 @@ internal fun trayImageFor(mark: ImageBitmap, size: Int): BufferedImage {
     g.drawImage(mark.toAwtImage(), 0, 0, size, size, null)
     g.dispose()
     return out
-}
-
-/** A Compose menu bar: the native Swing MenuBar ignores the Material theme and looked out of place. */
-@Composable
-private fun AppMenuBar(open: Boolean, onOpenChange: (Boolean) -> Unit, onQuit: () -> Unit) {
-    Row(Modifier.fillMaxWidth().background(BarColor)) {
-        Box {
-            Text(
-                "Corral",
-                color = BarTextColor,
-                modifier = Modifier
-                    .clickable { onOpenChange(!open) }
-                    .padding(horizontal = Dimens.space12, vertical = Dimens.space6),
-            )
-            DropdownMenu(
-                expanded = open,
-                onDismissRequest = { onOpenChange(false) },
-                properties = PopupProperties(focusable = true, dismissOnClickOutside = true),
-            ) {
-                DropdownMenuItem(onClick = { onOpenChange(false); onQuit() }) {
-                    Text(stringResource(Res.string.menu_quit))
-                }
-            }
-        }
-    }
 }
 
 

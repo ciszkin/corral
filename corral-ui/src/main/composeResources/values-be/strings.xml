@@ -2,6 +2,9 @@
 <resources>
     <string name="app_name">corral</string>
     <string name="menu_quit">Выйсці</string>
+    <string name="quit_title">Закрыць кансоль Corral?</string>
+    <string name="quit_body">Закрываецца толькі гэтае акно кансолі. Дэман Corral працягвае працаваць у фоне — актыўныя лизы, чарга і падключаныя прылады не закранаюцца. Кансоль можна адкрыць зноў у любы час.</string>
+    <string name="quit_confirm">Закрыць кансоль</string>
 
     <string name="rail_devices">Прылады</string>
     <string name="rail_queue">Чарга</string>

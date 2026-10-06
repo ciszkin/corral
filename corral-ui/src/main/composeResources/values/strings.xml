@@ -2,6 +2,9 @@
 <resources>
     <string name="app_name">corral</string>
     <string name="menu_quit">Quit</string>
+    <string name="quit_title">Quit Corral console?</string>
+    <string name="quit_body">Only this console window closes. The Corral daemon keeps running in the background — active leases, the queue, and connected devices are unaffected. Reopen the console anytime to pick up where you left off.</string>
+    <string name="quit_confirm">Quit console</string>
 
     <string name="rail_devices">Devices</string>
     <string name="rail_queue">Queue</string>

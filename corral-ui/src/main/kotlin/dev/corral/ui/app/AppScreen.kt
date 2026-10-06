@@ -24,6 +24,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.AlertDialog
 import androidx.compose.material.Button
 import androidx.compose.material.ButtonDefaults
+import androidx.compose.material.Divider
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.Text
 import androidx.compose.material.TextButton
@@ -69,6 +70,10 @@ import dev.corral.ui.resources.force_free_body
 import dev.corral.ui.resources.force_free_failed
 import dev.corral.ui.resources.force_free_nobody
 import dev.corral.ui.resources.force_free_title
+import dev.corral.ui.resources.menu_quit
+import dev.corral.ui.resources.quit_body
+import dev.corral.ui.resources.quit_confirm
+import dev.corral.ui.resources.quit_title
 import dev.corral.ui.resources.rail_devices
 import dev.corral.ui.resources.rail_doctor
 import dev.corral.ui.resources.rail_emulators
@@ -114,6 +119,7 @@ fun AppScreen(
     pool: PoolViewModel,
     config: ConfigViewModel,
     listState: LazyListState,
+    onQuit: () -> Unit,
     scrcpy: suspend (String) -> Unit,
 ) {
     val state by app.state.collectAsState()
@@ -128,6 +134,7 @@ fun AppScreen(
     var forceFreeError by remember { mutableStateOf<String?>(null) }
     var emulatorError by remember { mutableStateOf<String?>(null) }
     var configSaveFailed by remember { mutableStateOf(false) }
+    var confirmQuit by remember { mutableStateOf(false) }
     val expandedSections = remember { mutableStateMapOf<AppSection, Boolean>() }
 
     LaunchedEffect(Unit) {
@@ -179,7 +186,8 @@ fun AppScreen(
             ) {
                 AppSections.forEachIndexed { index, section ->
                     RailItem(
-                        section = section,
+                        icon = section.icon,
+                        label = section.label,
                         active = index == current,
                         badge = section == AppSection.Doctor && doctorFailed,
                     ) {
@@ -187,6 +195,18 @@ fun AppScreen(
                         scope.launch { listState.animateScrollToItem(index) }
                     }
                 }
+                Spacer(Modifier.weight(1f))
+                Divider(
+                    color = LocalExtendedColors.current.outlineVariant,
+                    thickness = Dimens.border,
+                    modifier = Modifier.padding(vertical = Dimens.space8),
+                )
+                RailItem(
+                    icon = Icons.Power,
+                    label = Res.string.menu_quit,
+                    active = false,
+                    badge = false,
+                ) { confirmQuit = true }
             }
             Column(Modifier.weight(1f)) {
                 StatusBar(state) { mode -> app.onIntent(AppIntent.SetTheme(mode)) }
@@ -300,6 +320,26 @@ fun AppScreen(
             },
         )
     }
+    if (confirmQuit) {
+        QuitDialog(
+            onConfirm = {
+                confirmQuit = false
+                onQuit()
+            },
+            onCancel = { confirmQuit = false },
+        )
+    }
+}
+
+@Composable
+private fun QuitDialog(onConfirm: () -> Unit, onCancel: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(stringResource(Res.string.quit_title)) },
+        text = { Text(stringResource(Res.string.quit_body)) },
+        confirmButton = { Button(onClick = onConfirm) { Text(stringResource(Res.string.quit_confirm)) } },
+        dismissButton = { TextButton(onClick = onCancel) { Text(stringResource(Res.string.cancel)) } },
+    )
 }
 
 @Composable
@@ -354,7 +394,13 @@ private fun ForceFreeDialog(
 }
 
 @Composable
-private fun RailItem(section: AppSection, active: Boolean, badge: Boolean, onClick: () -> Unit) {
+private fun RailItem(
+    icon: DrawableResource,
+    label: StringResource,
+    active: Boolean,
+    badge: Boolean,
+    onClick: () -> Unit,
+) {
     val colors = LocalExtendedColors.current
     val background = if (active) colors.primaryContainer else Color.Transparent
     val tint = if (active) colors.onPrimaryContainer else MaterialTheme.colors.onSurface
@@ -367,7 +413,7 @@ private fun RailItem(section: AppSection, active: Boolean, badge: Boolean, onCli
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box {
-            AppIcon(section.icon, contentDescription = null, tint = tint)
+            AppIcon(icon, contentDescription = null, tint = tint)
             if (badge) {
                 Box(
                     Modifier.align(Alignment.TopEnd).size(Dimens.space8)
@@ -376,7 +422,7 @@ private fun RailItem(section: AppSection, active: Boolean, badge: Boolean, onCli
             }
         }
         Text(
-            stringResource(section.label),
+            stringResource(label),
             style = MaterialTheme.typography.caption,
             color = tint,
             maxLines = 1,

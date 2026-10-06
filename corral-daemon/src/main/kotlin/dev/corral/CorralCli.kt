@@ -308,15 +308,11 @@ object CorralCli {
                 when {
                     sdkAdb == null -> println("sdk adb shim: skipped (no SDK platform-tools/adb found; set ANDROID_HOME)")
                     else -> {
-                        val shim = File(sdkAdb)
-                        val real = File("$sdkAdb.real")
-                        val isWrapper = shim.exists() && shim.readText().contains("corral adb wrapper")
-                        when {
-                            !shim.exists() -> { println("sdk adb shim: FAIL - $sdkAdb missing$whose"); problems++ }
-                            !isWrapper -> { println("sdk adb shim: FAIL - $sdkAdb is not the corral wrapper (re-run install.sh)$whose"); problems++ }
-                            !real.canExecute() -> { println("sdk adb shim: FAIL - $real missing (re-run install.sh)$whose"); problems++ }
-                            else -> println("sdk adb shim: ok ($sdkAdb -> adb.real)")
-                        }
+                        // one vocabulary with /api/doctor: the probe classifies unmanaged paths as
+                        // skipped and managed ones as ok/fail (the Windows smoke caught the two disagreeing)
+                        val (status, detail) = SdkShim.probe(Path.of(sdkAdb))
+                        println("sdk adb shim: $status - $detail$whose")
+                        if (status == "fail") problems++
                     }
                 }
                 val rulesPath = RulesFile.defaultPath()

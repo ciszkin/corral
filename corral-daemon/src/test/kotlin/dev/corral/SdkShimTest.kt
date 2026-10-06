@@ -113,9 +113,19 @@ class SdkShimTest {
 
     @Test
     fun probeSkipsUnmanagedAdb() {
-        val (status, detail) = SdkShim.probe(dir.resolve("platform-tools/adb"))
+        val existing = dir.resolve("platform-tools/adb")
+        existing.parent.toFile().mkdirs()
+        existing.toFile().writeText("#!/bin/sh\n")          // unmanaged but present -> skipped
+        val (status, detail) = SdkShim.probe(existing)
         assertEquals("skipped", status)
         assertTrue(detail.contains("unmanaged adb path"), "detail was: $detail")
+    }
+
+    @Test
+    fun probeFailsOnAMissingAbsoluteUnmanagedAdb() {
+        val (status, detail) = SdkShim.probe(dir.resolve("gone/adb"))   // configured, absent -> discovery broken
+        assertEquals("fail", status)
+        assertTrue(detail.contains("does not exist") && detail.contains("discovery"), "detail was: $detail")
     }
 
     @Test

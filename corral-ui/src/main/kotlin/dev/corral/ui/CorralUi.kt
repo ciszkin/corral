@@ -49,6 +49,7 @@ import dev.corral.ui.theme.locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlin.system.exitProcess
 import kotlinx.coroutines.SupervisorJob
 import org.jetbrains.compose.resources.imageResource
 import org.jetbrains.compose.resources.painterResource
@@ -92,6 +93,9 @@ fun main(args: Array<String>) {
     app.start()
     val scrcpy = ScrcpyLauncher()
 
+    // The window libraries can die at class-init on exotic hosts (e.g. Skiko's theme read on
+    // Windows under JDK 25) — turn that into a teaching exit instead of a raw stack.
+    try {
     application {
         var windowVisible by remember { mutableStateOf(true) }
         var trayReady by remember { mutableStateOf(false) }
@@ -188,6 +192,14 @@ fun main(args: Array<String>) {
                 }
             }
         }
+    }
+    } catch (e: Throwable) {
+        System.err.println(
+            "corral: the console could not start (${e.javaClass.simpleName}" +
+                (e.cause?.let { ": ${it.javaClass.simpleName}" } ?: "") + ") — a known cause is " +
+                "Skiko failing on very new JDKs; try running under JDK 17–21 and report the stack below")
+        e.printStackTrace()
+        exitProcess(1)
     }
 }
 

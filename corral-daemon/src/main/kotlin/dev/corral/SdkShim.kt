@@ -43,8 +43,13 @@ object SdkShim {
 
     /** Read-only health check for /api/doctor — never repairs (that is [ensure]'s job on the 10 s tick). */
     fun probe(realAdb: Path): Pair<String, String> {
-        if (!realAdb.isAbsolute || realAdb.fileName?.toString()?.endsWith(".real") != true)
-            return "skipped" to "unmanaged adb path (${shimPathOf(realAdb.toString())})"
+        if (!realAdb.isAbsolute || realAdb.fileName?.toString()?.endsWith(".real") != true) {
+            // unmanaged path: legitimate when it exists (a bare PATH adb); a configured absolute
+            // path that does not exist means discovery is broken — doctor must say so on every surface
+            return if (realAdb.isAbsolute && !Files.exists(realAdb))
+                "fail" to "$realAdb does not exist — the daemon's device discovery is broken (fix CORRAL_ADB)"
+            else "skipped" to "unmanaged adb path (${shimPathOf(realAdb.toString())})"
+        }
         val shim = realAdb.resolveSibling("adb")
         val shimText = runCatching { Files.readString(shim) }.getOrNull()
             ?: return "fail" to "$shim missing (re-run install.sh)"

@@ -3,6 +3,7 @@ package dev.corral
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.serialization.JsonConvertException
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
@@ -30,6 +31,7 @@ import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -282,7 +284,24 @@ fun Application.corralModule(env: AppEnv) {
             if (call.rejectsForeignOrigin()) return@put
             env.config ?: run {
                 call.respondText("corral: config not wired", status = HttpStatusCode.ServiceUnavailable); return@put }
-            val req = call.receive<PutConfigRequest>()
+            val req = try {
+                call.receive<PutConfigRequest>()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // decode failures must teach, not sit mute (the Windows smoke hit a bare 4xx here)
+                val malformed = e is JsonConvertException || e.cause is JsonConvertException
+                if (malformed) {
+                    val why = (e as? JsonConvertException ?: e.cause as? JsonConvertException)
+                        ?.message?.lineSequence()?.firstOrNull()
+                    call.respond(HttpStatusCode.BadRequest, ConfigErrors(listOf(
+                        "malformed JSON body" + (why?.let { ": $it" } ?: ""))))
+                } else {
+                    call.respond(HttpStatusCode.UnsupportedMediaType, ConfigErrors(listOf(
+                        "send Content-Type: application/json (PowerShell: Invoke-RestMethod -ContentType 'application/json')")))
+                }
+                return@put
+            }
             val errors = mutableListOf<String>()
             val warnings = mutableListOf<String>()
             val clean = mutableMapOf<String, String>()

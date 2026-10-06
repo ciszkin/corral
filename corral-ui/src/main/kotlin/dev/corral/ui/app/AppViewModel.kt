@@ -140,5 +140,8 @@ class AppViewModel(
 internal fun resolveUseDark(mode: ThemeMode): Boolean = when (mode) {
     ThemeMode.DARK -> true
     ThemeMode.LIGHT -> false
-    ThemeMode.SYSTEM -> UIManager.getLookAndFeel()?.javaClass?.name?.contains("Dark") == true
+    // best-effort sniff: fall back to light where the LAF cannot be read (exotic hosts)
+    ThemeMode.SYSTEM -> runCatching {
+        UIManager.getLookAndFeel()?.javaClass?.name?.contains("Dark") == true
+    }.getOrDefault(false)
 }

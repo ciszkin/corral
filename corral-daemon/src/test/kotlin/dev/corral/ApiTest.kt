@@ -228,6 +228,20 @@ class ApiTest {
     private suspend fun HttpClient.putConfig(json: String) =
         put("/api/config") { contentType(ContentType.Application.Json); setBody(json) }
 
+    @Test fun putWithoutJsonContentTypeTeachesTheHeader() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.put("/api/config") { setBody("""{"settings":{}}""") }   // no content-type -> text/plain
+        assertEquals(HttpStatusCode.UnsupportedMediaType, r.status)
+        val errs = Json.decodeFromString<ConfigErrors>(r.bodyAsText())
+        assertTrue(errs.errors.any { it.contains("application/json") }, "expected the content-type teaching, got ${errs.errors}")
+    }
+
+    @Test fun putWithMalformedJsonIsA400WithABody() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.put("/api/config") { contentType(ContentType.Application.Json); setBody("{not json") }
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        val errs = Json.decodeFromString<ConfigErrors>(r.bodyAsText())
+        assertTrue(errs.errors.isNotEmpty())
+    }
+
     @Test fun putWritesKnownSettingsAndRules() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
         val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"open"},"rules":{"readonly":["devices"],"valueflags":["-p"]}}""")
         assertEquals(HttpStatusCode.OK, r.status)

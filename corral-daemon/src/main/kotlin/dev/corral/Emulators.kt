@@ -397,18 +397,24 @@ class Emulators(
     }
 
     companion object {
-        /** `CORRAL_EMULATOR` > `<sdk>/emulator/emulator` next to adb > a `emulator` binary on [env]'s PATH. */
+        /** `CORRAL_EMULATOR` > `<sdk>/emulator/emulator[.exe]` next to adb > on [env]'s PATH. */
         fun resolveEmulatorPath(env: Map<String, String> = System.getenv(), adb: String? = null): String? {
             env["CORRAL_EMULATOR"]?.takeIf { it.isNotBlank() }
                 ?.let { runCatching { Path.of(it) }.getOrNull() }
                 ?.takeIf(::runnable)
                 ?.let { return it.toString() }
+            // probe both spellings everywhere: extensionless wins on unix, `.exe` on Windows
             adb?.let { a ->
-                val sibling = Path.of(a).parent?.parent?.resolve("emulator")?.resolve("emulator")
-                if (sibling != null && runnable(sibling)) return sibling.toString()
+                val emulatorDir = Path.of(a).parent?.parent?.resolve("emulator")
+                for (name in EXE_NAMES) {
+                    val sibling = emulatorDir?.resolve(name)
+                    if (sibling != null && runnable(sibling)) return sibling.toString()
+                }
             }
             return pathProbe(env["PATH"])
         }
+
+        private val EXE_NAMES = listOf("emulator", "emulator.exe")
 
         private fun runnable(p: Path): Boolean = Files.isRegularFile(p) && Files.isExecutable(p)
 
@@ -416,7 +422,7 @@ class Emulators(
             ?.split(File.pathSeparator)
             ?.asSequence()
             ?.filter { it.isNotBlank() }
-            ?.map { Path.of(it, "emulator") }
+            ?.flatMap { dir -> EXE_NAMES.map { Path.of(dir, it) } }
             ?.firstOrNull { runnable(it) }
             ?.toString()
     }

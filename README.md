@@ -127,6 +127,8 @@ the same device.
 - **Desktop UI** — `corral-ui [--url http://127.0.0.1:port]` (else `CORRAL_URL`, then the stored
   pref, default `http://127.0.0.1:8798`; the daemon is loopback-only, so `--url` picks a
   non-default local port unless the operator deliberately rebinds it) opens a Compose operator
+  console — **run it on JDK 17–21** (Skiko, its window layer, crashes at startup on very new
+  JDKs; the daemon and CLI are unaffected). One six-section screen with a left rail and scrollspy — **Devices** (horizontal card
   console: one six-section screen with a left rail and scrollspy — **Devices** (horizontal card
   carousel with paging chevrons, live thumbnails, holder and TTL countdown), **Emulators** (AVDs
   with running serials, a boot chip while booting, and start/stop), **Queue** (the wait list),

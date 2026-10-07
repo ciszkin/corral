@@ -1609,10 +1609,11 @@ class ApiTest {
         assertTrue(r.bodyAsText().contains("CORRAL_EMULATOR"))
     }
 
-    @Test fun listWithoutBinaryIsEmptyNotError() = withEmulatorApi(emptyList(), binary = false) { c ->
+    @Test fun listWithoutBinaryTeachesInsteadOfEmpty() = withEmulatorApi(emptyList(), binary = false) { c ->
+        // a missing binary is 502 + the CORRAL_EMULATOR teaching, never "[]" (the Windows smoke read that lie)
         val r = c.get("/api/emulators")
-        assertEquals(HttpStatusCode.OK, r.status)
-        assertEquals("[]", r.bodyAsText())
+        assertEquals(HttpStatusCode.BadGateway, r.status)
+        assertTrue(r.bodyAsText().contains("CORRAL_EMULATOR"), "body was: ${r.bodyAsText()}")
     }
 
     @Test fun startWithBrokenBinaryIs502NotUnknown() = withEmulatorApi(

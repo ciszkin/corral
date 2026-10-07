@@ -435,8 +435,12 @@ fun Application.corralModule(env: AppEnv) {
         get("/api/emulators") {
             val e = env.emulators ?: run {
                 call.respondText("corral: emulators not configured", status = HttpStatusCode.ServiceUnavailable); return@get }
+            val list = e.list() ?: run {
+                // a missing binary is not "no AVDs" — the Windows smoke read that lie twice
+                call.respondText("corral: emulator binary not found — set CORRAL_EMULATOR (or place it beside the SDK adb)",
+                    status = HttpStatusCode.BadGateway); return@get }
             val running = env.devices().filter { it.transport == "emulator" }
-            call.respond((e.list() ?: emptyList()).map { avd ->
+            call.respond(list.map { avd ->
                 val serials = running.filter { it.avd == avd }.map { it.serial }
                 AvdStatus(avd, serials, error = if (serials.isEmpty()) e.lastError(avd) else null)
             })

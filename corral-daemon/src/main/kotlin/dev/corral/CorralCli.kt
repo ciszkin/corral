@@ -57,11 +57,13 @@ object CorralCli {
     // Then the same detection order as install.sh: ANDROID_HOME, ANDROID_SDK_ROOT, default path.
     private fun findSdkAdb(corralAdb: String? = System.getenv("CORRAL_ADB")): String? {
         val fromCorral = corralAdb?.let(::shimPathOf)
+        // both spellings per source: extensionless on unix, adb.exe on Windows
+        fun sdkCandidates(root: String) = listOf("$root/platform-tools/adb", "$root/platform-tools/adb.exe")
         val candidates = buildList {
             fromCorral?.let { add(it) }
-            System.getenv("ANDROID_HOME")?.let { add("$it/platform-tools/adb") }
-            System.getenv("ANDROID_SDK_ROOT")?.let { add("$it/platform-tools/adb") }
-            add(System.getProperty("user.home") + "/Android/Sdk/platform-tools/adb")
+            System.getenv("ANDROID_HOME")?.let { addAll(sdkCandidates(it)) }
+            System.getenv("ANDROID_SDK_ROOT")?.let { addAll(sdkCandidates(it)) }
+            addAll(sdkCandidates(System.getProperty("user.home") + "/Android/Sdk"))
         }
         return candidates.firstOrNull { File(it).exists() } ?: candidates.firstOrNull()
     }

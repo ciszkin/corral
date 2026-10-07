@@ -23,6 +23,10 @@ dependencies {
     implementation(compose.components.resources)
     implementation(libs.koin.core)
     runtimeOnly(compose.desktop.currentOs)
+    // Bundle non-host Skiko natives: shadowJar otherwise carries only the build host's runtime
+    // (linux-x64), so the console dies on Windows with LibraryLoadException (skiko-windows-x64.dll).
+    runtimeOnly(libs.skiko.awt.runtime.windows.x64)
+    runtimeOnly(libs.skiko.awt.runtime.macos.arm64)
     testImplementation(kotlin("test"))
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.ktor.server.testhost)

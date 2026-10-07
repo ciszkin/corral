@@ -83,6 +83,18 @@ object CorralCli {
         runCatching { File(path).inputStream().use { it.readNBytes(512).decodeToString().contains("corral adb wrapper") } }
             .getOrDefault(false)
 
+    /**
+     * Prepend the configured adb's directory to the wrapped child's PATH, so a bare `adb` resolves
+     * even when the session that launched the CLI has no platform-tools on PATH (Windows smoke:
+     * `corral lease -- adb ...` died with CreateProcess error=2). PATH key casing varies on Windows.
+     */
+    private fun ProcessBuilder.withAdbOnPath() = apply {
+        val dir = findRealAdb()?.let { File(it).parent } ?: return@apply
+        val env = environment()
+        val key = env.keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
+        env[key] = env[key]?.takeIf { it.isNotBlank() }?.let { "$dir${File.pathSeparator}$it" } ?: dir
+    }
+
     private fun execRealAdb(argv: List<String>): Nothing {
         val adb = findRealAdb() ?: run {
             System.err.println("corral: real adb not found; set CORRAL_ADB or CORRAL_REAL_ADB"); exitProcess(127) }
@@ -409,7 +421,7 @@ object CorralCli {
                     val rc = try {
                         ProcessBuilder(cmd + gradleFlag).apply {
                             environment()["CORRAL_OWNER"] = owner
-                        }.inheritIO().start().waitFor()
+                        }.withAdbOnPath().inheritIO().start().waitFor()
                     } finally {
                         claimed.forEach { runCatching { release(it) } }
                     }
@@ -421,7 +433,7 @@ object CorralCli {
                         ProcessBuilder(cmd).apply {
                             environment()["ANDROID_SERIAL"] = serial
                             environment()["CORRAL_OWNER"] = owner
-                        }.inheritIO().start().waitFor()
+                        }.withAdbOnPath().inheritIO().start().waitFor()
                     } finally {
                         release(serial)
                     }

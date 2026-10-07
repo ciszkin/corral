@@ -8,6 +8,10 @@ sqlite = "3.50.3.0"
 shadow = "8.3.6"
 mcp = "0.10.0"
 koin = "4.2.2"
+# Exact Skiko version Compose 1.9.0 pulls (verified via :corral-ui:dependencies); the
+# non-host runtime natives must be declared explicitly or the shadowJar only bundles the
+# build host's (linux-x64), leaving the console unable to start on Windows/macOS.
+skiko = "0.9.22.2"
 
 [libraries]
 ktor-server-cio = { module = "io.ktor:ktor-server-cio", version.ref = "ktor" }
@@ -26,6 +30,9 @@ mcp-server = { module = "io.modelcontextprotocol:kotlin-sdk-server", version.ref
 mcp = { module = "io.modelcontextprotocol:kotlin-sdk", version.ref = "mcp" }
 mcp-testing = { module = "io.modelcontextprotocol:kotlin-sdk-testing", version.ref = "mcp" }
 compose-desktop = { module = "org.jetbrains.compose.desktop:desktop", version.ref = "compose" }
+skiko-awt-runtime-windows-x64 = { module = "org.jetbrains.skiko:skiko-awt-runtime-windows-x64", version.ref = "skiko" }
+# This artifact ships both libskiko-macos-arm64 and -x64 dylibs (0.9.22.2), so one entry covers both macs.
+skiko-awt-runtime-macos-arm64 = { module = "org.jetbrains.skiko:skiko-awt-runtime-macos-arm64", version.ref = "skiko" }
 koin-core = { module = "io.insert-koin:koin-core", version.ref = "koin" }
 
 [plugins]

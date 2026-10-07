@@ -294,6 +294,24 @@ check_6_19() {
   return 0
 }
 
+# --- windows-smoke item2: `corral lease` prepends the configured adb's directory to the child
+# PATH, so a bare `adb` resolves even when the launching session's PATH lacks platform-tools.
+# PATH is scrubbed (no $TMP/bin, no SDK dir) so only the prepend can resolve it. ---
+check_lease_adb_on_path() {
+  local adbdir javadir out
+  adbdir="$TMP/sdk/platform-tools"
+  javadir=$(dirname "$(command -v java)")
+  free_all
+  out=$(env PATH="$javadir:/usr/bin:/bin" \
+    CORRAL_ADB="$adbdir/adb.real" CORRAL_REAL_ADB="$adbdir/adb.real" \
+    CORRAL_URL="$CORRAL_URL" CORRAL_OWNER=tester CORRAL_JAR="$JAR" \
+    "$TMP/bin/corral" lease -- sh -c 'command -v adb' 2>&1)
+  free_all
+  [ "$out" = "$adbdir/adb" ] \
+    || { echo "# lease child PATH resolved '$out', expected $adbdir/adb"; return 1; }
+  return 0
+}
+
 # --- 11.1/11.2 + CLI: screenshot route. Strict by default: the lease holder (here the
 # declared CORRAL_OWNER=tester) reads a PNG; a stranger is denied; the CLI verb writes it. ---
 check_11_screenshot() {
@@ -654,6 +672,7 @@ else
   skip "1.14 poll-silence drop"
 fi
 check "6.19 SDK-dir-first PATH: ~/bin wrapper never intercepts" check_6_19
+check "lease child gets the configured adb dir on PATH (daemon-session PATH scrub)" check_lease_adb_on_path
 check "11.1/11.2 + CLI screenshot: holder reads PNG, stranger 403, CLI verb" check_11_screenshot
 check "11.9/11.10 ws events: hello frame, then state.changed on claim/free" check_11_events
 

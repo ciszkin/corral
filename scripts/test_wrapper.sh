@@ -310,6 +310,18 @@ check "corral owner prints a resolved identity" bash -c '
   [ "$o" = "demo-owner" ] || exit 1
   exit 0
 '
+# windows fourth-run: the Windows SDK lives under %LOCALAPPDATA%\Android\Sdk, which the old
+# detection never tried, so doctor could find no adb with the daemon down and no ANDROID_HOME.
+check "doctor finds the Windows SDK adb under LOCALAPPDATA" bash -c '
+  mkdir -p "$TMP/localappdata/Android/Sdk/platform-tools"
+  printf "#!/bin/sh\nexit 0\n" > "$TMP/localappdata/Android/Sdk/platform-tools/adb.exe"
+  chmod +x "$TMP/localappdata/Android/Sdk/platform-tools/adb.exe"
+  out=$(env -u ANDROID_HOME -u ANDROID_SDK_ROOT -u CORRAL_ADB \
+    LOCALAPPDATA="$TMP/localappdata" HOME="$TMP/empty-home" CORRAL_URL=http://127.0.0.1:9 corral doctor 2>&1)
+  echo "$out" | grep -q "skipped - unmanaged adb path ($TMP/localappdata/Android/Sdk/platform-tools/adb.exe)" \
+    || { echo "no localappdata adb in: $out" >&2; exit 1; }
+  exit 0
+'
 check "corral check fails when not all devices are leased" bash -c '
   if corral check >/dev/null 2>&1; then exit 1; fi
   exit 0

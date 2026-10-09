@@ -1346,6 +1346,35 @@ class ApiTest {
             .jsonArray.isEmpty())
     }
 
+    @Test fun emulatorsReconcileAnOfflineInstanceFromItsLog() {
+        val adbLog = createTempDirectory("emu").resolve("invocations")
+        withEmulatorApi(listOf(Device("emulator-5554", "offline")), adbLog = adbLog) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"), "INFO | console emulator-5554\n")
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                val list = Json.parseToJsonElement(c.get("/api/emulators").bodyAsText()).jsonArray.map { it.jsonObject }
+                val entry = list.first { it["avd"]!!.jsonPrimitive.content == "Pixel6AVD" }
+                assertEquals(listOf("emulator-5554"),
+                    entry["runningSerials"]!!.jsonArray.map { it.jsonPrimitive.content })
+
+                val start = c.post("/api/emulators/Pixel6AVD/start")
+                assertEquals(HttpStatusCode.OK, start.status, start.bodyAsText())
+                assertTrue(start.bodyAsText().contains("\"alreadyRunning\":true"), start.bodyAsText())
+
+                val stop = c.post("/api/emulators/Pixel6AVD/stop") {
+                    contentType(ContentType.Application.Json); setBody("{}") }
+                assertEquals(HttpStatusCode.OK, stop.status, stop.bodyAsText())
+                assertTrue(stop.bodyAsText().contains("\"stopped\":[\"emulator-5554\"]"), stop.bodyAsText())
+                assertEquals(listOf("-s emulator-5554 emu kill"), Files.readAllLines(adbLog))
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
     @Test fun startSpawnsUnknown404ListsAvds() = withEmulatorApi(emptyList()) { c ->
         val unknown = c.post("/api/emulators/Nope/start")
         assertEquals(HttpStatusCode.NotFound, unknown.status)

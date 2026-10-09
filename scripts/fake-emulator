@@ -6,7 +6,7 @@ case "$1" in
     case "$2" in
       FailAVD) sleep 1.5; echo "ERROR | $2: simulated late failure" >&2; exit 1 ;;
       CleanAVD) sleep 1.5; echo "INFO | $2: window closed"; exit 0 ;;
-      *) echo "$$" > "${FAKE_EMULATOR_STARTED:-/tmp/fake-emulator-started}"; exec sleep 300 ;;
+      *) echo "$$" > "${FAKE_EMULATOR_STARTED:-/tmp/fake-emulator-started}"; echo "emulator-5554"; exec sleep 300 ;;
     esac ;;
   *) exit 0 ;;
 esac

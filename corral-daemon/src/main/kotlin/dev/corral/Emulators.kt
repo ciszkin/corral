@@ -40,6 +40,9 @@ private val corralDir: Path get() = Path.of(System.getProperty("user.home"), ".c
 /** `~/.corral/emulator-<avd>.log`: the start log, shared by both launchers. */
 fun emulatorLogPath(avd: String): Path = corralDir.resolve("emulator-$avd.log")
 
+/** The `emulator-NNNN` console serials an emulator prints into its own start log. */
+private val emulatorSerialRegex = Regex("""\bemulator-\d+\b""")
+
 /** `<log>.exit`: the direct launcher's last-exit sidecar, beside the log. */
 fun emulatorExitPath(log: Path): Path = log.resolveSibling("${log.fileName}.exit")
 
@@ -369,6 +372,17 @@ class Emulators(
     /** Last non-blank line of [avd]'s start log (a late failure), or null when there is none. */
     fun logTail(avd: String): String? =
         runCatching { Files.readAllLines(emulatorLogPath(avd)).lastOrNull { it.isNotBlank() } }.getOrNull()
+
+    /**
+     * Serial(s) (`emulator-NNNN`) [avd]'s start log recorded, independent of adb. The monitor's
+     * `adb -s SERIAL emu avd name` enrichment fails on an offline/unbooted emulator, so its pool
+     * entry never gains an avd; this launcher-side mapping is what lets an orphaned instance be
+     * reconciled by serial. Empty when the log is absent or printed no serial.
+     */
+    fun logSerials(avd: String): List<String> =
+        runCatching { Files.readAllLines(emulatorLogPath(avd)) }.getOrDefault(emptyList())
+            .flatMap { line -> emulatorSerialRegex.findAll(line).map { it.value } }
+            .distinct()
 
     /** The last failure [avd] ended with, or null while running, after a clean exit, or with no status. */
     fun lastError(avd: String): String? =

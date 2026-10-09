@@ -110,6 +110,20 @@ class AppEnv(
 /** Any control char (C0 + DEL) smuggled into a value could inject lines or corrupt env/rules files. */
 private fun String.hasControlChars() = any { it < ' ' || it == '\u007F' }
 
+/**
+ * Serial(s) of [avd]'s live instances. The monitor tags a pool entry with its avd only after
+ * `adb -s SERIAL emu avd name` succeeds, which it never does for an offline/unbooted emulator, so
+ * the pool-derived match alone misses an orphaned instance. The launcher's start log names the
+ * serial(s) it spawned (no adb needed); keep the ones the pool actually lists — offline included —
+ * so an unenriched instance is reconciled without trusting a stale log for a departed AVD.
+ */
+private fun trackedEmulatorSerials(devices: List<Device>, emulators: Emulators, avd: String): List<String> {
+    val pool = devices.filter { it.transport == "emulator" }
+    val poolSerials = pool.mapTo(mutableSetOf()) { it.serial }
+    return (pool.filter { it.avd == avd }.map { it.serial } +
+        emulators.logSerials(avd).filter { it in poolSerials }).distinct()
+}
+
 /** systemd reads `EnvironmentFile` with `\`-continuations and quote handling; the daemon reads it verbatim. */
 private fun String.envUnsafe(): Boolean =
     endsWith("\\") || startsWith("\"") || endsWith("\"") || startsWith("'") || endsWith("'")
@@ -439,9 +453,9 @@ fun Application.corralModule(env: AppEnv) {
                 // a missing binary is not "no AVDs" — the Windows smoke read that lie twice
                 call.respondText("corral: emulator binary not found — set CORRAL_EMULATOR (or place it beside the SDK adb)",
                     status = HttpStatusCode.BadGateway); return@get }
-            val running = env.devices().filter { it.transport == "emulator" }
+            val running = env.devices()
             call.respond(list.map { avd ->
-                val serials = running.filter { it.avd == avd }.map { it.serial }
+                val serials = trackedEmulatorSerials(running, e, avd)
                 AvdStatus(avd, serials, error = if (serials.isEmpty()) e.lastError(avd) else null)
             })
         }
@@ -450,7 +464,7 @@ fun Application.corralModule(env: AppEnv) {
             val e = env.emulators ?: run {
                 call.respondText("corral: emulators not configured", status = HttpStatusCode.ServiceUnavailable); return@post }
             val avd = call.emulatorAvd()
-            val running = env.devices().filter { it.transport == "emulator" && it.avd == avd }
+            val running = trackedEmulatorSerials(env.devices(), e, avd)
             val avds = e.list()
             when {
                 running.isNotEmpty() || e.isRunning(avd) -> call.respond(Started(alreadyRunning = true))
@@ -472,19 +486,23 @@ fun Application.corralModule(env: AppEnv) {
                 call.respondText("corral: emulators not configured", status = HttpStatusCode.ServiceUnavailable); return@post }
             val avd = call.emulatorAvd()
             val force = call.receive<StopBody>().force
-            val serials = env.devices().filter { it.transport == "emulator" && it.avd == avd }.map { it.serial }
+            val serials = trackedEmulatorSerials(env.devices(), e, avd)
             val held = serials.firstNotNullOfOrNull { env.leases.snapshot[it]?.owner }
             if (held != null && !force) {
                 call.respondText("corral: $avd is leased by $held — free it first, or POST {\"force\":true}",
                     status = HttpStatusCode.Conflict); return@post
             }
-            try {
-                serials.forEach { e.stop(it); env.leases.free(it, owner = "", force = true) }
-            } catch (ex: EmulatorException) {
-                // end the unit/process even when emu kill failed (wedged console), so the AVD
-                // doesn't stay stuck as "already running" with no way to stop it
+            val failures = mutableListOf<String>()
+            serials.forEach { serial ->
+                runCatching { e.stop(serial) }
+                    .onSuccess { env.leases.free(serial, owner = "", force = true) }
+                    .onFailure { failures += (it.message ?: "emu kill failed for $serial") }
+            }
+            if (failures.isNotEmpty()) {
+                // an offline/unbooted serial can't be killed, but it is still tracked: end the
+                // unit/process so the AVD doesn't stay stuck "already running", and say why
                 e.stopAvd(avd)
-                call.respondText("corral: ${ex.message}", status = HttpStatusCode.BadGateway)
+                call.respondText("corral: ${failures.joinToString("; ")}", status = HttpStatusCode.BadGateway)
                 return@post
             }
             call.respond(Stopped(serials, e.stopAvd(avd)))

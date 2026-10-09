@@ -126,6 +126,28 @@ class EmulatorsTest {
         }
     }
 
+    @Test fun logSerialsReadsTheEmulatorConsoleSerial() {
+        val home = createTempDirectory("home")
+        val log = home.resolve(".corral/emulator-Pixel6AVD.log")
+        Files.createDirectories(log.parent)
+        Files.writeString(log, "INFO | Android emulator version 35.1.4\nemulator-5554: started\nemulator-5554: alive\n")
+        withUserHome(home) {
+            assertEquals(listOf("emulator-5554"), Emulators("adb", { null }).logSerials("Pixel6AVD"))
+        }
+    }
+
+    @Test fun logSerialsIsEmptyWithoutALogOrAMatchingSerial() {
+        val home = createTempDirectory("home")
+        val log = home.resolve(".corral/emulator-Pixel6AVD.log")
+        Files.createDirectories(log.parent)
+        Files.writeString(log, "INFO | nothing addressable here\n")
+        withUserHome(home) {
+            val emulators = Emulators("adb", { null })
+            assertTrue(emulators.logSerials("Pixel6AVD").isEmpty())
+            assertTrue(emulators.logSerials("NoLogAVD").isEmpty())
+        }
+    }
+
     @Test fun startThrowsWithTheLogTailWhenTheEmulatorDiesImmediately() {
         val dir = createTempDirectory("emu")
         val emu = scriptEmulator(dir, "echo 'x86_64 emulation requires hardware acceleration' >&2; exit 1")

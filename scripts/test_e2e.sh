@@ -634,6 +634,49 @@ check_emulator_error_status() {
   return $rc
 }
 
+# --- windows fourth-run: an emulator stuck `offline` in the pool never gets its avd tag (the
+# monitor's `adb -s SERIAL emu avd name` enrichment fails on an unbooted device), so every
+# avd-scoped lookup missed it. The serial the emulator prints into its own start log reconciles
+# it: GET shows it, a second start is alreadyRunning, and stop attempts the kill by serial. ---
+emulator_offline_reconcile() {
+  local i code entry
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/Pixel6AVD/start")
+  [ "$code" = 202 ] || { echo "# offline reconcile start: expected 202, got $code"; return 1; }
+  for i in $(seq 1 25); do [ -s "$FAKE_EMULATOR_STARTED" ] && break; sleep 0.2; done
+  [ -s "$FAKE_EMULATOR_STARTED" ] || { echo "# offline reconcile: fake emulator did not start"; return 1; }
+
+  # the pool lists the serial but never enriches it with an avd (stuck offline)
+  printf 'emulator-5554 offline\n' >> "$TMP/fake-devices"
+  for i in $(seq 1 25); do
+    curl -s "$CORRAL_URL/api/devices" | grep -q 'emulator-5554' && break; sleep 0.2
+  done
+  curl -s "$CORRAL_URL/api/devices" | grep -q 'emulator-5554' \
+    || { echo "# offline reconcile: emulator never appeared in the pool"; return 1; }
+
+  entry=$(curl -s "$CORRAL_URL/api/emulators" | grep -o '{[^{}]*"avd":"Pixel6AVD"[^{}]*}')
+  printf '%s' "$entry" | grep -q '"runningSerials":\["emulator-5554"\]' \
+    || { echo "# offline reconcile GET: $entry"; return 1; }
+
+  code=$(curl -s -o "$TMP/reconcile-start.json" -w '%{http_code}' -X POST "$CORRAL_URL/api/emulators/Pixel6AVD/start")
+  [ "$code" = 200 ] || { echo "# offline reconcile restart: expected 200, got $code"; return 1; }
+  grep -q '"alreadyRunning":true' "$TMP/reconcile-start.json" \
+    || { echo "# offline reconcile restart body: $(cat "$TMP/reconcile-start.json")"; return 1; }
+
+  code=$(curl -s -o "$TMP/reconcile-stop.json" -w '%{http_code}' \
+    -X POST "$CORRAL_URL/api/emulators/Pixel6AVD/stop" -H 'Content-Type: application/json' -d '{"force":false}')
+  [ "$code" = 200 ] || { echo "# offline reconcile stop: expected 200, got $code"; return 1; }
+  grep -q 'emulator-5554' "$TMP/reconcile-stop.json" \
+    || { echo "# offline reconcile stop body: $(cat "$TMP/reconcile-stop.json")"; return 1; }
+  return 0
+}
+
+check_emulator_offline_reconcile() {
+  local rc=1
+  if emulator_offline_reconcile; then rc=0; fi
+  emulator_cleanup
+  return $rc
+}
+
 # --- M7 Plan A: a PUT port change lands in daemon.env and survives a restart whose inherited
 # CORRAL_PORT differs — the file wins over the environment. This is the final check: it leaves
 # the daemon running on PORT+1 for the EXIT trap (nothing after it, so no port collision). ---
@@ -681,6 +724,7 @@ check "stop of an unlisted running emulator reports the pid it terminated" check
 check "concurrent starts spawn one instance, the rest alreadyRunning" check_emulator_concurrent_starts
 check "a clean stop leaves no error in GET /api/emulators" check_emulator_clean_stop
 check "a non-zero exit surfaces its error; a clean self-exit shows none; restart clears it" check_emulator_error_status
+check "an offline orphan is reconciled from its log for get/start/stop" check_emulator_offline_reconcile
 check "a direct-launched emulator dies with its daemon (shutdown hook)" check_emulator_shutdown_hook
 
 # --- M7 Plan A: config/doctor API. Run last: the round-trip row writes CORRAL_SCREENSHOTS=open

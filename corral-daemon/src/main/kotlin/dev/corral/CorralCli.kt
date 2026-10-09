@@ -63,6 +63,9 @@ object CorralCli {
             fromCorral?.let { add(it) }
             System.getenv("ANDROID_HOME")?.let { addAll(sdkCandidates(it)) }
             System.getenv("ANDROID_SDK_ROOT")?.let { addAll(sdkCandidates(it)) }
+            // Windows installs the SDK under %LOCALAPPDATA%\Android\Sdk, not the user-home
+            // default; the candidate simply does not exist on Linux, so behaviour is unchanged.
+            System.getenv("LOCALAPPDATA")?.let { addAll(sdkCandidates("$it/Android/Sdk")) }
             addAll(sdkCandidates(System.getProperty("user.home") + "/Android/Sdk"))
         }
         return candidates.firstOrNull { File(it).exists() } ?: candidates.firstOrNull()

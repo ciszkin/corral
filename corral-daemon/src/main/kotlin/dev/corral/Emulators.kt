@@ -317,8 +317,11 @@ class Emulators(
     private val adbPath: String,
     private val emulatorPath: () -> String?,
     private val launcher: EmulatorLauncher = launcherFor(),
+    private val now: () -> Long = { System.currentTimeMillis() },
 ) {
     private val locks = ConcurrentHashMap<String, Any>()
+    /** AVD -> when this daemon spawned it; only a daemon-launched AVD can be reported wedged. */
+    private val launchedAt = ConcurrentHashMap<String, Long>()
 
     /**
      * AVD names from `emulator -list-avds`. Null when the binary is absent or the command
@@ -347,6 +350,7 @@ class Emulators(
             launcher.clearExit(avd)
             try {
                 launcher.start(bin, avd, log)
+                launchedAt[avd] = now()
             } catch (e: EmulatorAlreadyRunning) {
                 return false
             }
@@ -359,6 +363,7 @@ class Emulators(
 
     /** Ends the spawn/unit for [avd] directly, for one adb has not listed (no serial to kill). */
     fun stopAvd(avd: String): String? {
+        launchedAt.remove(avd)
         val terminated = launcher.stop(avd)
         val log = emulatorLogPath(avd)
         runCatching {
@@ -383,6 +388,16 @@ class Emulators(
         runCatching { Files.readAllLines(emulatorLogPath(avd)) }.getOrDefault(emptyList())
             .flatMap { line -> emulatorSerialRegex.findAll(line).map { it.value } }
             .distinct()
+
+    /**
+     * AVDs *this daemon* launched that are still alive ([isRunning]) and past the boot deadline —
+     * the same [MAX_WAIT_S] a queued `--type emulator` claimant already waits for the boot flip —
+     * mapped to seconds alive. Whether the wedge is *confirmed* (the serial never reached
+     * `device`+`booted`) is the pool's call; see `wedgedAvds` in Api.kt.
+     */
+    fun launchedPastBootDeadline(): Map<String, Long> = launchedAt
+        .filter { (avd, at) -> isRunning(avd) && now() - at >= MAX_WAIT_S * 1000 }
+        .mapValues { (_, at) -> (now() - at) / 1000 }
 
     /** The last failure [avd] ended with, or null while running, after a clean exit, or with no status. */
     fun lastError(avd: String): String? =

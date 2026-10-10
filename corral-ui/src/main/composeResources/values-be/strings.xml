@@ -28,6 +28,7 @@
     <string name="device_offline">не ў сетцы</string>
     <string name="device_unauthorized">неаўтарызаваная</string>
     <string name="device_booting">запускаецца</string>
+    <string name="device_wedged">завісла — %1$s</string>
 
     <string name="action_live_view">Жывы прагляд</string>
     <string name="action_force_free">Вызваліць прымусова</string>

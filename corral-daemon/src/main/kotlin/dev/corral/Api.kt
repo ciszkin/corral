@@ -124,6 +124,32 @@ private fun trackedEmulatorSerials(devices: List<Device>, emulators: Emulators, 
         emulators.logSerials(avd).filter { it in poolSerials }).distinct()
 }
 
+/** A wedged AVD: the pool serials it owns, and the reason a human needs to act. */
+private class WedgeReason(val serials: List<String>, val reason: String)
+
+/**
+ * AVDs this daemon launched that are still alive and past the boot deadline, yet never reached
+ * `state=device`+`booted` — a wedged emulator (the Windows smoke's `offline`/`booted:false`
+ * forever, qemu burning CPU, adb never listing it online). Alive + past the deadline is the whole
+ * signal: no CPU time is measured. An emulator that recovers (now `device`+`booted`) drops out.
+ */
+private fun wedgedAvds(devices: List<Device>, emulators: Emulators?): Map<String, WedgeReason> {
+    val e = emulators ?: return emptyMap()
+    return e.launchedPastBootDeadline().mapNotNull { (avd, aliveSeconds) ->
+        val serials = trackedEmulatorSerials(devices, e, avd)
+        if (serials.any { s -> devices.firstOrNull { it.serial == s }?.usable() == true }) return@mapNotNull null
+        avd to WedgeReason(serials,
+            "$avd has been running ${aliveSeconds}s without registering with adb — run: corral avd stop $avd")
+    }.toMap()
+}
+
+/** The pool with each wedged emulator's serial flagged and the reason attached; identity is unchanged. */
+private fun flagWedged(devices: List<Device>, wedged: Map<String, WedgeReason>): List<Device> {
+    if (wedged.isEmpty()) return devices
+    val bySerial = wedged.values.flatMap { w -> w.serials.map { it to w.reason } }.toMap()
+    return devices.map { d -> bySerial[d.serial]?.let { d.copy(wedged = true, wedgeReason = it) } ?: d }
+}
+
 /** systemd reads `EnvironmentFile` with `\`-continuations and quote handling; the daemon reads it verbatim. */
 private fun String.envUnsafe(): Boolean =
     endsWith("\\") || startsWith("\"") || endsWith("\"") || startsWith("'") || endsWith("'")
@@ -208,7 +234,7 @@ fun Application.corralModule(env: AppEnv) {
             try { for (frame in incoming) { /* client frames are ignored; tolerance is part of the contract */ } }
             finally { pump.cancel() }
         }
-        get("/api/devices") { call.respond(env.devices()) }
+        get("/api/devices") { call.respond(flagWedged(env.devices(), wedgedAvds(env.devices(), env.emulators))) }
         get("/api/status") {
             call.respond(StatusResponse(
                 devices = env.devices().map { d -> DeviceStatus(d.serial, env.leases.snapshot[d.serial], d.booted) },
@@ -233,10 +259,15 @@ fun Application.corralModule(env: AppEnv) {
                 reasons.isNotEmpty() -> DoctorLayer("rules", "warn", "$rulesPath ${reasons.joinToString("; ")}")
                 else -> DoctorLayer("rules", "ok", "$rulesPath (${rules.readonly.size} readonly)")
             }
-            call.respond(DoctorResponse(adbPath, listOf(
+            val wedged = wedgedAvds(env.devices(), env.emulators)
+            call.respond(DoctorResponse(adbPath, listOfNotNull(
                 DoctorLayer("daemon", "ok", "serving ${env.devices().size} device(s)"),
                 DoctorLayer("sdk-shim", shimStatus, shimDetail),
-                rulesLayer)))
+                rulesLayer,
+                wedged.takeIf { it.isNotEmpty() }?.let { w ->
+                    DoctorLayer("emulators", "fail",
+                        w.entries.joinToString("; ") { (avd, r) -> r.reason })
+                })))
         }
         get("/api/check") {
             val r = env.leases.check(call.parameters["serial"] ?: "", call.parameters["owner"] ?: "")

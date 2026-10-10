@@ -116,8 +116,9 @@ class ApiTest {
 
     private class RecordingLauncher : EmulatorLauncher {
         val stopped = mutableListOf<String>()
+        var running = false
         override fun start(bin: String, avd: String, log: Path) {}
-        override fun isRunning(avd: String): Boolean = false
+        override fun isRunning(avd: String): Boolean = running
         override fun stop(avd: String): String? { stopped += avd; return "unit ${systemdUnitName(avd)}" }
         override fun lastExit(avd: String): Int? = null
     }
@@ -137,6 +138,7 @@ class ApiTest {
         listExit: Int = 0,
         avdScript: String = "exec sleep 2",
         launcher: EmulatorLauncher = DefaultLauncher(),
+        now: () -> Long = { System.currentTimeMillis() },
         block: suspend CoroutineScope.(HttpClient) -> Unit,
     ) = testApplication {
         val dir = createTempDirectory("emu")
@@ -146,7 +148,7 @@ class ApiTest {
                 (adbLog?.let { log -> "echo \"${'$'}*\" >> '$log'\n" } ?: "") + "exit 0\n")
             it.toFile().setExecutable(true)
         }
-        val emulators = Emulators(adb.toString(), { emu?.toString() }, launcher)
+        val emulators = Emulators(adb.toString(), { emu?.toString() }, launcher, now)
         application {
             corralModule(AppEnv({ devices }, LeaseManager({ devices }, db = null), emulators = emulators))
         }
@@ -1618,6 +1620,60 @@ class ApiTest {
             System.setProperty("user.home", home.toString())
             try {
                 assertFalse(c.get("/api/emulators").bodyAsText().contains("\"error\""))
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    /** The emulator entry of a `/api/devices` body. */
+    private fun wedgeOf(body: String) =
+        Json.parseToJsonElement(body).jsonArray.map { it.jsonObject }
+            .firstOrNull { it["serial"]!!.jsonPrimitive.content.startsWith("emulator-") }
+
+    /**
+     * The Windows smoke's H2: the daemon launched the AVD, the process is alive, and the serial
+     * never reached device+booted past the boot deadline. Three cases over one virtual clock —
+     * wedged, still inside the deadline, and recovered.
+     */
+    @Test fun wedgedEmulatorIsFlaggedOnlyPastTheBootDeadlineAndUnflaggedOnceItBoots() {
+        var t = 1_000_000L
+        val launcher = RecordingLauncher()
+        val pool = mutableListOf<Device>()
+        withEmulatorApi(pool, launcher = launcher, now = { t }) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                // the daemon launches it; adb then lists the console serial, offline, forever
+                val started = c.post("/api/emulators/Pixel6AVD/start")
+                assertEquals(HttpStatusCode.Accepted, started.status, started.bodyAsText())
+                launcher.running = true
+                Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"), "INFO | console emulator-5554\n")
+                pool.add(Device("emulator-5554", "offline"))
+
+                // inside the deadline: booting is still the honest reading
+                t += MAX_WAIT_S * 1000 - 1
+                assertFalse(wedgeOf(c.get("/api/devices").bodyAsText())?.get("wedged")?.jsonPrimitive?.boolean
+                    ?: false, "flagged inside the boot deadline")
+
+                // past the deadline, alive, never listed as device+booted -> wedged
+                t += 1
+                val wedged = wedgeOf(c.get("/api/devices").bodyAsText())!!
+                assertEquals(true, wedged["wedged"]!!.jsonPrimitive.boolean)
+                assertTrue(wedged["wedgeReason"]!!.jsonPrimitive.content.contains("corral avd stop Pixel6AVD"),
+                    wedged.toString())
+                val doctor = Json.decodeFromString<DoctorResponse>(c.get("/api/doctor").bodyAsText())
+                val layer = doctor.layers.single { it.layer == "emulators" }
+                assertEquals("fail", layer.status)
+                assertTrue(layer.detail.contains("corral avd stop Pixel6AVD"), layer.detail)
+
+                // recovered: now device+booted -> the flag and the doctor entry are gone
+                pool.clear(); pool.add(Device("emulator-5554", "device", booted = true))
+                assertEquals(false, c.get("/api/devices").bodyAsText().contains("\"wedged\":true"))
+                assertFalse(Json.decodeFromString<DoctorResponse>(c.get("/api/doctor").bodyAsText())
+                    .layers.any { it.layer == "emulators" })
             } finally {
                 System.setProperty("user.home", previous)
             }

@@ -52,6 +52,7 @@ import dev.corral.ui.resources.device_offline
 import dev.corral.ui.resources.device_unauthorized
 import dev.corral.ui.resources.device_usable
 import dev.corral.ui.resources.device_waiting_accept
+import dev.corral.ui.resources.device_wedged
 import dev.corral.ui.resources.scrcpy_died
 import dev.corral.ui.resources.scrcpy_missing
 import dev.corral.ui.resources.thumbnail_denied
@@ -122,7 +123,7 @@ fun DeviceCard(
             )
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            StateChip(view.d.state, view.booting)
+            StateChip(view.d.state, view.booting, view.d.wedged, view.d.wedgeReason)
             if (!view.booting && (view.usable || view.lease != null)) {
                 Spacer(Modifier.width(Dimens.space8))
                 Box(Modifier.weight(1f)) { HolderRow(view.lease) }
@@ -239,9 +240,12 @@ private fun TransportIcon(transport: String) {
 }
 
 @Composable
-private fun StateChip(state: String, booting: Boolean) {
+private fun StateChip(state: String, booting: Boolean, wedged: Boolean = false, wedgeReason: String? = null) {
     val colors = LocalExtendedColors.current
     when {
+        // a wedged emulator is stuck, not booting — say so instead of a bare "offline"
+        wedged -> CorralPill(stringResource(Res.string.device_wedged, wedgeReason.orEmpty()), colors.errorContainer,
+            colors.onErrorContainer, icon = Icons.AlertTriangle)
         booting -> CorralPill(stringResource(Res.string.device_booting), colors.warningContainer,
             colors.onWarningContainer, icon = Icons.Loader)
         state == "offline" -> CorralPill(stringResource(Res.string.device_offline), colors.mutedContainer,

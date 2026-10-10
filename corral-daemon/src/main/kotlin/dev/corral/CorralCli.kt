@@ -301,13 +301,17 @@ object CorralCli {
             }
             "doctor" -> {
                 var problems = 0
-                val devices = try {
+                val pool: List<Device>? = try {
                     val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/devices")).GET().build(),
                         HttpResponse.BodyHandlers.ofString())
-                    if (r.statusCode() == 200) Json.parseToJsonElement(r.body()).jsonArray.size else -1
-                } catch (_: Exception) { -1 }
-                if (devices >= 0) println("daemon: ok ($url, $devices device(s))")
+                    if (r.statusCode() == 200) Json.decodeFromString(r.body()) else null
+                } catch (_: Exception) { null }
+                if (pool != null) println("daemon: ok ($url, ${pool.size} device(s))")
                 else { println("daemon: FAIL - unreachable at $url (is it running? systemctl --user status corral)"); problems++ }
+                // a wedged emulator is stuck, not booting: name it and its remedy (Windows smoke H2)
+                pool.orEmpty().filter { it.wedged }.forEach {
+                    println("emulators: FAIL - ${it.wedgeReason}"); problems++
+                }
 
                 // prefer the daemon's own configured adb (its unit env may differ from this shell's);
                 // the unit points CORRAL_ADB at the real binary (adb.real), shimPathOf maps it to the

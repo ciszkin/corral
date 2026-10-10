@@ -28,6 +28,7 @@
     <string name="device_offline">offline</string>
     <string name="device_unauthorized">unauthorized</string>
     <string name="device_booting">booting</string>
+    <string name="device_wedged">wedged — %1$s</string>
 
     <string name="action_live_view">Live view</string>
     <string name="action_force_free">Force free</string>

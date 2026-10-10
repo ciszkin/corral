@@ -7,7 +7,11 @@ data class Device(val serial: String, val state: String,
                   val transport: String = transportOf(serial),
                   val model: String? = null, val osVersion: String? = null,
                   val avd: String? = null,
-                  val booted: Boolean = transport != "emulator") {
+                  val booted: Boolean = transport != "emulator",
+                  /** This emulator's AVD is alive but has never registered with adb past the boot
+                   *  deadline. Visibility only — [usable] still refuses it. */
+                  val wedged: Boolean = false,
+                  val wedgeReason: String? = null) {
     companion object {
         fun transportOf(serial: String) = when {
             serial.startsWith("emulator-") -> "emulator"

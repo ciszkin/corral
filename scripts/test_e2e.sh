@@ -357,6 +357,14 @@ emulator_cleanup() {
     grep -v 'emulator-5554' "$TMP/fake-devices" > "$TMP/fake-devices.tmp"
     mv "$TMP/fake-devices.tmp" "$TMP/fake-devices"
   fi
+  # the monitor re-reads fake-devices on its 2s poll, so the daemon's pool can still list
+  # emulator-5554 right after the line is gone; the log-serial reconciliation (win-fixes-2)
+  # would then match it to the next AVD started and answer stopped:["emulator-5554"]
+  local i
+  for i in $(seq 1 25); do
+    curl -s "$CORRAL_URL/api/devices" | grep -q 'emulator-5554' || break
+    sleep 0.2
+  done
   if [ -s "$FAKE_EMULATOR_STARTED" ]; then
     local ep; ep=$(cat "$FAKE_EMULATOR_STARTED")
     pkill -9 -P "$ep" 2>/dev/null          # the fake emulator's foreground `sleep`

@@ -77,7 +77,8 @@ class EmulatorsTest {
     }
 
     private fun pidFrom(file: Path): Long {
-        assertTrue(waitUntil(2_000) { Files.exists(file) }, "fake emulator never recorded its pid")
+        assertTrue(waitUntil(2_000) { Files.exists(file) && Files.readString(file).trim().toLongOrNull() != null },
+            "fake emulator never recorded its pid")
         return Files.readString(file).trim().toLong()
     }
 

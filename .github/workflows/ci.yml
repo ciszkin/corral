@@ -25,6 +25,20 @@ jobs:
       - name: Run module tests
         run: ./gradlew :corral-common:test :corral-daemon:test :corral-ui:test
 
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: |
+            corral-common/build/reports/tests/test/
+            corral-daemon/build/reports/tests/test/
+            corral-ui/build/reports/tests/test/
+            corral-common/build/test-results/test/
+            corral-daemon/build/test-results/test/
+            corral-ui/build/test-results/test/
+          retention-days: 7
+
       - name: Run wrapper integration suite
         run: bash scripts/test_wrapper.sh
 

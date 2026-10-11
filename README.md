@@ -13,6 +13,10 @@ the same device.
   (empty = any usable device). A request with `waitSeconds > 0` gets a **ticket** and the
   client polls it; a matching device is offered to the longest-waiting ticket in arrival
   order. `corral wait` is the polling client and `corral queue` lists outstanding tickets.
+  A served `corral wait` returns its lease when the wait process exits — a hard kill is still
+  covered by the usual TTL/pid machinery; use `corral claim` when the device must stay held past
+  the calling process's lifetime, since a claim's TTL is the hold and its owner string is the
+  identity. `corral free` drops an owned lease and `corral status` names the current holders.
   An offer that is not polled within a short hold is dropped, and the device moves on. A queued
   ticket must keep being polled — one that goes quiet is dropped after ~30 s — and every freed,
   expired or reclaimed device goes to the longest-waiting ticket that is still polling. A ticket

@@ -24,6 +24,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.system.exitProcess
 
 /** Percent-encodes a path segment; spaces must be `%20`, not the form-encoding `+`. */
@@ -456,9 +457,15 @@ object CorralCli {
                 val ticket = send("POST", "/api/leases",
                     Json.encodeToString(ClaimRequest(selector = sel, owner = owner,
                         pid = pid, ttlSeconds = 1800, waitSeconds = waitSeconds))).str("ticket")
+                // A served lease outlives this process only as long as the process does: hand it back on
+                // exit (normal or signal-driven; a SIGKILL leaves the TTL/pid-prune machinery in charge).
+                // The owner check makes this a no-op on anyone else's lease.
+                val served = AtomicReference<String?>(null)
                 Runtime.getRuntime().addShutdownHook(Thread {
                     runCatching {
-                        http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/tickets/$ticket"))
+                        val s = served.get()
+                        if (s != null) release(s)
+                        else http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/tickets/$ticket"))
                             .timeout(Duration.ofSeconds(2))
                             .method("DELETE", HttpRequest.BodyPublishers.ofString(
                                 Json.encodeToString(TicketCancelRequest(owner = owner))))
@@ -470,7 +477,7 @@ object CorralCli {
                     val r = trySend("POST", "/api/leases/tickets/$ticket/poll",
                         Json.encodeToString(TicketPollRequest(owner = owner, pid = holderPid())))
                     when (r.statusCode()) {
-                        200 -> { println(r.body().str("serial")); return }
+                        200 -> { val serial = r.body().str("serial"); served.set(serial); println(serial); return }
                         202 -> Thread.sleep(runCatching { r.body().str("retryAfterMs").toLong() }.getOrDefault(1000L))
                         else -> waitTimedOut(sel, waitSeconds)
                     }

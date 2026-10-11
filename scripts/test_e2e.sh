@@ -215,6 +215,30 @@ check_5_20() {
   queue_empty                                  # honest: the ticket must be cancelled either way
 }
 
+# --- windows-smoke F1: a served `corral wait` hands its lease back on exit ---
+check_f1_handback() {
+  claim_two || return 1
+  CORRAL_OWNER=handback corral wait --serial dev1 --timeout 30 >"$TMP/handback.out" 2>&1 &
+  local wp=$! i served=0
+  # serve the waiter by freeing dev1; bounded wait for the serial on stdout
+  for i in $(seq 1 50); do
+    if [ -s "$TMP/handback.out" ]; then served=1; break; fi
+    corral free dev1 >/dev/null 2>&1
+    sleep 0.1
+  done
+  [ "$served" = 1 ] || { kill -9 "$wp" 2>/dev/null; wait "$wp" 2>/dev/null; free_all; return 1; }
+  wait "$wp"; local rc=$?
+  [ "$rc" = 0 ] || { free_all; return 1; }
+  # the waiter is gone; without any `corral free`, dev1 must return to the pool within a few seconds
+  local freed=0
+  for i in $(seq 1 50); do
+    if ! curl -sf "$CORRAL_URL/api/status" | grep -q '"serial":"dev1","lease":{'; then freed=1; break; fi
+    sleep 0.1
+  done
+  free_all
+  [ "$freed" = 1 ]
+}
+
 # --- 5.8: a SIGKILLed `corral wait` is pruned by pid at dispatch; next served < 3s ---
 check_5_8() {
   claim_two || return 1
@@ -716,6 +740,7 @@ start_daemon "$TMP/daemon-main.log" || exit 1
 check "1.6 restart with tickets queued: waiter errors promptly, never hangs" check_1_6
 check "5.20 SIGINT cancels the waiter ticket immediately" check_5_20
 check "5.8 SIGKILLed corral wait: next waiter served < 3s (pid prune)" check_5_8
+check "F1 served corral wait hands its lease back on exit" check_f1_handback
 check "5.9/5.11 quiet REST/MCP waiter skipped within staleness window, not offer hold" check_5_9
 if [ "${SLOW:-0}" = 1 ]; then
   check "1.14 poll-silence drop leaves corral queue within POLL_SILENCE_S + slack" check_1_14

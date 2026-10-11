@@ -357,7 +357,8 @@ class EmulatorsTest {
         val launcher = DefaultLauncher()
         runCatching { launcher.start(emu.toString(), "Pixel6AVD", log) }
         val sidecar = emulatorExitPath(log)
-        assertTrue(waitUntil(2_000) { Files.exists(sidecar) }, "no exit sidecar written")
+        assertTrue(waitUntil(2_000) { Files.exists(sidecar) && Files.readString(sidecar).trim().isNotEmpty() },
+            "no exit sidecar written")
         assertEquals("0", Files.readString(sidecar).trim())
     }
 

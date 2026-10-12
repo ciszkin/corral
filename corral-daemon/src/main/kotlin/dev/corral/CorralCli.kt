@@ -34,6 +34,19 @@ internal fun pathSegment(s: String): String =
 /** Decodes a `/api/devices` body leniently, so an older CLI tolerates fields a newer daemon adds. */
 internal fun decodeDeviceList(body: String): List<Device> = corralJson.decodeFromString(body)
 
+/** Decodes a `/api/doctor` body leniently, so an older CLI tolerates fields a newer daemon adds. */
+internal fun decodeDoctorResponse(body: String): DoctorResponse = corralJson.decodeFromString(body)
+
+/**
+ * The CLI's emulators problems, taken from the daemon's own doctor layer — never re-derived from the
+ * pool. A wedge before adb ever lists the AVD has no pool serial to flag, so the pool-only reading
+ * printed nothing while /api/doctor failed; one source of truth keeps the two surfaces agreeing.
+ */
+internal fun emulatorProblems(doctor: DoctorResponse?): List<String> =
+    doctor?.layers.orEmpty()
+        .filter { it.layer == "emulators" && it.status == "fail" }
+        .map { it.detail }
+
 /**
  * corral CLI — all logic in the jar (portable), launched by 3-line shims.
  * claim: JVM exits right after printing -> no pid recorded -> TTL-bound lease (MVP `adb-lease claim` semantics).
@@ -312,9 +325,12 @@ object CorralCli {
                 } catch (_: Exception) { null }
                 if (pool != null) println("daemon: ok ($url, ${pool.size} device(s))")
                 else { println("daemon: FAIL - unreachable at $url (is it running? systemctl --user status corral)"); problems++ }
-                // a wedged emulator is stuck, not booting: name it and its remedy (Windows smoke H2)
-                pool.orEmpty().filter { it.wedged }.forEach {
-                    println("emulators: FAIL - ${it.wedgeReason}"); problems++
+                // a wedged emulator is stuck, not booting: name it and its remedy (Windows smoke H2).
+                // Read the daemon's own doctor layer, not the pool: a wedge before adb lists the AVD
+                // has no pool serial to flag, so /api/doctor is the only place that knows about it.
+                val doctor = runCatching { decodeDoctorResponse(get("/api/doctor")) }.getOrNull()
+                emulatorProblems(doctor).forEach {
+                    println("emulators: FAIL - $it"); problems++
                 }
 
                 // prefer the daemon's own configured adb (its unit env may differ from this shell's);

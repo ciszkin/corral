@@ -1709,6 +1709,63 @@ class ApiTest {
         }
     }
 
+    /**
+     * THE GAP: the daemon launched the AVD and it wedged before adb ever listed a serial, so the
+     * pool stays empty and no device can carry the wedge flag. The pool-derived CLI path printed
+     * nothing while /api/doctor failed; the CLI's derivation now reads the daemon's own layer.
+     */
+    @Test fun cliDoctorDerivationSurfacesAWedgeWithNoPoolSerial() {
+        var t = 1_000_000L
+        val launcher = RecordingLauncher()
+        withEmulatorApi(emptyList(), launcher = launcher, now = { t }) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                assertEquals(HttpStatusCode.Accepted, c.post("/api/emulators/Pixel6AVD/start").status)
+                launcher.running = true
+                t += MAX_WAIT_S * 1000   // alive past the deadline, never registered -> wedged
+
+                // the pool cannot know: no serial was ever listed
+                assertFalse(c.get("/api/devices").bodyAsText().contains("\"wedged\":true"))
+                val lines = emulatorProblems(decodeDoctorResponse(c.get("/api/doctor").bodyAsText()))
+                assertEquals(1, lines.size)
+                assertTrue(lines.single().contains("Pixel6AVD"), lines.toString())
+                assertTrue(lines.single().contains("without registering"), lines.toString())
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    /** A wedge that DOES own a pool serial is still exactly one problem line — no pool/doctor duplicate. */
+    @Test fun cliDoctorDerivationReportsAPooledWedgeExactlyOnce() {
+        var t = 1_000_000L
+        val launcher = RecordingLauncher()
+        val pool = mutableListOf<Device>()
+        withEmulatorApi(pool, launcher = launcher, now = { t }) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                assertEquals(HttpStatusCode.Accepted, c.post("/api/emulators/Pixel6AVD/start").status)
+                launcher.running = true
+                Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"), "INFO | console emulator-5554\n")
+                pool.add(Device("emulator-5554", "offline"))
+                t += MAX_WAIT_S * 1000
+
+                assertTrue(c.get("/api/devices").bodyAsText().contains("\"wedged\":true"))
+                val lines = emulatorProblems(decodeDoctorResponse(c.get("/api/doctor").bodyAsText()))
+                assertEquals(1, lines.size)
+                assertTrue(lines.single().contains("Pixel6AVD"), lines.toString())
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
     @Test fun stopNotRunningIsNoOp() = withEmulatorApi(emptyList()) { c ->
         val r = c.post("/api/emulators/SmallAVD/stop") {
             contentType(ContentType.Application.Json); setBody("{}") }

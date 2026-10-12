@@ -47,6 +47,78 @@ internal fun emulatorProblems(doctor: DoctorResponse?): List<String> =
         .filter { it.layer == "emulators" && it.status == "fail" }
         .map { it.detail }
 
+/** True on Windows, where a `.bat`/`.cmd` shim is not a PE image and needs `cmd.exe /c`. */
+internal val isWindows: Boolean = System.getProperty("os.name").startsWith("Windows")
+
+/**
+ * Search PATH the way Windows does not: Java's CreateProcess never applies PATHEXT, so a bare
+ * `adb` whose real file is `adb.bat` is simply "not found". Returns the first existing candidate
+ * (direct name, then each PATHEXT suffix), or the program unchanged when it already has a path.
+ */
+internal fun resolvePathProgram(program: String, env: Map<String, String> = System.getenv()): String? {
+    if (program.isEmpty() || program.contains('/') || program.contains('\\')) return program
+    val exts = (env["PATHEXT"] ?: ".COM;.EXE;.BAT;.CMD").split(';').filter { it.isNotBlank() }
+    val dirs = (env["PATH"] ?: return null).split(File.pathSeparator).filter { it.isNotBlank() }
+    for (dir in dirs) {
+        val base = dir.trim('"')
+        val direct = File(base, program)
+        if (direct.isFile) return direct.path
+        for (ext in exts) {
+            val f = File(base, program + ext.lowercase())
+            if (f.isFile) return f.path
+        }
+    }
+    return null
+}
+
+/**
+ * The argv to hand to ProcessBuilder. Windows cannot CreateProcess a `.bat`/`.cmd` (no shebang,
+ * no PE header), so a program that resolves to one is launched via `cmd.exe /c`.
+ *
+ * `cmd.exe /c` takes ONE command string, not an argv. Each argument containing whitespace (or an
+ * empty one) is wrapped in its own quotes, so a batch shim's `%1` is the whole argument, not its
+ * first word; the quoted program plus those args are then wrapped in one outer pair. cmd strips
+ * exactly that outer pair (its /c rule 2), leaving `"<program>" <arg...>` — the program stays one
+ * token, space-bearing arguments keep their boundaries, and space-free args stay unquoted. Java
+ * leaves a start-and-end-quoted element untouched, so our quoting reaches cmd intact.
+ *
+ * Ceiling: arguments are otherwise passed through verbatim. Embedded double quotes inside an
+ * argument and cmd percent-expansion (`%VAR%`) inside the .bat are NOT handled — cmd may mis-split
+ * or expand them. cmd metacharacters are also not re-escaped (same-user interpretation, reviewed).
+ * Linux and directly-executable targets are returned untouched, so behaviour there is unchanged.
+ */
+internal fun commandArgv(
+    argv: List<String>,
+    windows: Boolean = isWindows,
+    resolve: (String) -> String? = { resolvePathProgram(it) },
+): List<String> {
+    if (!windows || argv.isEmpty()) return argv
+    val program = resolve(argv.first()) ?: argv.first()
+    if (!program.endsWith(".bat", true) && !program.endsWith(".cmd", true))
+        return listOf(program) + argv.drop(1)
+    val args = argv.drop(1).joinToString(" ") {
+        if (it.isEmpty() || it.any(Character::isWhitespace)) "\"$it\"" else it
+    }
+    val command = "\"$program\"" + if (args.isEmpty()) "" else " $args"
+    return listOf("cmd.exe", "/c", "\"$command\"")
+}
+
+/**
+ * Run the wrapped child, then hand the lease back no matter how it ends: a start failure
+ * (IOException) and a non-zero exit both fall through the finally. A program that cannot be
+ * started is reported as such and returns 127, so a missing program never reads as an
+ * unreachable daemon. [release] is owner-scoped (see release), so a foreign lease is never touched.
+ */
+internal fun runLeased(cmd: List<String>, build: () -> ProcessBuilder, release: () -> Unit): Int =
+    try {
+        build().inheritIO().start().waitFor()
+    } catch (e: IOException) {
+        System.err.println("corral: failed to run ${cmd.firstOrNull()} (${e.message})")
+        127
+    } finally {
+        release()
+    }
+
 /**
  * corral CLI — all logic in the jar (portable), launched by 3-line shims.
  * claim: JVM exits right after printing -> no pid recorded -> TTL-bound lease (MVP `adb-lease claim` semantics).
@@ -119,7 +191,7 @@ object CorralCli {
         val adb = findRealAdb() ?: run {
             System.err.println("corral: real adb not found; set CORRAL_ADB or CORRAL_REAL_ADB"); exitProcess(127) }
         val code = try {
-            ProcessBuilder(listOf(adb) + argv).inheritIO().start().waitFor()
+            ProcessBuilder(commandArgv(listOf(adb) + argv)).inheritIO().start().waitFor()
         } catch (e: IOException) {
             System.err.println("corral: failed to exec $adb (${e.message})"); exitProcess(127)
         }
@@ -445,25 +517,22 @@ object CorralCli {
                     }
                     if (claimed.isEmpty()) { System.err.println("corral: no free device"); exitProcess(1) }
                     val gradleFlag = if (isGradle) listOf("-PcorralOwner=$owner") else emptyList()
-                    val rc = try {
-                        ProcessBuilder(cmd + gradleFlag).apply {
+                    val argv = cmd + gradleFlag
+                    val rc = runLeased(argv, {
+                        ProcessBuilder(commandArgv(argv)).apply {
                             environment()["CORRAL_OWNER"] = owner
-                        }.withAdbOnPath().inheritIO().start().waitFor()
-                    } finally {
-                        claimed.forEach { runCatching { release(it) } }
-                    }
+                        }.withAdbOnPath()
+                    }) { claimed.forEach { release(it) } }
                     exitProcess(rc)
                 } else {
                     val serial = send("POST", "/api/leases",
                         Json.encodeToString(ClaimRequest(selector = sel, owner = owner, pid = pid, ttlSeconds = 1800))).str("serial")
-                    val rc = try {
-                        ProcessBuilder(cmd).apply {
+                    val rc = runLeased(cmd, {
+                        ProcessBuilder(commandArgv(cmd)).apply {
                             environment()["ANDROID_SERIAL"] = serial
                             environment()["CORRAL_OWNER"] = owner
-                        }.withAdbOnPath().inheritIO().start().waitFor()
-                    } finally {
-                        release(serial)
-                    }
+                        }.withAdbOnPath()
+                    }) { release(serial) }
                     exitProcess(rc)
                 }
             }

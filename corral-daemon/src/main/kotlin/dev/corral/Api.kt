@@ -138,8 +138,11 @@ private fun wedgedAvds(devices: List<Device>, emulators: Emulators?): Map<String
     return e.launchedPastBootDeadline().mapNotNull { (avd, aliveSeconds) ->
         val serials = trackedEmulatorSerials(devices, e, avd)
         if (serials.any { s -> devices.firstOrNull { it.serial == s }?.usable() == true }) return@mapNotNull null
-        avd to WedgeReason(serials,
-            "$avd has been running ${aliveSeconds}s without registering with adb — run: corral avd stop $avd")
+        val reason = if (serials.any { s -> devices.firstOrNull { it.serial == s }?.booted == true })
+            "$avd registered with adb, then dropped offline — run: corral avd stop $avd"
+        else
+            "$avd has been running ${aliveSeconds}s without registering with adb — run: corral avd stop $avd"
+        avd to WedgeReason(serials, reason)
     }.toMap()
 }
 

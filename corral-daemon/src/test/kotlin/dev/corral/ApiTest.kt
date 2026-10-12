@@ -1662,8 +1662,9 @@ class ApiTest {
                 t += 1
                 val wedged = wedgeOf(c.get("/api/devices").bodyAsText())!!
                 assertEquals(true, wedged["wedged"]!!.jsonPrimitive.boolean)
-                assertTrue(wedged["wedgeReason"]!!.jsonPrimitive.content.contains("corral avd stop Pixel6AVD"),
-                    wedged.toString())
+                val reason = wedged["wedgeReason"]!!.jsonPrimitive.content
+                assertTrue(reason.contains("without registering"), reason)
+                assertTrue(reason.contains("corral avd stop Pixel6AVD"), wedged.toString())
                 val doctor = Json.decodeFromString<DoctorResponse>(c.get("/api/doctor").bodyAsText())
                 val layer = doctor.layers.single { it.layer == "emulators" }
                 assertEquals("fail", layer.status)
@@ -1674,6 +1675,34 @@ class ApiTest {
                 assertEquals(false, c.get("/api/devices").bodyAsText().contains("\"wedged\":true"))
                 assertFalse(Json.decodeFromString<DoctorResponse>(c.get("/api/doctor").bodyAsText())
                     .layers.any { it.layer == "emulators" })
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
+    @Test fun wedgeReasonSaysRegisteredWhenASerialBootedThenDroppedOffline() {
+        var t = 1_000_000L
+        val launcher = RecordingLauncher()
+        val pool = mutableListOf<Device>()
+        withEmulatorApi(pool, launcher = launcher, now = { t }) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                c.post("/api/emulators/Pixel6AVD/start")
+                launcher.running = true
+                Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"), "INFO | console emulator-5554\n")
+                pool.add(Device("emulator-5554", "offline", booted = true))
+                t += MAX_WAIT_S * 1000
+
+                val wedged = wedgeOf(c.get("/api/devices").bodyAsText())!!
+                assertEquals(true, wedged["wedged"]!!.jsonPrimitive.boolean)
+                val reason = wedged["wedgeReason"]!!.jsonPrimitive.content
+                assertFalse(reason.contains("without registering"), reason)
+                assertTrue(reason.contains("registered"), reason)
+                assertTrue(reason.contains("corral avd stop Pixel6AVD"), reason)
             } finally {
                 System.setProperty("user.home", previous)
             }

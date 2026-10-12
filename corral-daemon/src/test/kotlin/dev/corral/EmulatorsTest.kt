@@ -179,6 +179,30 @@ class EmulatorsTest {
         assertTrue(emulators.isRunning("Pixel6AVD"))
     }
 
+    @Test fun launchedPastBootDeadlinePrunesAnAvdThatEnded() {
+        var t = 1_000_000L
+        val queried = mutableListOf<String>()
+        val launcher = object : EmulatorLauncher {
+            var running = false
+            override fun start(bin: String, avd: String, log: Path) { running = true }
+            override fun isRunning(avd: String): Boolean { queried += avd; return running }
+            override fun stop(avd: String): String? { running = false; return "unit $avd" }
+            override fun lastExit(avd: String): Int? = null
+        }
+        withUserHome(createTempDirectory("home")) {
+            val emulators = Emulators("adb", { "/bin/true" }, launcher, { t })
+            emulators.start("Pixel6AVD")
+            t += MAX_WAIT_S * 1000
+            assertEquals(mapOf("Pixel6AVD" to MAX_WAIT_S), emulators.launchedPastBootDeadline())
+
+            launcher.running = false   // the emulator ended on its own
+            assertTrue(emulators.launchedPastBootDeadline().isEmpty())
+            queried.clear()
+            assertTrue(emulators.launchedPastBootDeadline().isEmpty())
+            assertTrue(queried.isEmpty(), "a dead AVD is still probed every request: $queried")
+        }
+    }
+
     @Test fun concurrentStartsSpawnOnce() {
         val launcher = object : EmulatorLauncher {
             val spawns = AtomicInteger()

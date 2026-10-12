@@ -31,6 +31,9 @@ import kotlin.system.exitProcess
 internal fun pathSegment(s: String): String =
     URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20")
 
+/** Decodes a `/api/devices` body leniently, so an older CLI tolerates fields a newer daemon adds. */
+internal fun decodeDeviceList(body: String): List<Device> = corralJson.decodeFromString(body)
+
 /**
  * corral CLI — all logic in the jar (portable), launched by 3-line shims.
  * claim: JVM exits right after printing -> no pid recorded -> TTL-bound lease (MVP `adb-lease claim` semantics).
@@ -235,7 +238,7 @@ object CorralCli {
 
     /** Matching emulators still booting, read straight from the daemon's device list. */
     private fun bootingMatches(selector: Selector): Int = runCatching {
-        Json.decodeFromString<List<Device>>(get("/api/devices"))
+        decodeDeviceList(get("/api/devices"))
             .count { it.transport == "emulator" && !it.booted && selector.matchesFields(it) }
     }.getOrDefault(0)
 
@@ -305,7 +308,7 @@ object CorralCli {
                 val pool: List<Device>? = try {
                     val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/devices")).GET().build(),
                         HttpResponse.BodyHandlers.ofString())
-                    if (r.statusCode() == 200) Json.decodeFromString(r.body()) else null
+                    if (r.statusCode() == 200) decodeDeviceList(r.body()) else null
                 } catch (_: Exception) { null }
                 if (pool != null) println("daemon: ok ($url, ${pool.size} device(s))")
                 else { println("daemon: FAIL - unreachable at $url (is it running? systemctl --user status corral)"); problems++ }

@@ -395,9 +395,12 @@ class Emulators(
      * mapped to seconds alive. Whether the wedge is *confirmed* (the serial never reached
      * `device`+`booted`) is the pool's call; see `wedgedAvds` in Api.kt.
      */
-    fun launchedPastBootDeadline(): Map<String, Long> = launchedAt
-        .filter { (avd, at) -> isRunning(avd) && now() - at >= MAX_WAIT_S * 1000 }
-        .mapValues { (_, at) -> (now() - at) / 1000 }
+    fun launchedPastBootDeadline(): Map<String, Long> {
+        launchedAt.keys.removeIf { avd -> !isRunning(avd) }
+        return launchedAt
+            .filterValues { at -> now() - at >= MAX_WAIT_S * 1000 }
+            .mapValues { (_, at) -> (now() - at) / 1000 }
+    }
 
     /** The last failure [avd] ended with, or null while running, after a clean exit, or with no status. */
     fun lastError(avd: String): String? =

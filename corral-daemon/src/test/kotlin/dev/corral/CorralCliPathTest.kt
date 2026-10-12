@@ -19,4 +19,9 @@ class CorralCliPathTest {
     @Test fun encodesSlash() {
         assertEquals("a%2Fb", pathSegment("a/b"))
     }
+
+    @Test fun deviceDecodeToleratesFieldsANewerDaemonAdds() {
+        val devices = decodeDeviceList("""[{"serial":"emulator-5554","state":"offline","futureField":1}]""")
+        assertEquals("emulator-5554", devices.single().serial)
+    }
 }

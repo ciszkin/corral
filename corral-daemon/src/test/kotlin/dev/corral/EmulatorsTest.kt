@@ -659,6 +659,26 @@ class EmulatorsTest {
         assertTrue("no emu" in (e.message ?: ""))
     }
 
+    @Test fun liveDevicesHidesAKilledSerialUntilAdbDropsItOrTheTtlExpires() {
+        var t = 1_000_000L
+        val dir = createTempDirectory("emu")
+        val dev = Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true)
+
+        // adb drops it: the suppression is forgotten, so a later re-listing is a fresh device
+        val dropped = Emulators(fakeAdb(dir, dir.resolve("invocations")).toString(), { null }, DefaultLauncher(), { t })
+        dropped.stop("emulator-5554")
+        assertEquals(emptyList(), dropped.liveDevices(listOf(dev)))
+        assertEquals(emptyList(), dropped.liveDevices(emptyList()))
+        assertEquals(listOf(dev), dropped.liveDevices(listOf(dev)))
+
+        // adb never drops it: the TTL backstop still ages the suppression out
+        val stuck = Emulators(fakeAdb(dir, dir.resolve("invocations2")).toString(), { null }, DefaultLauncher(), { t })
+        stuck.stop("emulator-5554")
+        assertEquals(emptyList(), stuck.liveDevices(listOf(dev)))
+        t += 200_000
+        assertEquals(listOf(dev), stuck.liveDevices(listOf(dev)))
+    }
+
     @Test fun resolutionOrderEnvSdkPath() {
         val sdk = createTempDirectory("sdk")
         val adb = executable(Files.createDirectories(sdk.resolve("platform-tools")).resolve("adb"))

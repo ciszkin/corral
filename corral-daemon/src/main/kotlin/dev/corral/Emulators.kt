@@ -309,6 +309,9 @@ private val ACTIVE_STATES = setOf("active", "activating", "reloading")
 private const val EARLY_EXIT_MS = 700L
 private const val SYSTEMD_EARLY_EXIT_MS = 1000L
 
+/** How long a killed serial stays hidden when adb never drops it; adb's own drop expiring it sooner. */
+private const val TERMINATED_TTL_MS = 120_000L
+
 /**
  * Talks to the SDK emulator binary to list and boot AVDs; [stop] hands the kill to adb because an
  * already-running AVD is only addressable by its `emulator-<port>` serial.
@@ -322,6 +325,8 @@ class Emulators(
     private val locks = ConcurrentHashMap<String, Any>()
     /** AVD -> when this daemon spawned it; only a daemon-launched AVD can be reported wedged. */
     private val launchedAt = ConcurrentHashMap<String, Long>()
+    /** Serial -> when this daemon killed it; the pool hides it until adb drops it or the TTL does. */
+    private val terminatedAt = ConcurrentHashMap<String, Long>()
 
     /**
      * AVD names from `emulator -list-avds`. Null when the binary is absent or the command
@@ -360,6 +365,19 @@ class Emulators(
 
     /** True while a spawn for [avd] is live, even before it appears in the adb pool. */
     fun isRunning(avd: String): Boolean = launcher.isRunning(avd)
+
+    /**
+     * [devices] minus serials this daemon just killed, so a stop is reflected before adb catches up.
+     * A serial adb no longer lists is forgotten at once — a later appearance is a fresh device, not
+     * the corpse — and an entry past [TERMINATED_TTL_MS] is dropped so a serial adb never stops
+     * listing cannot stay hidden forever.
+     */
+    fun liveDevices(devices: List<Device>): List<Device> {
+        val present = devices.mapTo(mutableSetOf()) { it.serial }
+        val cutoff = now() - TERMINATED_TTL_MS
+        terminatedAt.entries.removeIf { (serial, at) -> serial !in present || at < cutoff }
+        return devices.filterNot { terminatedAt.containsKey(it.serial) }
+    }
 
     /** Ends the spawn/unit for [avd] directly, for one adb has not listed (no serial to kill). */
     fun stopAvd(avd: String): String? {
@@ -426,6 +444,7 @@ class Emulators(
             .firstOrNull { it.isNotBlank() } ?: ""
         if (p.exitValue() != 0 || err.isNotBlank())
             throw EmulatorException("emu kill failed for $serial${if (err.isBlank()) "" else ": $err"}")
+        terminatedAt[serial] = now()
     }
 
     companion object {

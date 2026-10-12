@@ -1522,6 +1522,111 @@ class ApiTest {
         }
     }
 
+    @Test fun stopDropsTheEmulatorFromThePoolAndKeepsItOutAcrossARepoll() {
+        var t = 1_000_000L
+        val pool = mutableListOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+        withEmulatorApi(pool, launcher = RecordingLauncher(), now = { t }) { c ->
+            assertTrue(c.get("/api/devices").bodyAsText().contains("emulator-5554"))   // BEFORE
+            val stop = c.post("/api/emulators/Pixel6AVD/stop") {
+                contentType(ContentType.Application.Json); setBody("{}") }
+            assertEquals(HttpStatusCode.OK, stop.status, stop.bodyAsText())
+            assertFalse(c.get("/api/devices").bodyAsText().contains("emulator-5554"))  // immediately AFTER
+
+            // the monitor's next poll still gets the killed serial from adb: it must not re-add it
+            pool.clear(); pool.add(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+            assertFalse(c.get("/api/devices").bodyAsText().contains("emulator-5554"))
+
+            // and it stays out while adb keeps listing it, inside the suppression window
+            t += 60_000
+            assertFalse(c.get("/api/devices").bodyAsText().contains("emulator-5554"))
+        }
+    }
+
+    @Test fun repeatStopOfACorralTerminatedAvdIsTruthfulAndNeverSaysWedged() {
+        val launched = object : EmulatorLauncher {
+            @Volatile var running = true
+            override fun start(bin: String, avd: String, log: Path) {}
+            override fun isRunning(avd: String): Boolean = running
+            override fun stop(avd: String): String? = if (running) { running = false; "pid 34472" } else null
+            override fun lastExit(avd: String): Int? = null
+        }
+        val adbLog = createTempDirectory("emu").resolve("invocations")
+        val pool = mutableListOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+        withEmulatorApi(pool, adbLog = adbLog, launcher = launched) { c ->
+            val before = c.get("/api/devices").bodyAsText()
+            val first = c.post("/api/emulators/Pixel6AVD/stop") {
+                contentType(ContentType.Application.Json); setBody("{}") }
+            assertEquals(HttpStatusCode.OK, first.status, first.bodyAsText())
+            val after = c.get("/api/devices").bodyAsText()
+            pool.clear(); pool.add(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+            val repoll = c.get("/api/devices").bodyAsText()
+
+            val second = c.post("/api/emulators/Pixel6AVD/stop") {
+                contentType(ContentType.Application.Json); setBody("{}") }
+            assertEquals(HttpStatusCode.OK, second.status, second.bodyAsText())
+            assertFalse(second.bodyAsText().contains("wedged"), second.bodyAsText())
+            assertTrue(second.bodyAsText().contains("\"stopped\":[]"), second.bodyAsText())
+            assertFalse(second.bodyAsText().contains("\"terminated\""), second.bodyAsText())
+            // the second stop must not have tried to kill the already-dead serial again
+            assertEquals(listOf("-s emulator-5554 emu kill"), Files.readAllLines(adbLog))
+            assertTrue(before.contains("emulator-5554"))
+            assertFalse(after.contains("emulator-5554"))    // gone before the monitor's next poll
+            assertFalse(repoll.contains("emulator-5554"))   // and not re-added by it
+        }
+    }
+
+    @Test fun aFailedKillIsStillReportedAndIsNotSuppressedFromThePool() {
+        val launcher = RecordingLauncher().apply { running = true }
+        val dir = createTempDirectory("emu")
+        val adb = dir.resolve("fake-adb").also {
+            Files.writeString(it, "#!/usr/bin/env bash\necho 'no emu' >&2\nexit 3\n")
+            it.toFile().setExecutable(true)
+        }
+        val devs = listOf(Device("emulator-5554", "device", avd = "Pixel6AVD", booted = true))
+        val emulators = Emulators(adb.toString(), { null }, launcher)
+        testApplication {
+            application { corralModule(AppEnv({ devs }, LeaseManager({ devs }, db = null), emulators = emulators)) }
+            val r = client.post("/api/emulators/Pixel6AVD/stop") {
+                contentType(ContentType.Application.Json); setBody("""{"force":true}""") }
+            assertEquals(HttpStatusCode.BadGateway, r.status, r.bodyAsText())
+            assertTrue(r.bodyAsText().contains("no emu"), r.bodyAsText())
+            // the process is still alive, so the pool must still list it
+            assertTrue(client.get("/api/devices").bodyAsText().contains("emulator-5554"))
+        }
+    }
+
+    @Test fun aCorralTerminatedEmulatorNeverSurfacesAWedgeOrDoctorLayer() {
+        var t = 1_000_000L
+        val launcher = RecordingLauncher()
+        val pool = mutableListOf<Device>()
+        withEmulatorApi(pool, launcher = launcher, now = { t }) { c ->
+            val home = createTempDirectory("home")
+            Files.createDirectories(home.resolve(".corral"))
+            val previous = System.getProperty("user.home")
+            System.setProperty("user.home", home.toString())
+            try {
+                assertEquals(HttpStatusCode.Accepted, c.post("/api/emulators/Pixel6AVD/start").status)
+                launcher.running = true
+                Files.writeString(home.resolve(".corral/emulator-Pixel6AVD.log"), "INFO | console emulator-5554\n")
+                pool.add(Device("emulator-5554", "offline"))
+                t += MAX_WAIT_S * 1000
+                assertTrue(c.get("/api/devices").bodyAsText().contains("\"wedged\":true"))   // wedged before the stop
+
+                val stop = c.post("/api/emulators/Pixel6AVD/stop") {
+                    contentType(ContentType.Application.Json); setBody("{}") }
+                assertEquals(HttpStatusCode.OK, stop.status, stop.bodyAsText())
+
+                // even a monitor re-poll that re-lists the serial shows no wedge flag and no doctor layer
+                pool.clear(); pool.add(Device("emulator-5554", "offline"))
+                assertFalse(c.get("/api/devices").bodyAsText().contains("\"wedged\":true"))
+                assertFalse(Json.decodeFromString<DoctorResponse>(c.get("/api/doctor").bodyAsText())
+                    .layers.any { it.layer == "emulators" })
+            } finally {
+                System.setProperty("user.home", previous)
+            }
+        }
+    }
+
     @Test fun emulatorsShowsTheLogTailAfterANonZeroExit() {
         val crashed = exitLauncher(1)
         withEmulatorApi(emptyList(), launcher = crashed) { c ->

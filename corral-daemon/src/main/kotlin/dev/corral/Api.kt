@@ -97,7 +97,7 @@ import kotlinx.serialization.json.Json
 @Serializable data class DoctorResponse(val adb: String, val layers: List<DoctorLayer>)
 
 class AppEnv(
-    val devices: () -> List<Device>,
+    rawDevices: () -> List<Device>,
     val leases: LeaseManager,
     val adbPath: String? = null,
     val screenshotter: Screenshotter? = null,
@@ -105,7 +105,10 @@ class AppEnv(
     val events: Events? = null,
     val config: DaemonConfig? = null,
     val emulators: Emulators? = null,
-)
+) {
+    /** The served pool: raw adb inventory minus any serial [emulators] just terminated. */
+    val devices: () -> List<Device> = { emulators?.liveDevices(rawDevices()) ?: rawDevices() }
+}
 
 /** Any control char (C0 + DEL) smuggled into a value could inject lines or corrupt env/rules files. */
 private fun String.hasControlChars() = any { it < ' ' || it == '\u007F' }

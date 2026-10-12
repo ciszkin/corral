@@ -149,8 +149,9 @@ class ApiTest {
             it.toFile().setExecutable(true)
         }
         val emulators = Emulators(adb.toString(), { emu?.toString() }, launcher, now)
+        val pool = { emulators.liveDevices(devices) }
         application {
-            corralModule(AppEnv({ devices }, LeaseManager({ devices }, db = null), emulators = emulators))
+            corralModule(AppEnv(pool, LeaseManager(pool, db = null), emulators = emulators))
         }
         CoroutineScope(coroutineContext).block(client)
     }

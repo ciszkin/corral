@@ -28,6 +28,53 @@ class EventsTest {
         repeat(n) { advanceTimeBy(100); runCurrent() }
     }
 
+    /** The same wiring Main uses: one filtered pool feeding the Events device view. */
+    private fun wiredEvents(tb: TestScope, emulators: Emulators, raw: () -> List<Device>):
+        Pair<Events, () -> List<DeviceStatus>> {
+        val view: () -> List<DeviceStatus> =
+            { emulators.liveDevices(raw()).map { DeviceStatus(it.serial, null, it.booted) } }
+        val e = Events(view, { emptyList() }, tb.backgroundScope, tickMs = 100)
+        e.start()
+        e.flow.onEach { nudges.send(it) }.launchIn(tb.backgroundScope)
+        return e to view
+    }
+
+    @Test fun aTerminatedEmulatorLeavesTheEventViewAtOnceAndStaysOutAcrossPolls() = runTest {
+        val emulators = Emulators("/bin/true", { null }, now = { 1_000_000L })
+        val raw = mutableListOf(Device("emulator-5554", "device", booted = true))
+        val (_, view) = wiredEvents(this, emulators, { raw })
+        runCurrent()
+        assertEquals(listOf("emulator-5554"), view().map { it.serial })   // announced before the stop
+
+        emulators.stop("emulator-5554")                                   // kill succeeds -> suppressed
+        tick()
+        assertEquals(emptyList(), view().map { it.serial })               // gone immediately after
+        assertEquals(listOf("emulator-5554"), raw.map { it.serial })      // while adb still lists it
+        assertTrue(nudges.receive().contains("\"devices\""))              // the removal is nudged once
+
+        tick(5)                                                           // a double-filter would resurrect it here
+        assertEquals(emptyList(), view().map { it.serial })
+        assertTrue(nudges.isEmpty)
+    }
+
+    @Test fun aSerialAdbDropsThenRelistsIsAnnouncedAgainThroughTheEventView() = runTest {
+        val emulators = Emulators("/bin/true", { null }, now = { 1_000_000L })
+        val raw = mutableListOf(Device("emulator-5554", "device", booted = true))
+        val (_, view) = wiredEvents(this, emulators, { raw })
+        runCurrent()
+
+        emulators.stop("emulator-5554")
+        tick()
+        nudges.receive()                                                  // removal nudge
+        raw.clear()                                                       // adb drops the serial
+        tick()
+        assertTrue(nudges.isEmpty)                                        // already absent: no change
+        raw.add(Device("emulator-5554", "device", booted = true))         // a fresh device reuses the port
+        tick()
+        assertEquals(listOf("emulator-5554"), view().map { it.serial })
+        assertTrue(nudges.receive().contains("\"devices\""))              // announced again
+    }
+
     @Test fun claimNudgesDevicesOnce() = runTest {
         events(this)
         runCurrent()                                    // baseline tick, nothing to report yet

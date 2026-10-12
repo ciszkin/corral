@@ -79,7 +79,11 @@ fun main() {
     Runtime.getRuntime().addShutdownHook(Thread { runCatching { emulators.shutdown() } })
 
     val monitor = DeviceMonitor(adb, System.getenv("CORRAL_FAKE_DEVICES"), scope)
-    val leases = LeaseManager({ monitor.devices }, db)
+    // The one pool every consumer sees: adb's inventory minus serials this daemon just killed. Filter
+    // here, exactly once per read — `liveDevices` forgets a serial adb no longer lists, so handing it
+    // an already-filtered list would drop the suppression and resurrect the stopped emulator.
+    val pool: () -> List<Device> = { emulators.liveDevices(monitor.devices) }
+    val leases = LeaseManager(pool, db)
     leases.recoverPersisted()
     monitor.onChange = { leases.dispatchFreeDevices() }
 
@@ -106,10 +110,10 @@ fun main() {
     scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; runCatching { emulators.reapFailed() }; selfHealSdkShim(); selfHealRules() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
 
     val events = Events(
-        { monitor.devices.map { DeviceStatus(it.serial, leases.snapshot[it.serial], it.booted) } },
+        { pool().map { DeviceStatus(it.serial, leases.snapshot[it.serial], it.booted) } },
         { leases.queueSnapshot() },
         scope)
-    val env = AppEnv({ monitor.devices }, leases, adb, Screenshotter({ monitor.devices }, adb), screenshotPolicy(config), events, config,
+    val env = AppEnv(pool, leases, adb, Screenshotter(pool, adb), screenshotPolicy(config), events, config,
         emulators)
     events.start()
     embeddedServer(CIO, port = port, host = "127.0.0.1") {

@@ -37,7 +37,10 @@ import kotlinx.serialization.EncodeDefault
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
 
 @Serializable data class ClaimRequest(val selector: Selector = Selector(),
     val owner: String, val pid: Long = 0, val ttlSeconds: Long = 1800, val waitSeconds: Long = 0,
@@ -225,8 +228,18 @@ fun Application.guardLocalHost() = intercept(ApplicationCallPipeline.Plugins) {
         call.respondText("corral: local only", status = HttpStatusCode.Forbidden)
 }
 
+/** The JSON codec shared by ContentNegotiation and the config route's shape-aware decode. */
+private val apiJson = Json { ignoreUnknownKeys = true }
+
+/** The first [limit] keys, each cut to [width] chars, plus a "+N more" tail — the 400 echo must not balloon. */
+private fun keyPreview(keys: Collection<String>, limit: Int = 5, width: Int = 40): String {
+    val shown = keys.take(limit).joinToString(", ") { if (it.length > width) it.take(width) + "…" else it }
+    val more = keys.size - limit
+    return if (more > 0) "$shown, +$more more" else shown
+}
+
 fun Application.corralModule(env: AppEnv) {
-    install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+    install(ContentNegotiation) { json(apiJson) }
     install(WebSockets)
     routing {
         webSocket("/ws/events") {
@@ -337,15 +350,26 @@ fun Application.corralModule(env: AppEnv) {
             env.config ?: run {
                 call.respondText("corral: config not wired", status = HttpStatusCode.ServiceUnavailable); return@put }
             val req = try {
-                call.receive<PutConfigRequest>()
+                val body = call.receive<JsonObject>()
+                // A body of pure unknown keys decodes to an empty PutConfigRequest and would answer a
+                // silent 200. Refuse the shape instead of pretending the write happened.
+                if (body.isNotEmpty() && "settings" !in body && "rules" !in body) {
+                    call.respond(HttpStatusCode.BadRequest, ConfigErrors(listOf(
+                        "unrecognised config body — expected {\"settings\":{…}} (and/or {\"rules\":{…}}), " +
+                            "but received key(s): ${keyPreview(body.keys)}" +
+                            " — e.g. {\"settings\":{\"CORRAL_SCREENSHOTS\":\"open\"}}")))
+                    return@put
+                }
+                apiJson.decodeFromJsonElement<PutConfigRequest>(body)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 // decode failures must teach, not sit mute (the Windows smoke hit a bare 4xx here)
-                val malformed = e is JsonConvertException || e.cause is JsonConvertException
+                val malformed = e is JsonConvertException || e.cause is JsonConvertException ||
+                    e is SerializationException
                 if (malformed) {
                     val why = (e as? JsonConvertException ?: e.cause as? JsonConvertException)
-                        ?.message?.lineSequence()?.firstOrNull()
+                        ?.message?.lineSequence()?.firstOrNull() ?: e.message?.lineSequence()?.firstOrNull()
                     call.respond(HttpStatusCode.BadRequest, ConfigErrors(listOf(
                         "malformed JSON body" + (why?.let { ": $it" } ?: ""))))
                 } else {

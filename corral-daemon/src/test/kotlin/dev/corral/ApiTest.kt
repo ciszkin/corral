@@ -242,7 +242,69 @@ class ApiTest {
         val r = c.put("/api/config") { contentType(ContentType.Application.Json); setBody("{not json") }
         assertEquals(HttpStatusCode.BadRequest, r.status)
         val errs = Json.decodeFromString<ConfigErrors>(r.bodyAsText())
-        assertTrue(errs.errors.isNotEmpty())
+        assertTrue(errs.errors.any { it.startsWith("malformed JSON body") }, "got ${errs.errors}")
+    }
+
+    /** `{"key":…,"value":…}` — the first Windows-smoke body; it used to be a silent 200 that wrote nothing. */
+    @Test fun putRejectsKeyValueBodyShape() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"key":"CORRAL_SCREENSHOTS","value":"open"}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        val err = Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.joinToString(" ")
+        assertContains(err, "key")
+        assertContains(err, "value")
+        assertContains(err, """{"settings":{"CORRAL_SCREENSHOTS":"open"}}""")
+
+        // the echoed keys are capped: first five, a "+N more" tail, then each key cut so one huge key can't balloon
+        val eight = (1..8).joinToString(",") { "\"k$it\":1" }
+        val many = Json.decodeFromString<ConfigErrors>(c.putConfig("""{$eight}""").bodyAsText()).errors.single()
+        assertContains(many, "k1, k2, k3, k4, k5, +3 more")
+        assertFalse(many.contains('\n'))
+
+        val longKey = "Z".repeat(500)
+        val huge = Json.decodeFromString<ConfigErrors>(c.putConfig("""{"$longKey":1}""").bodyAsText()).errors.single()
+        assertContains(huge, "Z".repeat(40) + "…")
+        assertFalse(huge.contains("Z".repeat(41)))
+    }
+
+    /** `{"CORRAL_SCREENSHOTS":"open"}` — the second Windows-smoke body; same silent 200. */
+    @Test fun putRejectsFlatSettingBodyShape() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"CORRAL_SCREENSHOTS":"open"}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        val err = Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.joinToString(" ")
+        assertContains(err, "CORRAL_SCREENSHOTS")
+        assertContains(err, """{"settings":{"CORRAL_SCREENSHOTS":"open"}}""")
+    }
+
+    @Test fun putCorrectShapeWritesTheSetting() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"open"}}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(Json.decodeFromString<PutConfigResponse>(r.bodyAsText()).restartRequired)
+        assertEquals("open", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_SCREENSHOTS"])
+    }
+
+    @Test fun putEmptyObjectIsANoop200() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        // deliberate: an empty no-op save must not become a 400 — the UI may PUT {} when nothing changed
+        val r = c.putConfig("{}")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertTrue(Json.decodeFromString<PutConfigResponse>(r.bodyAsText()).warnings.isEmpty())
+        assertFalse(Files.exists(DaemonConfig.defaultPath()))
+    }
+
+    @Test fun putKeepsLeniencyForAnUnknownKeyAlongsideSettings() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"open"},"someUnknownKey":1}""")
+        assertEquals(HttpStatusCode.OK, r.status)
+        assertEquals("open", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_SCREENSHOTS"])
+    }
+
+    /** Valid JSON that is not a top-level object: the JsonObject decode fails and must teach a 400, not a 500. */
+    @Test fun putRejectsAValidJsonNonObjectBody() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        for (raw in listOf("[1,2,3]", "\"x\"", "42")) {
+            val r = c.putConfig(raw)
+            assertEquals(HttpStatusCode.BadRequest, r.status, "body $raw")
+            val errs = Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors
+            assertTrue(errs.any { it.startsWith("malformed JSON body") }, "body $raw gave ${errs}")
+            assertFalse(Files.exists(DaemonConfig.defaultPath()), "body $raw wrote the env file")
+        }
     }
 
     @Test fun putWritesKnownSettingsAndRules() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->

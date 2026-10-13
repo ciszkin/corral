@@ -93,14 +93,21 @@ internal fun resolvePathProgram(
  * argument and cmd percent-expansion (`%VAR%`) inside the .bat are NOT handled — cmd may mis-split
  * or expand them. cmd metacharacters are also not re-escaped (same-user interpretation, reviewed).
  * Linux and directly-executable targets are returned untouched, so behaviour there is unchanged.
+ *
+ * [onResolved] fires once with whether the Windows resolver found the program, so the caller can tell
+ * a "not found" launch failure from a "found but refused" one without resolving a second time. It is
+ * never called on a non-Windows host, where the resolver does not run.
  */
 internal fun commandArgv(
     argv: List<String>,
     windows: Boolean = isWindows,
     resolve: (String) -> String? = { resolvePathProgram(it) },
+    onResolved: (Boolean) -> Unit = {},
 ): List<String> {
     if (!windows || argv.isEmpty()) return argv
-    val program = resolve(argv.first()) ?: argv.first()
+    val found = resolve(argv.first())
+    onResolved(found != null)
+    val program = found ?: argv.first()
     if (!program.endsWith(".bat", true) && !program.endsWith(".cmd", true))
         return listOf(program) + argv.drop(1)
     val args = argv.drop(1).joinToString(" ") {
@@ -108,6 +115,32 @@ internal fun commandArgv(
     }
     val command = "\"$program\"" + if (args.isEmpty()) "" else " $args"
     return listOf("cmd.exe", "/c", "\"$command\"")
+}
+
+/**
+ * The JDK's launch-failure prefix — `Cannot run program "adb": ` — is stripped before we print any
+ * part of the OS error. Reprinting it inside our own message made a launch failure read exactly like
+ * the daemon-unreachable line it replaced, so a log reader could not tell them apart without the exit
+ * code. The rest of the detail (the CreateProcess error code) is kept: it is the useful part.
+ */
+private val jdkCannotRunPrefix = Regex("""^Cannot run program "[^"]*"(: )?""")
+
+private fun launchDetail(e: Throwable): String =
+    (e.message ?: e::class.simpleName ?: "unknown error")
+        .replaceFirst(jdkCannotRunPrefix, "")
+        .trim()
+        .ifEmpty { "unknown error" }
+
+/**
+ * The launch-failure line, worded for what actually went wrong. [resolved] is the Windows resolver's
+ * verdict: `false` = nothing on PATH/PATHEXT matched (on Windows almost always `%USERPROFILE%\bin`
+ * being off PATH, where corral's shims live), `true` = the program was found but CreateProcess still
+ * refused it, `null` = the resolver never ran (non-Windows), so we name neither.
+ */
+internal fun launchFailure(program: String?, resolved: Boolean?, detail: String): String = when (resolved) {
+    false -> "corral: cannot find ${program} on PATH — is %USERPROFILE%\\bin on it? corral's shims live there"
+    true -> "corral: found ${program} but could not start it ($detail)"
+    null -> "corral: could not start ${program} ($detail) — check it is installed and on PATH"
 }
 
 /**
@@ -119,14 +152,19 @@ internal fun commandArgv(
  * such, so a program that cannot be started never reads as an unreachable daemon. [release] is
  * owner-scoped (see release), so a foreign lease is never touched.
  */
-internal fun runLeased(cmd: List<String>, build: () -> ProcessBuilder, release: () -> Unit): Int =
+internal fun runLeased(
+    cmd: List<String>,
+    resolved: Boolean?,
+    build: () -> ProcessBuilder,
+    release: () -> Unit,
+): Int =
     try {
         build().inheritIO().start().waitFor()
     } catch (e: IOException) {
-        System.err.println("corral: failed to run ${cmd.firstOrNull()} (${e.message})")
+        System.err.println(launchFailure(cmd.firstOrNull(), resolved, launchDetail(e)))
         127
     } catch (e: IllegalArgumentException) {
-        System.err.println("corral: failed to run ${cmd.firstOrNull()} (${e.message})")
+        System.err.println(launchFailure(cmd.firstOrNull(), resolved, launchDetail(e)))
         127
     } finally {
         release()
@@ -531,8 +569,10 @@ object CorralCli {
                     if (claimed.isEmpty()) { System.err.println("corral: no free device"); exitProcess(1) }
                     val gradleFlag = if (isGradle) listOf("-PcorralOwner=$owner") else emptyList()
                     val argv = cmd + gradleFlag
-                    val rc = runLeased(argv, {
-                        ProcessBuilder(commandArgv(argv)).apply {
+                    var resolved: Boolean? = null
+                    val launchArgv = commandArgv(argv, onResolved = { resolved = it })
+                    val rc = runLeased(argv, resolved, {
+                        ProcessBuilder(launchArgv).apply {
                             environment()["CORRAL_OWNER"] = owner
                         }.withAdbOnPath()
                     }) { claimed.forEach { release(it) } }
@@ -540,8 +580,10 @@ object CorralCli {
                 } else {
                     val serial = send("POST", "/api/leases",
                         Json.encodeToString(ClaimRequest(selector = sel, owner = owner, pid = pid, ttlSeconds = 1800))).str("serial")
-                    val rc = runLeased(cmd, {
-                        ProcessBuilder(commandArgv(cmd)).apply {
+                    var resolved: Boolean? = null
+                    val launchArgv = commandArgv(cmd, onResolved = { resolved = it })
+                    val rc = runLeased(cmd, resolved, {
+                        ProcessBuilder(launchArgv).apply {
                             environment()["ANDROID_SERIAL"] = serial
                             environment()["CORRAL_OWNER"] = owner
                         }.withAdbOnPath()

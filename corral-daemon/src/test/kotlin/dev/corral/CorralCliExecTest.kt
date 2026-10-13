@@ -68,9 +68,50 @@ class CorralCliExecTest {
     }
 
     @Test fun linuxArgvIsUnchanged() {
+        var notified = false
         val argv = commandArgv(listOf("adb", "-s", "dev1", "shell", "echo", "hi"), windows = false,
-            resolve = { error("must not resolve on a non-Windows host") })
+            resolve = { error("must not resolve on a non-Windows host") },
+            onResolved = { notified = true })
         assertEquals(listOf("adb", "-s", "dev1", "shell", "echo", "hi"), argv)
+        assertFalse(notified, "the resolver and its callback must not run on a non-Windows host")
+    }
+
+    @Test fun commandArgvReportsUnresolvedWindowsProgram() {
+        var resolved: Boolean? = null
+        commandArgv(listOf("adb", "devices"), windows = true, resolve = { null },
+            onResolved = { resolved = it })
+        assertEquals(false, resolved)
+    }
+
+    @Test fun commandArgvReportsResolvedWindowsProgram() {
+        var resolved: Boolean? = null
+        commandArgv(listOf("adb", "devices"), windows = true, resolve = { "C:\\sdk\\adb.exe" },
+            onResolved = { resolved = it })
+        assertEquals(true, resolved)
+    }
+
+    // --- launch-failure wording: "not found" and "found but refused" must read apart, and neither
+    // --- may reprint the JDK's `Cannot run program "X"` phrase that once read as an unreachable daemon.
+
+    @Test fun notFoundLaunchFailureNamesShimDirectory() {
+        val msg = launchFailure("adb", resolved = false, detail = "CreateProcess error=2")
+        assertTrue(msg.contains("cannot find adb"), msg)
+        assertTrue(msg.contains("%USERPROFILE%\\bin"), msg)
+        assertFalse(msg.contains("Cannot run program"), msg)
+    }
+
+    @Test fun foundButRefusedLaunchFailureKeepsErrorCode() {
+        val msg = launchFailure("adb", resolved = true, detail = "CreateProcess error=2")
+        assertTrue(msg.contains("found adb but could not start it"), msg)
+        assertTrue(msg.contains("CreateProcess error=2"), msg)
+        assertFalse(msg.contains("Cannot run program"), msg)
+    }
+
+    @Test fun unknownResolutionLaunchFailureDoesNotClaimFound() {
+        val msg = launchFailure("adb", resolved = null, detail = "error=2, No such file or directory")
+        assertTrue(msg.contains("could not start adb"), msg)
+        assertFalse(msg.contains("found"), msg)
+        assertFalse(msg.contains("Cannot run program"), msg)
     }
 
     @Test fun bareNameResolvesToBatOnPath() {
@@ -130,8 +171,9 @@ class CorralCliExecTest {
         val original = System.err
         System.setErr(PrintStream(err))
         var released = false
+        val cmd = listOf("/no/such/corral-program")
         val rc = try {
-            runLeased(listOf("/no/such/corral-program"),
+            runLeased(cmd, true,
                 { ProcessBuilder("/no/such/corral-program") }) { released = true }
         } finally {
             System.setErr(original)
@@ -139,7 +181,8 @@ class CorralCliExecTest {
         assertEquals(127, rc)
         assertTrue(released, "a start failure must still free the lease")
         val message = err.toString()
-        assertTrue(message.contains("corral: failed to run /no/such/corral-program"), message)
+        assertTrue(message.contains("corral: found /no/such/corral-program but could not start it"), message)
+        assertFalse(message.contains("Cannot run program"), message)
         assertFalse(message.contains("daemon unreachable"), message)
     }
 
@@ -154,7 +197,7 @@ class CorralCliExecTest {
         var released = false
         val cmd = listOf("\"C:\\sdk\\adb.bat\" -s dev1 shell echo hi")
         val rc = try {
-            runLeased(cmd, {
+            runLeased(cmd, true, {
                 throw IllegalArgumentException("Malformed argument has embedded quote: ${cmd.first()}")
             }) { released = true }
         } finally {
@@ -163,14 +206,15 @@ class CorralCliExecTest {
         assertEquals(127, rc)
         assertTrue(released, "a launch rejection must still free the lease")
         val message = err.toString()
-        assertTrue(message.contains("corral: failed to run ${cmd.first()}"), message)
+        assertTrue(message.contains("corral: found ${cmd.first()} but could not start it"), message)
+        assertFalse(message.contains("Cannot run program"), message)
         assertFalse(message.contains("daemon unreachable"), message)
         assertFalse(message.contains("Exception"), "the teaching message, not a stack trace: $message")
     }
 
     @Test fun leaseReleasedWhenChildExitsNonZero() {
         var released = false
-        val rc = runLeased(listOf("sh"), { ProcessBuilder("sh", "-c", "exit 7") }) { released = true }
+        val rc = runLeased(listOf("sh"), null, { ProcessBuilder("sh", "-c", "exit 7") }) { released = true }
         assertEquals(7, rc)
         assertTrue(released, "a non-zero exit must still free the lease")
     }

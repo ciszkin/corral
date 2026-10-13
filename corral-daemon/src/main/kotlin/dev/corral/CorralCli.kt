@@ -51,14 +51,21 @@ internal fun emulatorProblems(doctor: DoctorResponse?): List<String> =
 internal val isWindows: Boolean = System.getProperty("os.name").startsWith("Windows")
 
 /**
- * Search PATH the way Windows does not: Java's CreateProcess never applies PATHEXT, so a bare
- * `adb` whose real file is `adb.bat` is simply "not found". Returns the first existing candidate
- * (direct name, then each PATHEXT suffix), or the program unchanged when it already has a path.
+ * Search for a bare program the way Windows does: the current directory first, then System32,
+ * Windows, and the rest of PATH (all of PATH here; the two system dirs are entries on it). Java's
+ * CreateProcess never applies PATHEXT, so a bare `adb` whose real file is `adb.bat` is simply "not
+ * found"; every directory is probed direct-name then by each PATHEXT suffix. Returns the first
+ * existing candidate, or the program unchanged when it already has a path. [cwd] and [env] are
+ * injected so the resolution order is testable without touching the process's real CWD or PATH.
  */
-internal fun resolvePathProgram(program: String, env: Map<String, String> = System.getenv()): String? {
+internal fun resolvePathProgram(
+    program: String,
+    env: Map<String, String> = System.getenv(),
+    cwd: String = ".",
+): String? {
     if (program.isEmpty() || program.contains('/') || program.contains('\\')) return program
     val exts = (env["PATHEXT"] ?: ".COM;.EXE;.BAT;.CMD").split(';').filter { it.isNotBlank() }
-    val dirs = (env["PATH"] ?: return null).split(File.pathSeparator).filter { it.isNotBlank() }
+    val dirs = (listOf(cwd) + (env["PATH"] ?: "").split(File.pathSeparator)).filter { it.isNotBlank() }
     for (dir in dirs) {
         val base = dir.trim('"')
         val direct = File(base, program)
@@ -104,15 +111,21 @@ internal fun commandArgv(
 }
 
 /**
- * Run the wrapped child, then hand the lease back no matter how it ends: a start failure
- * (IOException) and a non-zero exit both fall through the finally. A program that cannot be
- * started is reported as such and returns 127, so a missing program never reads as an
- * unreachable daemon. [release] is owner-scoped (see release), so a foreign lease is never touched.
+ * Run the wrapped child, then hand the lease back no matter how it ends: a start failure and a
+ * non-zero exit both fall through the finally. A start failure is an IOException (program missing)
+ * or an IllegalArgumentException — a JVM started with `-Djdk.lang.Process.allowAmbiguousCommands=false`
+ * rejects our start-and-end-quoted-element command in ProcessImpl.start before CreateProcess, which
+ * is still a launch failure, so it gets the same teaching message and 127. Both are reported as
+ * such, so a program that cannot be started never reads as an unreachable daemon. [release] is
+ * owner-scoped (see release), so a foreign lease is never touched.
  */
 internal fun runLeased(cmd: List<String>, build: () -> ProcessBuilder, release: () -> Unit): Int =
     try {
         build().inheritIO().start().waitFor()
     } catch (e: IOException) {
+        System.err.println("corral: failed to run ${cmd.firstOrNull()} (${e.message})")
+        127
+    } catch (e: IllegalArgumentException) {
         System.err.println("corral: failed to run ${cmd.firstOrNull()} (${e.message})")
         127
     } finally {

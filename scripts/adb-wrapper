@@ -76,11 +76,24 @@ agent_process() {
   return 1
 }
 
+# Resolve the corral CLI from PATH entries only, to an absolute path. Empty, "." and relative
+# entries are aliases for the current directory; skipping them stops a planted ./corral from
+# being adopted as the CLI (command -v would honour them).
+resolve_cli() {
+  local dir; local -a entries
+  IFS=: read -ra entries <<< "${PATH:-}"
+  for dir in "${entries[@]}"; do
+    [[ -z $dir || $dir == . || $dir != /* ]] && continue
+    if [[ -x "$dir/corral" ]]; then printf '%s\n' "$dir/corral"; return 0; fi
+  done
+  return 1
+}
+
 if [[ -n ${CORRAL_OWNER:-} ]]; then OWNER=$CORRAL_OWNER
 elif [[ -r "$PROC_ROOT/self/stat" ]] && read -r apid astart acomm < <(agent_process); then
   OWNER="proc:$acomm:$apid:$astart"
-elif [[ ! -r "$PROC_ROOT/self/stat" ]] && command -v corral >/dev/null 2>&1 &&
-     o=$(corral owner 2>/dev/null) && [[ -n "$o" ]]; then
+elif [[ ! -r "$PROC_ROOT/self/stat" ]] && cli=$(resolve_cli) &&
+     o=$("$cli" owner 2>/dev/null) && [[ -n "$o" ]]; then
   OWNER=$o
 else OWNER="user:${USER:-$(id -un)}"; fi
 

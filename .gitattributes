@@ -1,0 +1,5 @@
+# Windows batch files must be CRLF on checkout. Real cmd.exe can misparse a multi-line LF-only
+# .bat, and scripts/adb-wrapper.bat + scripts/corral.bat use parenthesised blocks and `call :label`
+# targets — the constructs that break without it. Wine tolerates LF, so the wrapper suite's CRLF
+# check is what keeps this honest. Covers gradlew.bat as well.
+*.bat text eol=crlf

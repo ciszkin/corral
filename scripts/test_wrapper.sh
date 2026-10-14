@@ -32,6 +32,7 @@ DAEMON_PID=""
 cleanup() {
   [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
   pkill -f "corral.test.tag=$$" 2>/dev/null
+  [ -n "${WINEPREFIX:-}" ] && command -v wineserver >/dev/null 2>&1 && timeout 20 wineserver -k 2>/dev/null
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -208,6 +209,27 @@ check "no-proc host: wrapper delegates identity to corral owner" bash -c '
   curl -sf -X DELETE "$CORRAL_URL/api/leases/dev2" -H "Content-Type: application/json" \
     -d "{\"owner\":\"delegated-owner\"}" >/dev/null
   exit $rc
+'
+
+# the owner fallback resolves the CLI from PATH entries only: command -v treats "." and empty
+# PATH entries as the CWD, so a planted ./corral could answer as the owner. It must be ignored —
+# the absolute PATH entry wins, and the planted script must never run.
+check "posix: a planted ./corral is not adopted for the owner fallback" bash -c '
+  d="$TMP/posix-plant"; fake="$TMP/posix-fakebin"; scratch="$TMP/posix-scratch"
+  rm -rf "$d" "$fake" "$scratch"; mkdir -p "$d" "$fake" "$scratch"
+  printf "#!/bin/sh\necho planted >> %s/marker\necho planted-owner\n" "$d" > "$d/corral"; chmod +x "$d/corral"
+  printf "#!/bin/sh\necho delegated-owner\n" > "$fake/corral"; chmod +x "$fake/corral"
+  curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
+    -d "{\"selector\":{\"serial\":\"dev2\"},\"owner\":\"delegated-owner\"}" >/dev/null || exit 1
+  # "." first (the CWD alias under test), then an empty scratch dir, then the fake CLI, and only
+  # then the system dirs (which supply curl/grep) — so a real corral in /usr/bin cannot shadow it
+  ( cd "$d" && PATH=".:$scratch:$fake:/usr/bin:/bin" CORRAL_PROC_ROOT="$TMP/noproc" env -u CORRAL_OWNER \
+      "$TMP/bin/adb" -s dev2 shell ls >/dev/null 2>&1 ); rc=$?
+  curl -sf -X DELETE "$CORRAL_URL/api/leases/dev2" -H "Content-Type: application/json" \
+    -d "{\"owner\":\"delegated-owner\"}" >/dev/null 2>&1
+  [ "$rc" -eq 0 ] || { echo "wrapper failed (rc=$rc) with a planted ./corral in the CWD" >&2; exit 1; }
+  [ -f "$d/marker" ] && { echo "planted ./corral was executed" >&2; exit 1; }
+  exit 0
 '
 
 # blank identity keys fall back to the built-in lists in both readers; an emptied shell_skip
@@ -431,6 +453,218 @@ check "lapsed unpolled ticket is dropped and the next waiter is served" bash -c 
   wait
   exit 0
 '
+
+# --- Windows .bat line endings ---
+# Real cmd.exe misparses a multi-line LF-only .bat, and adb-wrapper.bat/corral.bat use parenthesised
+# blocks and `call :label` targets — the constructs that break without CRLF. Wine tolerates LF, so
+# this check is the only thing that catches it; .gitattributes forces CRLF on checkout.
+bat_crlf() {
+  local f
+  for f in "$SRC/adb-wrapper.bat" "$SRC/corral.bat"; do
+    grep -q $'\r' "$f" || { echo "$f is not CRLF-terminated" >&2; return 1; }
+  done
+}
+check "shipped .bat files are CRLF (real cmd.exe misparses LF batch)" bat_crlf
+
+# --- Windows .bat wrapper: resolve the CLI from PATH entries only, never the CWD ---
+# where/call also search the CWD, so a planted corral.bat there could both satisfy the guard and
+# run as the gate. wine runs the batch files; install/init it in CI (.github/workflows/ci.yml).
+skip_bat_checks() {
+  {
+    echo
+    echo '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+    echo 'WARNING: wine is not available - the Windows .bat wrapper checks were SKIPPED, so'
+    echo 'this run proves NOTHING about adb-wrapper.bat or corral.bat:'
+    echo '  win: a planted corral.bat or extensionless corral in the CWD is ignored'
+    echo '  win: a planted CLI in the CWD is never executed as the gate'
+    echo '  win: corral on PATH is resolved and delegated to, exit code preserved'
+    echo '  win: relative, . and empty PATH entries do not satisfy resolution'
+    echo '  win: corral.bat ignores a planted java in the CWD and fails closed'
+    echo '  win: corral.bat runs the java named by CORRAL_JAVA'
+    echo '  win: corral.bat resolves java from an absolute PATH entry'
+    echo '  win: a forward-slash absolute PATH entry resolves'
+    echo '  win: corral.exe outranks corral.bat, matching cmd PATHEXT'
+    echo 'wine is installed by CI (see .github/workflows/ci.yml); local runs may skip.'
+    echo '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
+    echo
+  } >&2
+}
+
+if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
+  export WINEPREFIX="$TMP/wineprefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
+  if timeout 120 wineboot -i >/dev/null 2>&1 && timeout 60 wine cmd /c "exit" >/dev/null 2>&1; then
+    winpath() { printf 'Z:%s' "${1//\//\\}"; }
+    winpath_fwd() { local p; p=$(winpath "$1"); printf '%s' "${p//\\//}"; }
+    # run_bat <dir> <windows PATH> [args...]: run adb-wrapper.bat from <dir> with that PATH
+    run_bat() {
+      local d="$1" wpath="$2"; shift 2
+      local wd; wd=$(winpath "$d")
+      printf '@echo off\r\nset "PATH=%s"\r\ncall "%s\\adb-wrapper.bat" %s\r\n' \
+        "$wpath" "$wd" "$*" > "$d/launch.bat"
+      ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
+    }
+    # run_corral <dir> <windows PATH> <extra set-line> [args...]: run corral.bat from <dir>
+    run_corral() {
+      local d="$1" wpath="$2" extra="$3"; shift 3
+      local wd; wd=$(winpath "$d")
+      printf '@echo off\r\nset "PATH=%s"\r\n%s\r\ncall "%s\\corral.bat" %s\r\n' \
+        "$wpath" "$extra" "$wd" "$*" > "$d/launch.bat"
+      ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
+    }
+    bat_dir() {
+      local d="$TMP/win/$1"; rm -rf "$d"; mkdir -p "$d"
+      cp "$SRC/adb-wrapper.bat" "$d/adb-wrapper.bat"; printf '%s' "$d"
+    }
+    corral_dir() {
+      local d="$TMP/win/$1"; rm -rf "$d"; mkdir -p "$d"
+      cp "$SRC/corral.bat" "$d/corral.bat"; printf '%s' "$d"
+    }
+
+    check_bat_cwd_ignored() {
+      local d out
+      d=$(bat_dir c6a)
+      printf '@echo off\r\necho ran > marker.txt\r\nexit /b 0\r\n' > "$d/corral.bat"
+      out=$(run_bat "$d" 'C:\windows\system32' devices)
+      case "$out" in *"CLI not on PATH"*) ;; *) echo "corral.bat case: $out" >&2; return 1;; esac
+      [ -f "$d/marker.txt" ] && { echo "planted corral.bat ran" >&2; return 1; }
+      d=$(bat_dir c6b)
+      printf '@echo off\r\necho ran > marker.txt\r\n' > "$d/corral"
+      out=$(run_bat "$d" 'C:\windows\system32' devices)
+      case "$out" in *"CLI not on PATH"*) ;; *) echo "extensionless case: $out" >&2; return 1;; esac
+      [ -f "$d/marker.txt" ] && { echo "planted extensionless corral ran" >&2; return 1; }
+      return 0
+    }
+    check "win: a planted corral.bat or extensionless corral in the CWD is ignored" check_bat_cwd_ignored
+
+    check_bat_not_executed() {
+      local d out
+      d=$(bat_dir c6mark)
+      printf '@echo off\r\necho ran > marker.txt\r\necho PLANTED-SENTINEL\r\nexit /b 0\r\n' > "$d/corral.bat"
+      out=$(run_bat "$d" 'C:\windows\system32' devices)
+      [ -f "$d/marker.txt" ] && { echo "planted CLI executed" >&2; return 1; }
+      case "$out" in *PLANTED-SENTINEL*) echo "planted sentinel leaked: $out" >&2; return 1;; esac
+      # anchored: without this the check is pure-negative and would pass if the harness broke and
+      # nothing ran at all. Prove the wrapper ran AND decided to fail closed.
+      case "$out" in *"CLI not on PATH"*) ;; *) echo "wrapper did not fail closed: $out" >&2; return 1;; esac
+      return 0
+    }
+    check "win: a planted CLI in the CWD is never executed as the gate" check_bat_not_executed
+
+    # the PATH entry has a space (the real install lands under "Program Files") and must resolve
+    check_bat_happy() {
+      local d out rc
+      d=$(bat_dir happy); mkdir -p "$d/real bin"
+      printf '@echo off\r\necho REAL-CORRAL gate %%*\r\nexit /b 7\r\n' > "$d/real bin/corral.bat"
+      printf '@echo off\r\necho ran > marker.txt\r\nexit /b 0\r\n' > "$d/corral.bat"
+      out=$(run_bat "$d" "C:\\windows\\system32;$(winpath "$d/real bin")" devices); rc=$?
+      case "$out" in *REAL-CORRAL*) ;; *) echo "$out" >&2; return 1;; esac
+      [ "$rc" -eq 7 ] || { echo "exit code $rc != 7" >&2; return 1; }
+      [ -f "$d/marker.txt" ] && { echo "planted CLI ran" >&2; return 1; }
+      return 0
+    }
+    check "win: corral on PATH is resolved and delegated to, exit code preserved" check_bat_happy
+
+    check_bat_relative() {
+      local d out
+      d=$(bat_dir rel); mkdir -p "$d/bin"
+      printf '@echo off\r\necho ran > binmarker.txt\r\nexit /b 0\r\n' > "$d/bin/corral.bat"
+      printf '@echo off\r\necho ran > cwdmarker.txt\r\nexit /b 0\r\n' > "$d/corral.bat"
+      out=$(run_bat "$d" 'C:\windows\system32;bin;.;' devices)
+      case "$out" in *"CLI not on PATH"*) ;; *) echo "$out" >&2; return 1;; esac
+      [ -f "$d/binmarker.txt" ] && { echo "relative PATH entry resolved" >&2; return 1; }
+      [ -f "$d/cwdmarker.txt" ] && { echo "CWD resolved" >&2; return 1; }
+      return 0
+    }
+    check "win: relative, . and empty PATH entries do not satisfy resolution" check_bat_relative
+
+    # corral.bat is the user-facing shim the gate delegates to; a bare `java` there is resolved
+    # from the CWD first by cmd, so it must resolve java from PATH entries only (or an override).
+    check_corral_planted_java() {
+      local d out
+      d=$(corral_dir cj-plant)
+      printf '@echo off\r\necho RAN > java.marker\r\nexit /b 0\r\n' > "$d/java.bat"
+      out=$(run_corral "$d" 'C:\windows\system32;C:\windows' '' claim)
+      [ -f "$d/java.marker" ] && { echo "planted java.bat ran" >&2; return 1; }
+      case "$out" in *"java not found"*) ;; *) echo "$out" >&2; return 1;; esac
+      return 0
+    }
+    check "win: corral.bat ignores a planted java in the CWD and fails closed" check_corral_planted_java
+
+    check_corral_java_override() {
+      local d out rc
+      d=$(corral_dir cj-override); mkdir -p "$d/real"
+      printf '@echo off\r\necho RAN > override.marker\r\nexit /b 4\r\n' > "$d/real/java.bat"
+      out=$(run_corral "$d" 'C:\windows\system32' "set \"CORRAL_JAVA=$(winpath "$d/real/java.bat")\"" claim); rc=$?
+      [ -f "$d/override.marker" ] || { echo "CORRAL_JAVA java not run: $out" >&2; return 1; }
+      [ "$rc" -eq 4 ] || { echo "rc $rc != 4: $out" >&2; return 1; }
+      return 0
+    }
+    check "win: corral.bat runs the java named by CORRAL_JAVA" check_corral_java_override
+
+    # corral.bat picks the jar by branching on CORRAL_JAR. The java stubs above ignore -cp, so
+    # without this the branch is unobservable: dropping either path would pass unnoticed.
+    check_corral_jar_branch() {
+      local d out binpath custom
+      d=$(corral_dir cj-jar); mkdir -p "$d/bin"
+      printf '@echo off\r\necho ARGS=%%*\r\nexit /b 0\r\n' > "$d/bin/java.bat"
+      binpath=$(winpath "$d/bin"); custom=$(winpath "$d/custom.jar")
+      out=$(run_corral "$d" "C:\\windows\\system32;$binpath" "set \"CORRAL_JAR=$custom\"" claim)
+      case "$out" in *ARGS=-cp*"$custom"*) ;; *) echo "CORRAL_JAR branch: $out" >&2; return 1;; esac
+      # must CLEAR it, not merely omit it: the suite exports CORRAL_JAR for its own jar, and wine
+      # inherits the environment, so an omitted set would silently re-take the branch above
+      out=$(run_corral "$d" "C:\\windows\\system32;$binpath" 'set "CORRAL_JAR="' claim)
+      case "$out" in *ARGS=-cp*corral-daemon-all.jar*) ;; *) echo "default jar branch: $out" >&2; return 1;; esac
+      case "$out" in *"$custom"*) echo "default branch used CORRAL_JAR: $out" >&2; return 1;; esac
+      return 0
+    }
+    check "win: corral.bat passes CORRAL_JAR, else the default jar path" check_corral_jar_branch
+
+    check_corral_java_on_path() {
+      local d out rc
+      d=$(corral_dir cj-path); mkdir -p "$d/bin"
+      printf '@echo off\r\necho RAN > abs.marker\r\nexit /b 6\r\n' > "$d/bin/java.bat"
+      out=$(run_corral "$d" "C:\\windows\\system32;$(winpath "$d/bin")" '' claim); rc=$?
+      [ -f "$d/abs.marker" ] || { echo "PATH java not run: $out" >&2; return 1; }
+      [ "$rc" -eq 6 ] || { echo "rc $rc != 6: $out" >&2; return 1; }
+      return 0
+    }
+    check "win: corral.bat resolves java from an absolute PATH entry" check_corral_java_on_path
+
+    check_bat_forward_slash() {
+      local d out rc
+      d=$(bat_dir fwd); mkdir -p "$d/bin"
+      printf '@echo off\r\necho FWD-CORRAL gate %%*\r\nexit /b 9\r\n' > "$d/bin/corral.bat"
+      out=$(run_bat "$d" "C:\\windows\\system32;$(winpath_fwd "$d/bin")" devices); rc=$?
+      case "$out" in *FWD-CORRAL*) ;; *) echo "$out" >&2; return 1;; esac
+      [ "$rc" -eq 9 ] || { echo "rc $rc != 9: $out" >&2; return 1; }
+      return 0
+    }
+    check "win: a forward-slash absolute PATH entry resolves" check_bat_forward_slash
+
+    check_bat_pathext_order() {
+      local d out pe
+      d=$(bat_dir ext); mkdir -p "$d/bin"
+      pe="$WINEPREFIX/drive_c/windows/system32/hostname.exe"
+      [ -f "$pe" ] || { echo "no PE to plant at $pe" >&2; return 1; }
+      cp "$pe" "$d/bin/corral.exe"
+      printf '@echo off\r\necho BAT-WON > bat.marker\r\nexit /b 0\r\n' > "$d/bin/corral.bat"
+      out=$(run_bat "$d" "C:\\windows\\system32;$(winpath "$d/bin")" devices)
+      [ -f "$d/bat.marker" ] && { echo "corral.bat outranked corral.exe" >&2; return 1; }
+      case "$out" in *"CLI not on PATH"*) echo "did not pick corral.exe: $out" >&2; return 1;; esac
+      return 0
+    }
+    check "win: corral.exe outranks corral.bat, matching cmd PATHEXT" check_bat_pathext_order
+  else
+    skip_bat_checks
+    # These checks exist because CI silently skipped them in a green build. Under CI a skip must
+    # FAIL, or a wineboot flake on a cold runner reproduces the original hole. Locally it stays a
+    # warning so the suite still runs on a machine without wine.
+    [ -n "${CI:-}" ] && check "win: .bat wrapper checks actually RAN (wine present but unusable)" false
+  fi
+else
+  skip_bat_checks
+  [ -n "${CI:-}" ] && check "win: .bat wrapper checks actually RAN (wine unavailable)" false
+fi
 
 # --- report ---
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

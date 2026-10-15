@@ -185,13 +185,13 @@ class PoolViewModel(
                 val png = api()?.screenshot(serial) ?: return@launch
                 reduceState { copy(thumbnails = thumbnails + (serial to png)) }
                 if (state.value.devices.all { it.d.serial in state.value.thumbnails }) {
-                    reduceState { copy(denied = false) }
+                    reduceState { copy(denied = false, deniedReason = null) }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: ScreenshotDeniedException) {
                 thumbLock.withLock { thumbAttempted.remove(serial) }
-                reduceState { copy(denied = true) }
+                reduceState { copy(denied = true, deniedReason = e.reason ?: deniedReason) }
             } catch (_: Exception) {
                 thumbLock.withLock { thumbAttempted.remove(serial) }
             }

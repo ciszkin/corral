@@ -113,6 +113,14 @@ internal enum class AppSection(val label: StringResource, val icon: DrawableReso
 
 internal val AppSections: List<AppSection> = AppSection.entries
 
+/**
+ * The localized banner plus the daemon's own denial text, so the operator can read the identity that was
+ * sent. The reason goes on its own line: the localized string already carries dash clauses, so joining with
+ * another dash reads as one run-on sentence.
+ */
+internal fun deniedBannerText(base: String, reason: String?): String =
+    if (reason.isNullOrBlank()) base else "$base\n$reason"
+
 @Composable
 fun AppScreen(
     app: AppViewModel,
@@ -214,7 +222,8 @@ fun AppScreen(
                     val colors = LocalExtendedColors.current
                     Banner(
                         icon = Icons.CameraOff,
-                        text = stringResource(Res.string.banner_screenshots_denied),
+                        text = deniedBannerText(
+                            stringResource(Res.string.banner_screenshots_denied), poolState.deniedReason),
                         container = colors.warningContainer,
                         content = colors.onWarningContainer,
                     )

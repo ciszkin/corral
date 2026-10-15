@@ -23,6 +23,7 @@ data class PoolState(
     val doctor: DoctorResponse? = null,
     val thumbnails: Map<String, ByteArray?> = emptyMap(),
     val denied: Boolean = false,
+    val deniedReason: String? = null,
     val confirmFree: String? = null,
     val capabilities: Capabilities = Capabilities(false),
     val now: Long = 0,

@@ -34,6 +34,11 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
+private const val DENIAL_BODY =
+    "corral: strict screenshots: denied-body is not leased by ui-owner — if ui-owner is an observer, " +
+        "add it to CORRAL_SCREENSHOT_OBSERVERS; if it is a usable device, corral claim denied-body first, " +
+        "or set CORRAL_SCREENSHOTS=open"
+
 class CorralClientTest {
     private val freed = mutableListOf<Pair<String, String>>()
     private val started = mutableListOf<String>()
@@ -52,7 +57,15 @@ class CorralClientTest {
                 }
                 get("/api/queue") { call.respond(listOf(QueueEntry(1, "w", "[any]", 0, 600))) }
                 get("/api/devices/{serial}/screenshot") {
-                    if (call.parameters["serial"] == "denied") { call.respond(HttpStatusCode.Forbidden); return@get }
+                    when (call.parameters["serial"]) {
+                        "denied" -> { call.respond(HttpStatusCode.Forbidden); return@get }
+                        "denied-body" -> {
+                            call.respondText(
+                                DENIAL_BODY, status = HttpStatusCode.Forbidden)
+                            return@get
+                        }
+                        "denied-blank" -> { call.respondText("  ", status = HttpStatusCode.Forbidden); return@get }
+                    }
                     assertEquals("dev1", call.parameters["serial"])
                     assertEquals("ui-owner", call.request.queryParameters["owner"])
                     call.respondBytes("png".encodeToByteArray(), ContentType.Image.PNG)
@@ -214,6 +227,19 @@ class CorralClientTest {
 
     @Test fun screenshotForbiddenSurfacesAsPolicyDenial() = testApplication {
         assertFailsWith<ScreenshotDeniedException> { client().screenshot("denied") }
+    }
+
+    @Test fun forbiddenCarriesTheDaemonReasonIntoTheException() = testApplication {
+        val e = assertFailsWith<ScreenshotDeniedException> { client().screenshot("denied-body") }
+        assertEquals(DENIAL_BODY, e.reason)
+    }
+
+    @Test fun forbiddenWithEmptyBodyDegradesToANullReason() = testApplication {
+        assertNull(assertFailsWith<ScreenshotDeniedException> { client().screenshot("denied") }.reason)
+    }
+
+    @Test fun forbiddenWithBlankBodyDegradesToANullReason() = testApplication {
+        assertNull(assertFailsWith<ScreenshotDeniedException> { client().screenshot("denied-blank") }.reason)
     }
 
     @Test fun forceFreeConflictThrows() = testApplication {

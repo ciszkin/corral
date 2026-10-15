@@ -31,6 +31,24 @@ class AppScreenTest {
         }
     }
 
+    // The real English banner: it already carries a dash clause, so the reason must go on its own line.
+    private val deniedBanner = "screenshots denied — is this client named in the daemon's CORRAL_SCREENSHOT_OBSERVERS?"
+
+    @Test fun deniedBannerPutsTheDaemonReasonOnItsOwnLine() {
+        val reason = "corral: strict screenshots: dev1 is not leased by wrong-operator — " +
+            "if wrong-operator is an observer, add it to CORRAL_SCREENSHOT_OBSERVERS; if it is a usable " +
+            "device, corral claim dev1 first, or set CORRAL_SCREENSHOTS=open"
+        assertEquals(
+            "$deniedBanner\n$reason",
+            deniedBannerText(deniedBanner, reason),
+        )
+    }
+
+    @Test fun deniedBannerFallsBackToTheLocalizedStringAlone() {
+        assertEquals(deniedBanner, deniedBannerText(deniedBanner, null))
+        assertEquals(deniedBanner, deniedBannerText(deniedBanner, "  "))
+    }
+
     @Test fun koinWiresTheViewModel() {
         val prefsStore = UiPrefs(createTempDirectory("koin").resolve("ui.conf"))
         val koin = startKoin {

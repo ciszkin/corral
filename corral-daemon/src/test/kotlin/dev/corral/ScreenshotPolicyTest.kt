@@ -1,6 +1,7 @@
 package dev.corral
 
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -17,6 +18,28 @@ class ScreenshotPolicyTest {
         val why = ScreenshotPolicy(null).denies("dev1", null, "agent-b")   // default env = strict
         assertTrue(why!!.contains("not leased") && why.contains("corral claim dev1"))
     }
+
+    // Finding I4: a free-device denial must name the identity it received AND point at the observer list,
+    // or a UI operator cannot tell which name the daemon saw or how to let it in.
+    @Test fun freeDeviceDenialNamesTheSentOwnerAndTheObserverList() {
+        val why = ScreenshotPolicy("strict", "corral-ui").denies("dev1", null, "wrong-name")
+        assertTrue(why!!.contains("not leased by wrong-name"), why)
+        assertTrue(why.contains("CORRAL_SCREENSHOT_OBSERVERS"), why)
+    }
+
+    @Test fun holderBranchAdviceIsUnchanged() {
+        assertEquals(
+            "corral: strict screenshots: dev1 is held by agent-a — corral claim dev1, " +
+                "or ask the holder; set CORRAL_SCREENSHOTS=open to disable this policy",
+            ScreenshotPolicy("strict").denies("dev1", lease, "agent-b"),
+        )
+    }
+
+    @Test fun observerIsAllowedForAFreeDevice() =
+        assertNull(ScreenshotPolicy("strict", "corral-ui").denies("dev1", null, "corral-ui"))
+
+    @Test fun openModeAllowsAFreeDevice() = assertNull(ScreenshotPolicy("open").denies("dev1", null, "anyone"))
+
     @Test fun openModeAllowsAnyone() = assertNull(ScreenshotPolicy("open").denies("dev1", lease, "anyone"))
     @Test fun unknownModeFailsClosed() = assertTrue(ScreenshotPolicy("yes").denies("dev1", lease, "anyone") != null)
     @Test fun observerListTrimsAndIgnoresBlanks() = assertNull(ScreenshotPolicy("strict", " corral-ui , ,x ").denies("dev1", lease, "corral-ui"))

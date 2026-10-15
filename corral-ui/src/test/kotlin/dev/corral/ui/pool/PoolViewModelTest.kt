@@ -60,6 +60,7 @@ class PoolViewModelTest {
         var forceFail = false
         var startFail = false
         var stopFail = false
+        var denialReason: String? = null
 
         override suspend fun devices(): List<Device> { devicesCalls++; return devicesResponse }
         override suspend fun status(): StatusResponse { statusCalls++; return statusResponse }
@@ -68,7 +69,7 @@ class PoolViewModelTest {
         override suspend fun screenshot(serial: String): ByteArray {
             screenshots += serial
             if (serial in failing) throw RuntimeException("connection reset")
-            if (serial in denied) throw ScreenshotDeniedException()
+            if (serial in denied) throw ScreenshotDeniedException(denialReason)
             return byteArrayOf(1, 2)
         }
         override suspend fun forceFree(serial: String) {
@@ -246,6 +247,40 @@ class PoolViewModelTest {
             assertEquals(setOf("denied", "ok"), api.screenshots.toSet())
             assertEquals(setOf("ok"), pool.state.value.thumbnails.keys)
         }
+    }
+
+    @Test fun screenshotDenialCarriesTheDaemonReasonIntoState() = runTest {
+        val api = FakeApi(
+            devicesResponse = devicesOf("dev1"),
+            statusResponse = StatusResponse(listOf(DeviceStatus("dev1", null)), "/adb"),
+        )
+        api.denied += "dev1"
+        api.denialReason = "corral: strict screenshots: dev1 is not leased by corral-ui — if corral-ui is an " +
+            "observer, add it to CORRAL_SCREENSHOT_OBSERVERS; if it is a usable device, corral claim dev1 first, " +
+            "or set CORRAL_SCREENSHOTS=open"
+        val (pool, app) = newPool(api)
+        runCurrent()
+        app.onIntent(AppIntent.Frame(hello)); runCurrent()
+        assertTrue(pool.state.value.denied)
+        assertEquals(api.denialReason, pool.state.value.deniedReason)
+    }
+
+    @Test fun clearingTheDenialClearsTheReason() = runTest {
+        val api = FakeApi(
+            devicesResponse = devicesOf("dev1"),
+            statusResponse = StatusResponse(listOf(DeviceStatus("dev1", null)), "/adb"),
+        )
+        api.denied += "dev1"
+        api.denialReason = "corral: strict screenshots: dev1 is not leased by corral-ui"
+        val (pool, app) = newPool(api)
+        runCurrent()
+        app.onIntent(AppIntent.Frame(hello)); runCurrent()
+        assertTrue(pool.state.value.deniedReason != null)
+
+        api.denied -= "dev1"
+        app.onIntent(AppIntent.Frame(EventFrame("state.changed", listOf("devices"), 1))); runCurrent()
+        assertFalse(pool.state.value.denied)
+        assertNull(pool.state.value.deniedReason)
     }
 
     @Test fun transientScreenshotFailureDoesNotRaiseTheBanner() = runTest {

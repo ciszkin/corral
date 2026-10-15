@@ -20,8 +20,11 @@ val AvdStatus.lastError: String? get() = error?.takeIf { it.isNotBlank() }
 /** What the UI may do — v1 is the single-operator world; the future swaps the provider for /api/whoami. */
 data class Capabilities(val canForceFree: Boolean)
 
-/** The daemon's 403 on screenshots: this owner is not in CORRAL_SCREENSHOT_OBSERVERS. Everything else is transient. */
-class ScreenshotDeniedException(cause: Throwable? = null) :
+/**
+ * The daemon's 403 on screenshots: this owner is not in CORRAL_SCREENSHOT_OBSERVERS. Everything else is
+ * transient. [reason] is the daemon's own denial text (naming the identity it saw), when the body was readable.
+ */
+class ScreenshotDeniedException(val reason: String? = null, cause: Throwable? = null) :
     Exception("screenshots denied by daemon policy", cause)
 
 /** The daemon's 400 on a config PUT, carrying the per-key validation messages. */

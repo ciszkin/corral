@@ -22,8 +22,9 @@ class ScreenshotPolicy(
         if (owner in observerSet) return null
         return when (val holder = lease?.owner) {
             owner -> null
-            null -> "corral: strict screenshots: $serial is not leased by $owner — if it is a usable " +
-                "device, corral claim $serial first, or set CORRAL_SCREENSHOTS=open"
+            null -> "corral: strict screenshots: $serial is not leased by $owner — if $owner is an observer, " +
+                "add it to CORRAL_SCREENSHOT_OBSERVERS; if it is a usable device, corral claim $serial first, " +
+                "or set CORRAL_SCREENSHOTS=open"
             else -> "corral: strict screenshots: $serial is held by $holder — corral claim $serial, " +
                 "or ask the holder; set CORRAL_SCREENSHOTS=open to disable this policy"
         }

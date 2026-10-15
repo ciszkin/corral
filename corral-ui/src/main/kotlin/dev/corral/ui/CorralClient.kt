@@ -25,6 +25,7 @@ import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.request.url
 import io.ktor.client.statement.bodyAsBytes
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
@@ -33,6 +34,7 @@ import io.ktor.serialization.kotlinx.json.json
 import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -67,7 +69,16 @@ class CorralClient internal constructor(
     override suspend fun screenshot(serial: String): ByteArray = try {
         http.get("$baseUrl/api/devices/${serial.encodeURLParameter()}/screenshot?owner=${owner.encodeURLParameter()}").bodyAsBytes()
     } catch (e: ClientRequestException) {
-        if (e.response.status == HttpStatusCode.Forbidden) throw ScreenshotDeniedException(e) else throw e
+        if (e.response.status == HttpStatusCode.Forbidden) {
+            val reason = try {
+                e.response.bodyAsText().trim().takeIf(String::isNotEmpty)
+            } catch (c: CancellationException) {
+                throw c
+            } catch (_: Exception) {
+                null
+            }
+            throw ScreenshotDeniedException(reason, e)
+        } else throw e
     }
 
     override suspend fun forceFree(serial: String) {

@@ -499,7 +499,10 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
     run_bat() {
       local d="$1" wpath="$2"; shift 2
       local wd; wd=$(winpath "$d")
-      printf '@echo off\r\nset "PATH=%s"\r\ncall "%s\\adb-wrapper.bat" %s\r\n' \
+      # the trailing `exit /b %%errorlevel%%` is explicit on purpose: cmd /c under wine 9 drops the
+      # IMPLICIT final errorlevel of a script, so a launch.bat ending in a bare `call` reported 1
+      # instead of the delegate's code. Propagate deliberately at every level instead.
+      printf '@echo off\r\nset "PATH=%s"\r\ncall "%s\\adb-wrapper.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
         "$wpath" "$wd" "$*" > "$d/launch.bat"
       ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
     }
@@ -507,7 +510,7 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
     run_corral() {
       local d="$1" wpath="$2" extra="$3"; shift 3
       local wd; wd=$(winpath "$d")
-      printf '@echo off\r\nset "PATH=%s"\r\n%s\r\ncall "%s\\corral.bat" %s\r\n' \
+      printf '@echo off\r\nset "PATH=%s"\r\n%s\r\ncall "%s\\corral.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
         "$wpath" "$extra" "$wd" "$*" > "$d/launch.bat"
       ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
     }

@@ -499,11 +499,10 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
     run_bat() {
       local d="$1" wpath="$2"; shift 2
       local wd; wd=$(winpath "$d")
-      # the shim's errorlevel is recorded INSIDE cmd, because wine 9's `cmd /c` does not carry a
-      # script's exit code out of the process (wine 11 does, and so does real cmd.exe -- the winbox
-      # confirmed WRAPPER_EXIT=3). Reading it back still asserts the property we own, that the shim
-      # returns the delegate's code, without depending on version-specific emulator plumbing.
-      printf '@echo off\r\nset "PATH=%s"\r\ncall "%s\\adb-wrapper.bat" %s\r\n> rc.txt echo %%errorlevel%%\r\nexit /b %%errorlevel%%\r\n' \
+      # the trailing `exit /b %%errorlevel%%` is explicit on purpose: cmd /c under wine 9 drops the
+      # IMPLICIT final errorlevel of a script, so a launch.bat ending in a bare `call` reported 1
+      # instead of the delegate's code. Propagate deliberately at every level instead.
+      printf '@echo off\r\nset "PATH=%s"\r\ncall "%s\\adb-wrapper.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
         "$wpath" "$wd" "$*" > "$d/launch.bat"
       ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
     }
@@ -511,12 +510,10 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
     run_corral() {
       local d="$1" wpath="$2" extra="$3"; shift 3
       local wd; wd=$(winpath "$d")
-      printf '@echo off\r\nset "PATH=%s"\r\n%s\r\ncall "%s\\corral.bat" %s\r\n> rc.txt echo %%errorlevel%%\r\nexit /b %%errorlevel%%\r\n' \
+      printf '@echo off\r\nset "PATH=%s"\r\n%s\r\ncall "%s\\corral.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
         "$wpath" "$extra" "$wd" "$*" > "$d/launch.bat"
       ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
     }
-    # read the errorlevel the launcher captured inside cmd (see run_bat)
-    bat_rc() { tr -d '\r\n ' < "$1/rc.txt" 2>/dev/null || true; }
     bat_dir() {
       local d="$TMP/win/$1"; rm -rf "$d"; mkdir -p "$d"
       cp "$SRC/adb-wrapper.bat" "$d/adb-wrapper.bat"; printf '%s' "$d"
@@ -562,7 +559,7 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
       d=$(bat_dir happy); mkdir -p "$d/real bin"
       printf '@echo off\r\necho REAL-CORRAL gate %%*\r\nexit /b 7\r\n' > "$d/real bin/corral.bat"
       printf '@echo off\r\necho ran > marker.txt\r\nexit /b 0\r\n' > "$d/corral.bat"
-      out=$(run_bat "$d" "C:\\windows\\system32;$(winpath "$d/real bin")" devices); rc=$(bat_rc "$d")
+      out=$(run_bat "$d" "C:\\windows\\system32;$(winpath "$d/real bin")" devices); rc=$?
       case "$out" in *REAL-CORRAL*) ;; *) echo "$out" >&2; return 1;; esac
       [ "$rc" -eq 7 ] || { echo "exit code $rc != 7" >&2; return 1; }
       [ -f "$d/marker.txt" ] && { echo "planted CLI ran" >&2; return 1; }
@@ -600,7 +597,7 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
       local d out rc
       d=$(corral_dir cj-override); mkdir -p "$d/real"
       printf '@echo off\r\necho RAN > override.marker\r\nexit /b 4\r\n' > "$d/real/java.bat"
-      out=$(run_corral "$d" 'C:\windows\system32' "set \"CORRAL_JAVA=$(winpath "$d/real/java.bat")\"" claim); rc=$(bat_rc "$d")
+      out=$(run_corral "$d" 'C:\windows\system32' "set \"CORRAL_JAVA=$(winpath "$d/real/java.bat")\"" claim); rc=$?
       [ -f "$d/override.marker" ] || { echo "CORRAL_JAVA java not run: $out" >&2; return 1; }
       [ "$rc" -eq 4 ] || { echo "rc $rc != 4: $out" >&2; return 1; }
       return 0
@@ -629,7 +626,7 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
       local d out rc
       d=$(corral_dir cj-path); mkdir -p "$d/bin"
       printf '@echo off\r\necho RAN > abs.marker\r\nexit /b 6\r\n' > "$d/bin/java.bat"
-      out=$(run_corral "$d" "C:\\windows\\system32;$(winpath "$d/bin")" '' claim); rc=$(bat_rc "$d")
+      out=$(run_corral "$d" "C:\\windows\\system32;$(winpath "$d/bin")" '' claim); rc=$?
       [ -f "$d/abs.marker" ] || { echo "PATH java not run: $out" >&2; return 1; }
       [ "$rc" -eq 6 ] || { echo "rc $rc != 6: $out" >&2; return 1; }
       return 0
@@ -640,7 +637,7 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
       local d out rc
       d=$(bat_dir fwd); mkdir -p "$d/bin"
       printf '@echo off\r\necho FWD-CORRAL gate %%*\r\nexit /b 9\r\n' > "$d/bin/corral.bat"
-      out=$(run_bat "$d" "C:\\windows\\system32;$(winpath_fwd "$d/bin")" devices); rc=$(bat_rc "$d")
+      out=$(run_bat "$d" "C:\\windows\\system32;$(winpath_fwd "$d/bin")" devices); rc=$?
       case "$out" in *FWD-CORRAL*) ;; *) echo "$out" >&2; return 1;; esac
       [ "$rc" -eq 9 ] || { echo "rc $rc != 9: $out" >&2; return 1; }
       return 0

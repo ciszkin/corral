@@ -45,10 +45,23 @@ jobs:
           WINEDEBUG: -all
           WINEDLLOVERRIDES: mscoree,mshtml=
         run: |
+          # WineHQ, NOT Ubuntu's `wine` package (9.0). Ubuntu's build does not propagate a batch
+          # file's exit code across `call`, so four wrapper checks asserting the delegate's exit
+          # code saw 1 instead -- the delegate ran, its output appeared, only the status was wrong.
+          # Real cmd.exe propagates correctly (the winbox confirms WRAPPER_EXIT=3), so pinning a
+          # faithful emulator keeps those assertions instead of weakening them.
           sudo dpkg --add-architecture i386
+          sudo mkdir -pm755 /etc/apt/keyrings
+          sudo wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+          sudo wget -q -NP /etc/apt/sources.list.d/ \
+            https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
           sudo apt-get update
-          sudo apt-get install -y wine
+          sudo apt-get install -y --install-recommends winehq-stable
           wine --version
+          # fail loudly if the wrong wine won: 9.0 is the broken one
+          wine --version | grep -qE 'wine-(9|10|11|12|13)\.' || {
+            echo "::error::expected a WineHQ build (>= 9, not Ubuntu 9.0's)"; exit 1; }
+          command -v wineboot >/dev/null || { echo "::error::wineboot missing"; exit 1; }
           wineboot -i
 
       - name: Run wrapper integration suite

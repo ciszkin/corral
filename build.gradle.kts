@@ -3,3 +3,26 @@ plugins {
     alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.shadow) apply false
 }
+
+// One git tag becomes the single source of truth: the release workflow passes CORRAL_VERSION,
+// a dev tree falls back to `git describe`, and a tree with no usable version (or no git) gets
+// the dev placeholder. A bare `--always` commit hash, a typo, or a blank value fails this shape.
+val versionShape = Regex("""\d+\.\d+\.\d+.*""")
+
+// Both sources go through the same normalisation — trim, strip the tag's leading `v`, then the
+// shape check — so the env override and `git describe` cannot drift apart. `v1.2.3` yields `1.2.3`
+// on either path; a value that fails the check returns null and the next source is tried.
+fun normalizedVersion(raw: String?): String? =
+    raw?.trim()?.removePrefix("v")?.takeIf { it.matches(versionShape) }
+
+val corralVersion: String = normalizedVersion(System.getenv("CORRAL_VERSION"))
+    ?: normalizedVersion(runCatching {
+        providers.exec {
+            commandLine("git", "describe", "--tags", "--match", "v*", "--always")
+        }.standardOutput.asText.get()
+    }.getOrNull())
+    ?: "0.0.0-dev"
+
+allprojects {
+    version = corralVersion
+}

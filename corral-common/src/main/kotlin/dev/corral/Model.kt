@@ -28,7 +28,8 @@ data class Lease(val serial: String, val owner: String, val pid: Long = 0,
 
 @Serializable data class DeviceStatus(val serial: String, val lease: Lease?, val booted: Boolean = true)
 
-@Serializable data class StatusResponse(val devices: List<DeviceStatus>, val adb: String)
+@Serializable data class StatusResponse(val devices: List<DeviceStatus>, val adb: String,
+                                         val version: String = "")
 
 @Serializable data class QueueEntry(val position: Int, val owner: String, val selector: String,
     val waitedSeconds: Long, val deadlineIn: Long)

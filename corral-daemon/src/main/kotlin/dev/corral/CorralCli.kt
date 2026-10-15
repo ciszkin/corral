@@ -399,6 +399,8 @@ object CorralCli {
     private fun run(args: Array<String>) {
         val pid = ProcessHandle.current().pid()
         when (args.firstOrNull() ?: "help") {
+            // Version is answered from the jar's own resource, with no daemon and no device.
+            "--version", "-V" -> { println(VersionSource.version); exitProcess(0) }
             "devices" -> println(get("/api/devices"))
             "status" -> println(get("/api/status"))
             "owner" -> println(owner)
@@ -534,7 +536,10 @@ object CorralCli {
                 }
             }
             "free" -> {
-                if (args.getOrNull(1) == "--all") {
+                val target = args.getOrNull(1)
+                // A bare `corral free` frees the caller's own leases, exactly like `free --all`;
+                // `free <serial>` keeps its owner-scoped DELETE. Neither touches a foreign lease.
+                if (target == "--all" || target == null) {
                     val owned = Json.parseToJsonElement(get("/api/status")).jsonObject["devices"]!!.jsonArray
                         .filter { (it.jsonObject["lease"] as? JsonObject)?.get("owner")?.jsonPrimitive?.content == owner }
                         .map { it.jsonObject["serial"]!!.jsonPrimitive.content }
@@ -544,9 +549,8 @@ object CorralCli {
                         println("freed: ${owned.joinToString(", ")}")
                     }
                 } else {
-                    val serial = args.getOrNull(1) ?: usage(2)
-                    send("DELETE", "/api/leases/$serial", Json.encodeToString(FreeRequest(owner = owner)))
-                    println("freed $serial")
+                    send("DELETE", "/api/leases/$target", Json.encodeToString(FreeRequest(owner = owner)))
+                    println("freed $target")
                 }
             }
             "renew" -> {

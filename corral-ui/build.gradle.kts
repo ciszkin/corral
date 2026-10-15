@@ -37,5 +37,20 @@ dependencies {
 
 tasks.shadowJar {
     archiveBaseName.set("corral-ui")
-    manifest { attributes["Main-Class"] = "dev.corral.ui.CorralUiKt" }
+    // Keep the stable `corral-ui-all.jar` name the launcher/installer reference; the version
+    // rides in the manifest and the corral-version resource instead.
+    archiveVersion.set("")
+    manifest {
+        attributes["Main-Class"] = "dev.corral.ui.CorralUiKt"
+        attributes["Implementation-Version"] = project.version
+    }
+}
+
+// The console carries its OWN version: the two jars are installed and updated separately and can
+// disagree, so the UI must be able to report the version baked into the UI jar.
+tasks.processResources {
+    val corralVersion = project.version.toString()
+    inputs.property("corralVersion", corralVersion)
+    val resourcesDir = destinationDir
+    doLast { resourcesDir.resolve("corral-version").writeText(corralVersion) }
 }

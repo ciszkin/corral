@@ -35,9 +35,19 @@ tasks.test {
 
 tasks.shadowJar {
     archiveBaseName.set("corral-daemon")
-    manifest { attributes["Main-Class"] = "dev.corral.MainKt" }
+    // Keep the stable `corral-daemon-all.jar` name the shims/installer reference; the version
+    // rides in the manifest and the corral-version resource instead.
+    archiveVersion.set("")
+    manifest {
+        attributes["Main-Class"] = "dev.corral.MainKt"
+        attributes["Implementation-Version"] = project.version
+    }
 }
 
 tasks.processResources {
     from(rootProject.file("scripts/corral-rules"))
+    val corralVersion = project.version.toString()
+    inputs.property("corralVersion", corralVersion)
+    val resourcesDir = destinationDir
+    doLast { resourcesDir.resolve("corral-version").writeText(corralVersion) }
 }

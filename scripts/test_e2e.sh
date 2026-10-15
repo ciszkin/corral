@@ -468,6 +468,59 @@ check_14_6_to_10() {
   return $rc
 }
 
+# --- M8a: version plumbing and `corral free` with no arguments ---
+
+# corral --version answers from the jar's own resource; no daemon or device is touched.
+check_version() {
+  local out rc
+  out=$(corral --version 2>&1); rc=$?
+  [ "$rc" = 0 ] || { echo "# --version: rc=$rc out=$out"; return 1; }
+  printf '%s\n' "$out" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+' \
+    || { echo "# --version: $out"; return 1; }
+  return 0
+}
+
+# A bare `corral free` when nothing is owned is an honest no-op and exits 0, not the usage error.
+check_free_bare_noop() {
+  free_all
+  local out rc
+  out=$(CORRAL_OWNER=nobody corral free 2>&1); rc=$?
+  [ "$rc" = 0 ] || { echo "# bare free noop: rc=$rc out=$out"; return 1; }
+  printf '%s\n' "$out" | grep -q 'no leases owned by nobody' || { echo "# bare free noop: $out"; return 1; }
+  return 0
+}
+
+# A bare `corral free` while the caller holds a lease releases exactly that lease.
+check_free_bare_own() {
+  free_all
+  corral claim dev1 >/dev/null 2>&1 || { echo "# bare free own: claim failed"; return 1; }
+  local out rc
+  out=$(CORRAL_OWNER=tester corral free 2>&1); rc=$?
+  [ "$rc" = 0 ] || { echo "# bare free own: rc=$rc out=$out"; return 1; }
+  printf '%s\n' "$out" | grep -q 'freed:.*dev1' || { echo "# bare free own: $out"; return 1; }
+  curl -sf "$CORRAL_URL/api/status" | grep -q '"serial":"dev1","lease":{' \
+    && { echo "# bare free own: dev1 is still leased"; return 1; }
+  return 0
+}
+
+# A bare `corral free` never touches another owner's lease — the D5 guard, kept for the bare form.
+check_free_bare_foreign() {
+  free_all
+  curl -s -X POST "$CORRAL_URL/api/leases" -H 'Content-Type: application/json' \
+    -d '{"selector":{"serial":"dev1"},"owner":"other"}' >/dev/null || { echo "# bare free foreign: claim failed"; return 1; }
+  local out rc
+  out=$(CORRAL_OWNER=tester corral free 2>&1); rc=$?
+  [ "$rc" = 0 ] || { echo "# bare free foreign: rc=$rc out=$out"; return 1; }
+  printf '%s\n' "$out" | grep -q 'no leases owned by tester' || { echo "# bare free foreign: $out"; return 1; }
+  if ! curl -sf "$CORRAL_URL/api/status" | grep -q '"owner":"other"'; then
+    echo "# bare free foreign: another owner's lease was freed"; return 1
+  fi
+  curl -s -X DELETE "$CORRAL_URL/api/leases/dev1" -H 'Content-Type: application/json' \
+    -d '{"owner":"other"}' >/dev/null
+  free_all
+  return 0
+}
+
 # --- pass-38: stopping a running AVD adb doesn't list ends the tracked spawn and says so,
 # distinct from the `{"stopped":[]}` no-op when nothing was running. SmallAVD is started but
 # never appended to fake-devices, so the route has no serial and must fall through to stopAvd. ---
@@ -733,6 +786,10 @@ start_daemon || exit 1
 check "8.6 daemon binds loopback only" check_8_6
 check "1.9 second daemon on same port exits non-zero" check_1_9
 check "1.10 two daemons on one DB: second refused loudly (exclusive lock)" check_1_10
+check "M8a corral --version prints a version and exits 0" check_version
+check "M8a bare corral free with no lease is an honest no-op" check_free_bare_noop
+check "M8a bare corral free releases the caller's own lease" check_free_bare_own
+check "M8a bare corral free never frees another owner's lease" check_free_bare_foreign
 
 stop_daemon
 rm -f "$TMP/corral.db"*

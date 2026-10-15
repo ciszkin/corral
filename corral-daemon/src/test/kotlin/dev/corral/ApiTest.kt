@@ -1084,6 +1084,13 @@ class ApiTest {
         assertTrue(r.bodyAsText().contains("\"serial\":\"dev1\""))
     }
 
+    @Test fun statusCarriesAVersion() = withApi { c ->
+        val body = Json.decodeFromString<StatusResponse>(c.get("/api/status").bodyAsText())
+        assertTrue(body.version.isNotBlank(), "the status version must be non-blank")
+        assertTrue(Regex("""\d+\.\d+\.\d+.*""").matches(body.version),
+            "the status version must be version-shaped, got: ${body.version}")
+    }
+
     @Test fun freeAllOnlyOwned() = withApi(
         listOf(Device("dev1", "device"), Device("dev2", "device"), Device("dev3", "device"))
     ) { c ->

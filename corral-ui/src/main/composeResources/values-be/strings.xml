@@ -77,6 +77,9 @@
 
     <string name="settings_client">Гэты кліент</string>
     <string name="settings_daemon">Дэман</string>
+    <!-- Draft additions pending OWNER REVIEW — version rows -->
+    <string name="settings_version">Версія</string>
+    <string name="settings_version_unknown">невядома</string>
     <string name="settings_restart_hint">патрабуецца перазапуск — systemctl --user restart corral</string>
     <string name="settings_reset_defaults">Скінуць да стандартных</string>
     <string name="settings_theme">Тэма</string>

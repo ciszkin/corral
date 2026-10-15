@@ -1,7 +1,9 @@
 package dev.corral.ui.app
 
 import dev.corral.ui.CorralClient
+import dev.corral.ui.UiVersionSource
 import dev.corral.ui.config.ConfigViewModel
+import dev.corral.ui.config.versionText
 import dev.corral.ui.data.Prefs
 import dev.corral.ui.data.UiPrefs
 import dev.corral.ui.di.CorralModules
@@ -47,6 +49,31 @@ class AppScreenTest {
     @Test fun deniedBannerFallsBackToTheLocalizedStringAlone() {
         assertEquals(deniedBanner, deniedBannerText(deniedBanner, null))
         assertEquals(deniedBanner, deniedBannerText(deniedBanner, "  "))
+    }
+
+    @Test fun statusBarShowsTheDaemonVersionWhenKnown() {
+        assertEquals(
+            "connected (seq 0) — http://127.0.0.1:8798 · v1.2.3",
+            statusBarText("connected (seq 0)", "http://127.0.0.1:8798", "1.2.3"),
+        )
+    }
+
+    @Test fun statusBarOmitsTheVersionWhenUnknown() {
+        assertEquals(
+            "connected (seq 0) — http://127.0.0.1:8798",
+            statusBarText("connected (seq 0)", "http://127.0.0.1:8798", ""),
+        )
+        assertEquals(
+            "disconnected — view is stale — http://127.0.0.1:8798",
+            statusBarText("disconnected — view is stale", "http://127.0.0.1:8798", "   "),
+        )
+    }
+
+    @Test fun settingsRowsReadTheirOwnVersionSources() {
+        val unknown = "unknown"
+        assertEquals("1.2.3", versionText(AppState(daemonVersion = "1.2.3").daemonVersion, unknown))
+        assertEquals(unknown, versionText(AppState().daemonVersion, unknown))
+        assertEquals(UiVersionSource.version, versionText(UiVersionSource.version, unknown))
     }
 
     @Test fun koinWiresTheViewModel() {

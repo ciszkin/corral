@@ -17,6 +17,7 @@ data class AppState(
     val connection: Connection = Connection.Connecting,
     val seq: Long = -1,
     val url: String = "",
+    val daemonVersion: String = "",
     val useDark: Boolean = true,
     val language: Language = Language.ENGLISH,
     val prefs: Prefs = Prefs(),

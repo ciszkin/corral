@@ -122,6 +122,22 @@ class PoolViewModelTest {
         assertEquals(1, api.doctorCalls)
     }
 
+    @Test fun daemonVersionFlowsFromTheStatusPollIntoAppState() = runTest {
+        val api = FakeApi(statusResponse = StatusResponse(emptyList(), "/adb", version = "1.2.3"))
+        val (_, app) = newPool(api)
+        runCurrent()
+        app.onIntent(AppIntent.Frame(hello)); runCurrent()
+        assertEquals("1.2.3", app.state.value.daemonVersion)
+    }
+
+    @Test fun aDaemonWithoutAVersionLeavesAppStateEmpty() = runTest {
+        val api = FakeApi(statusResponse = StatusResponse(emptyList(), "/adb"))
+        val (_, app) = newPool(api)
+        runCurrent()
+        app.onIntent(AppIntent.Frame(hello)); runCurrent()
+        assertEquals("", app.state.value.daemonVersion)
+    }
+
     @Test fun devicesNudgeFetchesStatusDevicesAndDoctorNotQueue() = runTest {
         val api = FakeApi(
             devicesResponse = devicesOf("dev1"),

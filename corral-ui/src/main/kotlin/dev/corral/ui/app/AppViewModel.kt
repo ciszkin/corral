@@ -66,7 +66,7 @@ class AppViewModel(
             is AppIntent.Connect -> {
                 val p = persist { it.copy(url = intent.url, owner = intent.owner) }
                 lastSeq = -1
-                reduceState { copy(prefs = p, url = intent.url) }
+                reduceState { copy(prefs = p, url = intent.url, daemonVersion = "") }
                 launchLoop(intent.url, intent.owner)
             }
             is AppIntent.SetTheme -> {
@@ -78,10 +78,17 @@ class AppViewModel(
                 reduceState { copy(prefs = p, language = intent.language) }
             }
             is AppIntent.SetScrcpy -> persist { it.copy(scrcpyPath = intent.path) }
-            AppIntent.SocketOpened -> reduceState { copy(connection = Connection.Connecting) }
+            AppIntent.SocketOpened -> reduceState { copy(connection = Connection.Connecting, daemonVersion = "") }
             is AppIntent.Frame -> onFrame(intent.frame)
-            AppIntent.SocketClosed -> reduceState { copy(connection = Connection.Disconnected(clock())) }
+            AppIntent.SocketClosed -> reduceState {
+                copy(connection = Connection.Disconnected(clock()), daemonVersion = "")
+            }
         }
+    }
+
+    /** The daemon's own version from `/api/status`, reported by the status poll that already runs. */
+    fun onDaemonVersion(version: String) {
+        reduceState { copy(daemonVersion = version) }
     }
 
     private fun launchLoop(url: String, owner: String) {

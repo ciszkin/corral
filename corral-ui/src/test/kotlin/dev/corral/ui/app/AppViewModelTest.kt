@@ -210,6 +210,34 @@ class AppViewModelTest {
         )
     }
 
+    @Test fun daemonVersionStartsEmptyAndIsSetFromTheStatusPoll() = runTest {
+        val vm = newVm()
+        assertEquals("", vm.state.value.daemonVersion)
+        vm.onDaemonVersion("1.2.3")
+        assertEquals("1.2.3", vm.state.value.daemonVersion)
+    }
+
+    @Test fun daemonVersionIsClearedWhenTheSocketDrops() = runTest {
+        val vm = newVm()
+        vm.onDaemonVersion("1.2.3")
+        vm.onIntent(AppIntent.SocketClosed)
+        assertEquals("", vm.state.value.daemonVersion)
+    }
+
+    @Test fun reconnectingClearsTheDaemonVersion() = runTest {
+        val vm = newVm()
+        vm.onDaemonVersion("1.2.3")
+        vm.onIntent(AppIntent.Connect("http://new", "owner2"))
+        assertEquals("", vm.state.value.daemonVersion)
+    }
+
+    @Test fun openingTheSocketClearsTheDaemonVersion() = runTest {
+        val vm = newVm()
+        vm.onDaemonVersion("1.2.3")
+        vm.onIntent(AppIntent.SocketOpened)
+        assertEquals("", vm.state.value.daemonVersion)
+    }
+
     @Test fun setThemePersistsAndUpdatesUseDark() = runTest {
         val store = tmpPrefs()
         val vm = newVm(store = store)

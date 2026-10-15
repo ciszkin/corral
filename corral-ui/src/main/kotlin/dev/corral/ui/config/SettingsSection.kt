@@ -29,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import dev.corral.ui.UiVersionSource
 import dev.corral.ui.app.AppIntent
 import dev.corral.ui.app.AppState
 import dev.corral.ui.components.CorralPill
@@ -72,6 +73,8 @@ import dev.corral.ui.resources.settings_theme
 import dev.corral.ui.resources.settings_theme_desc
 import dev.corral.ui.resources.settings_url
 import dev.corral.ui.resources.settings_url_desc
+import dev.corral.ui.resources.settings_version
+import dev.corral.ui.resources.settings_version_unknown
 import dev.corral.ui.resources.theme_dark
 import dev.corral.ui.resources.theme_light
 import dev.corral.ui.resources.theme_system
@@ -83,6 +86,9 @@ import dev.corral.ui.theme.ThemeMode
 import org.jetbrains.compose.resources.DrawableResource
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
+
+/** The version row's value: the honest version, or an explicit placeholder when the jar reported none. */
+internal fun versionText(version: String, unknown: String): String = version.ifBlank { unknown }
 
 @Composable
 fun SettingsSection(
@@ -107,13 +113,13 @@ fun SettingsSection(
                 if (stacked) {
                     Column(verticalArrangement = Arrangement.spacedBy(Dimens.space16)) {
                         ClientGroup(url, owner, scrcpy, app, onAppIntent, { url = it }, { owner = it }, { scrcpy = it })
-                        DaemonGroup(state, onConfigIntent)
+                        DaemonGroup(state, app.daemonVersion, onConfigIntent)
                     }
                 } else {
                     Row(horizontalArrangement = Arrangement.spacedBy(Dimens.space16)) {
                         ClientGroup(url, owner, scrcpy, app, onAppIntent, { url = it }, { owner = it }, { scrcpy = it },
                             Modifier.weight(1f))
-                        DaemonGroup(state, onConfigIntent, Modifier.weight(1f))
+                        DaemonGroup(state, app.daemonVersion, onConfigIntent, Modifier.weight(1f))
                     }
                 }
             }
@@ -159,6 +165,10 @@ private fun ClientGroup(
     modifier: Modifier = Modifier,
 ) {
     SectionGroup(stringResource(Res.string.settings_client), Icons.Monitor, modifier) {
+        FieldBlock(stringResource(Res.string.settings_version)) {
+            Text(versionText(UiVersionSource.version, stringResource(Res.string.settings_version_unknown)),
+                fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.body2)
+        }
         SettingField(url, stringResource(Res.string.settings_url),
             desc = stringResource(Res.string.settings_url_desc),
             default = stringResource(Res.string.settings_default, Prefs().url), onChange = onUrl)
@@ -205,10 +215,19 @@ private fun ClientGroup(
 }
 
 @Composable
-private fun DaemonGroup(state: ConfigState, onConfigIntent: (ConfigIntent) -> Unit, modifier: Modifier = Modifier) {
+private fun DaemonGroup(
+    state: ConfigState,
+    daemonVersion: String,
+    onConfigIntent: (ConfigIntent) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val colors = LocalExtendedColors.current
     val loaded = state.loaded
     SectionGroup(stringResource(Res.string.settings_daemon), Icons.Server, modifier) {
+        FieldBlock(stringResource(Res.string.settings_version)) {
+            Text(versionText(daemonVersion, stringResource(Res.string.settings_version_unknown)),
+                fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.body2)
+        }
         if (loaded == null) {
             val message = if (state.loadFailed) Res.string.settings_load_error else Res.string.config_loading
             Text(stringResource(message), style = MaterialTheme.typography.body2,
@@ -292,7 +311,7 @@ private fun SettingField(
 @Composable
 private fun FieldBlock(
     label: String,
-    desc: String,
+    desc: String? = null,
     default: String? = null,
     error: String? = null,
     content: @Composable () -> Unit,
@@ -310,17 +329,19 @@ private fun FieldBlock(
                 Text(error, style = MaterialTheme.typography.caption, color = MaterialTheme.colors.error)
             }
         }
-        Text(
-            buildString {
-                append(desc)
-                if (default != null) {
-                    append(' ')
-                    append(default)
-                }
-            },
-            style = MaterialTheme.typography.caption,
-            color = colors.onSurfaceVariant,
-        )
+        if (!desc.isNullOrEmpty() || default != null) {
+            Text(
+                buildString {
+                    append(desc.orEmpty())
+                    if (default != null) {
+                        append(' ')
+                        append(default)
+                    }
+                },
+                style = MaterialTheme.typography.caption,
+                color = colors.onSurfaceVariant,
+            )
+        }
     }
 }
 

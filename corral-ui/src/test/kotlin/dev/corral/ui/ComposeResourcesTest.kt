@@ -40,6 +40,13 @@ class ComposeResourcesTest {
         assertEquals(stringKeys(enStrings), stringKeys(beStrings))
     }
 
+    @Test fun versionStringsExistInBothLanguages() {
+        listOf("settings_version", "settings_version_unknown").forEach { name ->
+            assertTrue(stringValue(enStrings, name).isNotBlank(), "en missing or blank: $name")
+            assertTrue(stringValue(beStrings, name).isNotBlank(), "be missing or blank: $name")
+        }
+    }
+
     @Test fun pluralQuantitiesMatchTheLanguage() {
         val en = pluralQuantities(enStrings)
         val be = pluralQuantities(beStrings)

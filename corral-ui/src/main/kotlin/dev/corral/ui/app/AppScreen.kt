@@ -121,6 +121,14 @@ internal val AppSections: List<AppSection> = AppSection.entries
 internal fun deniedBannerText(base: String, reason: String?): String =
     if (reason.isNullOrBlank()) base else "$base\n$reason"
 
+/**
+ * The status-bar caption: the connection line plus the daemon's version when it is known. An unknown
+ * version is omitted, never faked — the daemon jar governs device behaviour, so a stale number is worse
+ * than none.
+ */
+internal fun statusBarText(status: String, url: String, version: String): String =
+    if (version.isBlank()) "$status — $url" else "$status — $url · v$version"
+
 @Composable
 fun AppScreen(
     app: AppViewModel,
@@ -454,7 +462,11 @@ private fun StatusBar(state: AppState, onTheme: (ThemeMode) -> Unit) {
             .padding(horizontal = Dimens.space12, vertical = Dimens.space4),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("$status — ${state.url}", style = MaterialTheme.typography.caption, modifier = Modifier.weight(1f))
+        Text(
+            statusBarText(status, state.url, state.daemonVersion),
+            style = MaterialTheme.typography.caption,
+            modifier = Modifier.weight(1f),
+        )
         Row(
             Modifier.clip(RoundedCornerShape(Dimens.radiusPill))
                 .background(colors.containerLow)

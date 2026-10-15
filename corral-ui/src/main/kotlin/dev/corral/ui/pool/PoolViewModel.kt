@@ -13,7 +13,7 @@ import kotlinx.coroutines.sync.withLock
 
 class PoolViewModel(
     private val api: () -> CorralApi?,
-    app: AppViewModel,
+    private val app: AppViewModel,
     vmScope: CoroutineScope,
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) : BaseMviViewModel<PoolIntent, PoolState, PoolEffect>(vmScope) {
@@ -125,7 +125,9 @@ class PoolViewModel(
 
     private suspend fun refetchDevices() {
         val client = api() ?: return
-        val leases = client.status().devices.associate { it.serial to it.lease }
+        val status = client.status()
+        app.onDaemonVersion(status.version)
+        val leases = status.devices.associate { it.serial to it.lease }
         val devices = client.devices()
         reduceState {
             copy(

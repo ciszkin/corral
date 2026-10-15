@@ -58,9 +58,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --install-recommends winehq-stable
           wine --version
-          # fail loudly if the wrong wine won: 9.0 is the broken one
-          wine --version | grep -qE 'wine-(9|10|11|12|13)\.' || {
-            echo "::error::expected a WineHQ build (>= 9, not Ubuntu 9.0's)"; exit 1; }
+          # fail loudly if the wrong wine won: Ubuntu's 9.0 is the broken one, WineHQ's 10+ is fine
+          wine --version | grep -qE 'wine-[1-9][0-9]+\.' || {
+            echo "::error::expected a WineHQ build (>= 10, not Ubuntu 9.0's)"; exit 1; }
           command -v wineboot >/dev/null || { echo "::error::wineboot missing"; exit 1; }
           wineboot -i
 

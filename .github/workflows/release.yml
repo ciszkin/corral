@@ -1,0 +1,254 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create the GitHub release (false = dry run: build and verify only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Pinned (not ubuntu-latest): the distro wine package version is fixed per Ubuntu release.
+    runs-on: ubuntu-24.04
+    # Two tag pushes must not race two parallel `gh release create` runs, but a release run must
+    # not be cancelled halfway either (that could leave a half-built artifact or a half-created
+    # release); so a second push QUEUES behind the first rather than running in parallel.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    env:
+      # A tag push is always a real release; a dispatch publishes only when asked.
+      PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+    steps:
+      # fetch-depth 0: a manual dispatch derives its tag from the repo's history, which a
+      # depth-1 checkout would not carry.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # First, before any expensive work. Phase F supplies LICENSE and NOTICE; until those land a
+      # real publish (tag push, or dispatch with publish=true) is EXPECTED to abort here. That is
+      # correct behaviour, not a bug to work around — we will not ship an Apache-2.0 public release
+      # with no licence text. A dry run only warns and carries on.
+      - name: Check licence artifacts
+        run: |
+          set -euo pipefail
+          missing=""
+          for f in LICENSE NOTICE; do
+            if [ ! -f "$f" ]; then missing="$missing $f"; fi
+          done
+          if [ -n "$missing" ]; then
+            if [ "${PUBLISH:-false}" = "true" ]; then
+              echo "::error::refusing to publish: missing$missing. An Apache-2.0 release must ship its licence and notice."
+              exit 1
+            fi
+            echo "::warning::dry run: missing$missing; a real publish would abort here."
+          else
+            echo "LICENSE and NOTICE present."
+          fi
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: Resolve release tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            TAG="$REF_NAME"
+          else
+            # Manual run: derive from the latest v* tag. Never fall back to the branch name —
+            # that would stamp and publish "main" as if it were a version.
+            TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "::error::no release tag: push a v* tag, or create one before a manual publish."
+            exit 1
+          fi
+          case "$TAG" in
+            v*) ;;
+            *) echo "::error::tag '$TAG' must start with 'v' (e.g. v1.2.3)"; exit 1;;
+          esac
+          # Same rule the build uses (phase A): MAJOR.MINOR.PATCH with an optional suffix. A glob
+          # like [0-9]*.[0-9]*.[0-9]* would accept v1a.2.3, which the Gradle normaliser rejects —
+          # the jar is then stamped 0.0.0-dev while the release is titled "1a.2.3". A full-prefix
+          # grep matches the normaliser's `\d+\.\d+\.\d+.*` and rejects v1a.2.3 and v1.2-beta.3.
+          VERSION="${TAG#v}"
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::tag '$TAG' is not MAJOR.MINOR.PATCH (suffix like -rc1 is allowed)"
+            exit 1
+          fi
+          # Build exactly the tagged commit. A tag push checks out the tag, so HEAD already is it.
+          # A manual dispatch checks out the DEFAULT BRANCH HEAD, which may be commits PAST the
+          # tag; `git describe` then returns that nearest tag, not HEAD. We chose the explicit
+          # assertion over a silent `git checkout --detach "$TAG"`: re-pointing HEAD hides the
+          # operator's mistake, while comparing HEAD to the tag makes it impossible to publish a
+          # mismatch -- the run stops and tells them to dispatch on the tag ref instead.
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "::error::HEAD ($HEAD_SHA) is not tag $TAG ($TAG_SHA); refusing to build a release from the wrong commit. Re-run this dispatch on the tag ref."
+            exit 1
+          fi
+          echo "Building tagged commit $TAG_SHA"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # Every later step sees the tag-stamped version, exactly as phase A intends.
+          echo "CORRAL_VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "Resolved tag=$TAG version=$VERSION"
+
+      - name: Run module tests
+        run: ./gradlew :corral-common:test :corral-daemon:test :corral-ui:test
+
+      - name: Install and initialise wine (Windows .bat wrapper checks)
+        env:
+          WINEDEBUG: -all
+          WINEDLLOVERRIDES: mscoree,mshtml=
+        run: |
+          # WineHQ, NOT Ubuntu's `wine` package (9.0). Ubuntu's build does not propagate a batch
+          # file's exit code across `call`, so four wrapper checks asserting the delegate's exit
+          # code saw 1 instead -- the delegate ran, its output appeared, only the status was wrong.
+          # Real cmd.exe propagates correctly (the winbox confirms WRAPPER_EXIT=3), so pinning a
+          # faithful emulator keeps those assertions instead of weakening them.
+          sudo dpkg --add-architecture i386
+          sudo mkdir -pm755 /etc/apt/keyrings
+          sudo wget -q -O /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+          sudo wget -q -NP /etc/apt/sources.list.d/ \
+            https://dl.winehq.org/wine-builds/ubuntu/dists/noble/winehq-noble.sources
+          sudo apt-get update
+          sudo apt-get install -y --install-recommends winehq-stable
+          wine --version
+          # fail loudly if the wrong wine won: Ubuntu's 9.0 is the broken one, WineHQ's 10+ is fine
+          wine --version | grep -qE 'wine-[1-9][0-9]+\.' || {
+            echo "::error::expected a WineHQ build (>= 10, not Ubuntu 9.0's)"; exit 1; }
+          command -v wineboot >/dev/null || { echo "::error::wineboot missing"; exit 1; }
+          wineboot -i
+
+      - name: Daemon e2e suite
+        run: SLOW=1 bash scripts/test_e2e.sh
+
+      - name: Run wrapper integration suite
+        run: bash scripts/test_wrapper.sh
+
+      - name: Install sandbox suite
+        run: bash scripts/test_install.sh
+
+      - name: Mirror and verify installer bundle
+        run: bash scripts/make-installer.sh
+
+      - name: Installer bundle drift check
+        run: bash scripts/make-installer.sh --check
+
+      - name: Assemble release zip
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          ROOT="$PWD"
+          STAGE="$(mktemp -d)"
+          trap 'rm -rf "$STAGE"' EXIT
+          cp -a corral-installer/. "$STAGE/"
+          for f in LICENSE NOTICE; do
+            if [ -f "$f" ]; then cp "$f" "$STAGE/"; fi
+          done
+          # A fixed mtime, -X (drop extra attributes) and a sorted entry order make the archive
+          # reproducible run-to-run. The bundle is flat, so every entry lands at the zip root --
+          # install.sh beside both jars, which is what the installer expects when unpacked.
+          find "$STAGE" -exec touch -h -t 198001010000.00 {} +
+          ZIP="dist/corral-${VERSION}.zip"
+          rm -f "$ZIP"
+          ( cd "$STAGE" && find . -type f -printf '%P\n' | LC_ALL=C sort | zip -X -9 -q "$ROOT/$ZIP" -@ )
+          echo "Built $ZIP"
+          unzip -l "$ZIP"
+
+      - name: Checksum the zip
+        run: |
+          set -euo pipefail
+          ZIP="dist/corral-${VERSION}.zip"
+          ( cd dist && sha256sum "corral-${VERSION}.zip" | tee "corral-${VERSION}.zip.sha256" )
+          echo "--- checksum file ---"
+          cat "$ZIP.sha256"
+
+      - name: Dry run summary
+        if: env.PUBLISH != 'true'
+        run: |
+          set -euo pipefail
+          ZIP="dist/corral-${VERSION}.zip"
+          SIZE="$(du -h "$ZIP" | cut -f1)"
+          echo "=========================================="
+          echo " DRY RUN — no release created"
+          echo "=========================================="
+          echo "tag             : $TAG"
+          echo "version stamped : $VERSION (CORRAL_VERSION)"
+          echo "asset           : $ZIP ($SIZE)"
+          echo "checksum        : $ZIP.sha256"
+          echo "--- files in the zip ---"
+          unzip -l "$ZIP"
+          echo "--- digest ---"
+          cat "$ZIP.sha256"
+          echo "Re-run with publish=true (or push the tag) to create the GitHub release."
+
+      # A tag can be force-moved server-side after checkout; our local ref never changes, so the
+      # resolve-time identity assertion cannot see it, while `gh release create "$TAG"` targets the
+      # tag's CURRENT server-side commit. Re-fetch and re-assert right before publishing to shrink
+      # the window to seconds. The durable fix is a GitHub tag ruleset blocking force-push/delete on
+      # v* (operator-side; noted here, not configured by this workflow).
+      - name: Re-assert tag identity before publishing
+        if: env.PUBLISH == 'true'
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          HEAD_SHA="$(git rev-parse HEAD)"
+          TAG_SHA="$(git rev-parse "$TAG^{commit}")"
+          if [ "$HEAD_SHA" != "$TAG_SHA" ]; then
+            echo "::error::tag $TAG moved after checkout: HEAD ($HEAD_SHA) != $TAG ($TAG_SHA); refusing to publish."
+            exit 1
+          fi
+          echo "Tag $TAG still points at $TAG_SHA"
+
+      - name: Create GitHub release
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ZIP="dist/corral-${VERSION}.zip"
+          NOTES="dist/RELEASE_NOTES.md"
+          {
+            echo "Corral ${VERSION}"
+            echo
+            echo "Unpack \`corral-${VERSION}.zip\` and run \`./install.sh\`; the bundle's files sit at"
+            echo "the zip root, as the installer expects."
+            echo
+            echo "This build was cut by the release workflow from tag \`${TAG}\` and passed the full"
+            echo "gate suite: module tests, the end-to-end, wrapper and install-sandbox suites, and"
+            echo "the installer bundle drift check. Verify the download with the attached \`.sha256\`."
+          } > "$NOTES"
+          # A `-` in the version marks a pre-release (e.g. -rc1): a release candidate is not a
+          # final release and must be labelled `--prerelease`. A plain x.y.z (even 0.x) is a
+          # deliberate final cut, so it is not. Nothing else auto-classifies a release.
+          PRERELEASE=()
+          case "$VERSION" in
+            *-*) PRERELEASE=(--prerelease);;
+          esac
+          gh release create "$TAG" \
+            --title "Corral ${VERSION}" \
+            --notes-file "$NOTES" \
+            "${PRERELEASE[@]}" \
+            "$ZIP" "$ZIP.sha256"
+          echo "Created release $TAG"

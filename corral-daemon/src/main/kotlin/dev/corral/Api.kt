@@ -112,6 +112,7 @@ class AppEnv(
     val events: Events? = null,
     val config: DaemonConfig? = null,
     val emulators: Emulators? = null,
+    val updateCheck: UpdateCheck? = null,
 )
 
 /** Any control char (C0 + DEL) smuggled into a value could inject lines or corrupt env/rules files. */
@@ -290,6 +291,15 @@ fun Application.corralModule(env: AppEnv) {
                         w.entries.joinToString("; ") { (avd, r) -> r.reason })
                 })))
         }
+        get("/api/update") {
+            val checker = env.updateCheck ?: run {
+                call.respond(UpdateInfo(currentVersion = VersionSource.version, state = UpdateState.DISABLED))
+                return@get
+            }
+            // cached by default; `?force` runs a fresh check, bounded by the HTTP timeout in the feed
+            val info = if (call.request.queryParameters["force"] != null) checker.checkNow() else checker.current()
+            call.respond(info)
+        }
         get("/api/check") {
             val r = env.leases.check(call.parameters["serial"] ?: "", call.parameters["owner"] ?: "")
             call.respond(r)
@@ -348,7 +358,7 @@ fun Application.corralModule(env: AppEnv) {
         }
         put("/api/config") {
             if (call.rejectsForeignOrigin()) return@put
-            env.config ?: run {
+            val config = env.config ?: run {
                 call.respondText("corral: config not wired", status = HttpStatusCode.ServiceUnavailable); return@put }
             val req = try {
                 val body = call.receive<JsonObject>()
@@ -447,6 +457,8 @@ fun Application.corralModule(env: AppEnv) {
                                 else -> clean[k] = it
                             }
                         }
+                    "CORRAL_UPDATE_CHECK" -> raw.trim().lowercase().takeIf { it == "on" || it == "off" }
+                        ?.let { clean[k] = it } ?: run { errors += "CORRAL_UPDATE_CHECK must be on or off" }
                     else -> {}   // unknown keys ignored by design
                 }
             }
@@ -488,8 +500,10 @@ fun Application.corralModule(env: AppEnv) {
             if (clean.isNotEmpty()) EnvFile.write(DaemonConfig.defaultPath(), clean)
             rulesToWrite?.let { (readonly, valueflags) ->
                 if (readonly != null || valueflags != null) RulesFile.writeGate(readonly, valueflags) }
+            // per-key: a live key (CORRAL_UPDATE_CHECK) needs no restart; any restart-bound key still does
             call.respond(PutConfigResponse(
-                restartRequired = clean.isNotEmpty(), rulesLive = req.rules != null, warnings = warnings))
+                restartRequired = clean.keys.any { config.restartRequired(it) },
+                rulesLive = req.rules != null, warnings = warnings))
         }
         get("/api/devices/{serial}/screenshot") {
             val serial = call.parameters["serial"]!!

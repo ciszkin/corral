@@ -2,8 +2,12 @@ package dev.corral
 
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlinx.serialization.SerializationException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFails
+import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CommonDtoTest {
@@ -16,6 +20,27 @@ class CommonDtoTest {
         assertEquals(q, corralJson.decodeFromString(QueueEntry.serializer(), corralJson.encodeToString(QueueEntry.serializer(), q)))
         val f = EventFrame("state.changed", listOf("devices"), 7)
         assertEquals(f, corralJson.decodeFromString(EventFrame.serializer(), corralJson.encodeToString(EventFrame.serializer(), f)))
+    }
+
+    @Test fun updateInfoRoundTripsAndStateDefaults() {
+        val u = UpdateInfo("1.0.0", UpdateState.UPDATE_AVAILABLE, "2.0.0",
+            releaseUrl = "https://example/2.0.0")
+        assertEquals(u, corralJson.decodeFromString(UpdateInfo.serializer(), corralJson.encodeToString(UpdateInfo.serializer(), u)))
+        assertTrue(u.updateAvailable)
+        assertTrue(u.checksEnabled)
+
+        val unknown = corralJson.decodeFromString(UpdateInfo.serializer(), """{"currentVersion":"1.0.0"}""")
+        assertEquals(UpdateState.UNKNOWN, unknown.state)
+        assertNull(unknown.latestVersion)
+        assertFalse(unknown.updateAvailable)
+        assertTrue(unknown.checksEnabled)
+
+        // a wire payload whose fields disagree with its state is refused by the type, not trusted
+        val thrown = assertFails {
+            corralJson.decodeFromString(UpdateInfo.serializer(),
+                """{"currentVersion":"1.0.0","state":"UNKNOWN","latestVersion":"x"}""")
+        }
+        assertTrue(thrown is IllegalArgumentException || thrown is SerializationException, "was $thrown")
     }
 
     @Test fun jsonIgnoresUnknownKeys() {

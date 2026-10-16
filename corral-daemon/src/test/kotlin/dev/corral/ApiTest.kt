@@ -723,6 +723,85 @@ class ApiTest {
         assertFalse(body.rulesLive)
     }
 
+    @Test fun putOnlyTheLiveToggleNeedsNoRestart() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val live = c.putConfig("""{"settings":{"CORRAL_UPDATE_CHECK":"off"}}""")
+        assertEquals(HttpStatusCode.OK, live.status)
+        assertFalse(Json.decodeFromString<PutConfigResponse>(live.bodyAsText()).restartRequired)
+        assertEquals("off", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_UPDATE_CHECK"])
+
+        // a restart-bound key still reports true; a mixed write is bound by the restart-bound key
+        val shots = c.putConfig("""{"settings":{"CORRAL_SCREENSHOTS":"open"}}""")
+        assertTrue(Json.decodeFromString<PutConfigResponse>(shots.bodyAsText()).restartRequired)
+        val mixed = c.putConfig("""{"settings":{"CORRAL_UPDATE_CHECK":"on","CORRAL_SCREENSHOTS":"open"}}""")
+        assertTrue(Json.decodeFromString<PutConfigResponse>(mixed.bodyAsText()).restartRequired)
+
+        val env = EnvFile.read(DaemonConfig.defaultPath())
+        assertEquals("on", env["CORRAL_UPDATE_CHECK"])
+        assertEquals("open", env["CORRAL_SCREENSHOTS"])
+    }
+
+    @Test fun putRejectsABadUpdateCheckValue() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_UPDATE_CHECK":"maybe"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        assertTrue(Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.any { it.contains("CORRAL_UPDATE_CHECK") })
+    }
+
+    @Test fun updateUnwiredReportsDisabled() = withApi { c ->
+        val info = Json.decodeFromString<UpdateInfo>(c.get("/api/update").bodyAsText())
+        assertEquals(UpdateState.DISABLED, info.state)
+        assertFalse(info.checksEnabled)
+        assertFalse(info.updateAvailable)
+    }
+
+    @Test fun updateRouteServesTheCacheAndForceRefreshes() = testApplication {
+        var calls = 0
+        var body = """{"tag_name":"v2.0.0","html_url":"https://example/2.0.0"}"""
+        val check = UpdateCheck(
+            feed = { calls++; body },
+            config = { DaemonConfig(fileValues = mapOf("CORRAL_UPDATE_CHECK" to "on"), inherited = emptyMap()) },
+            version = "1.0.0")
+        application { corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), updateCheck = check)) }
+        val c = client
+
+        val forced = Json.decodeFromString<UpdateInfo>(c.get("/api/update?force").bodyAsText())
+        assertEquals(1, calls)
+        assertEquals(UpdateState.UPDATE_AVAILABLE, forced.state)
+        assertTrue(forced.updateAvailable)
+        assertEquals("v2.0.0", forced.latestVersion)
+
+        body = """{"tag_name":"v3.0.0","html_url":"https://example/3.0.0"}"""
+        val cached = Json.decodeFromString<UpdateInfo>(c.get("/api/update").bodyAsText())
+        assertEquals(1, calls, "the cached route must not hit the feed")
+        assertEquals("v2.0.0", cached.latestVersion)
+
+        val refreshed = Json.decodeFromString<UpdateInfo>(c.get("/api/update?force").bodyAsText())
+        assertEquals(2, calls)
+        assertEquals("v3.0.0", refreshed.latestVersion)
+    }
+
+    /** Defect 1 at the route: enabling the switch is served live, with no ?force and no restart. */
+    @Test fun enablingTheSwitchIsServedLiveWithoutForce() = testApplication {
+        val file = createTempDirectory("update").resolve("daemon.env")
+        EnvFile.write(file, mapOf("CORRAL_UPDATE_CHECK" to "off"))
+        var calls = 0
+        val check = UpdateCheck(
+            feed = { calls++; """{"tag_name":"v2.0.0","html_url":"https://example/2.0.0"}""" },
+            config = { DaemonConfig(EnvFile.read(file), emptyMap()) },
+            version = "1.0.0")
+        application { corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), updateCheck = check)) }
+
+        // a check cycle while disabled caches DISABLED (and never calls the feed)
+        val off = Json.decodeFromString<UpdateInfo>(client.get("/api/update?force").bodyAsText())
+        assertEquals(UpdateState.DISABLED, off.state)
+        assertEquals(0, calls)
+
+        EnvFile.write(file, mapOf("CORRAL_UPDATE_CHECK" to "on"))
+        val live = Json.decodeFromString<UpdateInfo>(client.get("/api/update").bodyAsText())
+        assertNotEquals(UpdateState.DISABLED, live.state)
+        assertTrue(live.checksEnabled)
+        assertEquals(0, calls)
+    }
+
     @Test fun putObserversTrimmedAndDeduped() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
         val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOT_OBSERVERS":" a , a, b "}}""")
         assertEquals(HttpStatusCode.OK, r.status)

@@ -47,6 +47,19 @@ internal fun emulatorProblems(doctor: DoctorResponse?): List<String> =
         .filter { it.layer == "emulators" && it.status == "fail" }
         .map { it.detail }
 
+/** The doctor's one update line. Switches on the explicit state — never says "current" when unknown. */
+internal fun updateLine(info: UpdateInfo?): String = when (info?.state) {
+    null -> "update: unknown (could not read /api/update)"
+    UpdateState.DISABLED -> "update: disabled (CORRAL_UPDATE_CHECK=off)"
+    UpdateState.UNKNOWN -> "update: unknown (could not reach the release feed)"
+    UpdateState.UPDATE_AVAILABLE -> {
+        // tags arrive with or without a leading v; render one v either way
+        val latest = info.latestVersion.orEmpty().removePrefix("v").removePrefix("V")
+        "update: v${info.currentVersion} -> v$latest available (${info.releaseUrl})"
+    }
+    UpdateState.CURRENT -> "update: current"
+}
+
 /** True on Windows, where a `.bat`/`.cmd` shim is not a PE image and needs `cmd.exe /c`. */
 internal val isWindows: Boolean = System.getProperty("os.name").startsWith("Windows")
 
@@ -489,6 +502,13 @@ object CorralCli {
                         println("rules: FAIL - $rulesPath is missing readonly or valueflags"); problems++ }
                     else -> println("rules: ok ($rulesPath)")
                 }
+                // informational: an available update is not a failure, and an unknown must not read as current
+                val info = runCatching {
+                    val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/update"))
+                        .timeout(Duration.ofSeconds(15)).GET().build(), HttpResponse.BodyHandlers.ofString())
+                    if (r.statusCode() == 200) corralJson.decodeFromString<UpdateInfo>(r.body()) else null
+                }.getOrNull()
+                println(updateLine(info))
                 if (problems > 0) exitProcess(1)
             }
             "check" -> {

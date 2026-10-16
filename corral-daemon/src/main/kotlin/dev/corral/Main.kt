@@ -109,12 +109,23 @@ fun main() {
 
     scope.launch { while (true) { delay(10_000); try { leases.sweep() } catch (_: Exception) {}; runCatching { emulators.reapFailed() }; selfHealSdkShim(); selfHealRules() } } // expiry reaper + queue dispatch; inventory changes dispatch via monitor.onChange
 
+    // The one outbound call: once shortly after boot, then daily. Off Dispatchers.IO and wrapped so a
+    // missing network never delays or fails startup, and the loop can never die on a thrown check.
+    val updateCheck = UpdateCheck()
+    scope.launch {
+        delay(5_000)
+        while (true) {
+            runCatching { updateCheck.checkNow() }
+            delay(24 * 60 * 60 * 1000L)
+        }
+    }
+
     val events = Events(
         { pool().map { DeviceStatus(it.serial, leases.snapshot[it.serial], it.booted) } },
         { leases.queueSnapshot() },
         scope)
     val env = AppEnv(pool, leases, adb, Screenshotter(pool, adb), screenshotPolicy(config), events, config,
-        emulators)
+        emulators, updateCheck)
     events.start()
     embeddedServer(CIO, port = port, host = "127.0.0.1") {
         guardLocalHost()

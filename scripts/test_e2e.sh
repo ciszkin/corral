@@ -892,6 +892,27 @@ check "config put refuses a privileged port" bash -c '
   [ "$code" = 400 ] || exit 1
   exit 0
 '
+check "update: GET /api/update answers with the four fields and does not hang" bash -c '
+  body=$(curl -s --max-time 5 "$CORRAL_URL/api/update") || exit 1
+  for f in currentVersion latestVersion updateAvailable releaseUrl checksEnabled; do
+    printf "%s" "$body" | grep -q "\"$f\"" || exit 1
+  done
+  exit 0
+'
+check "update: CORRAL_UPDATE_CHECK=off is settable and reports disabled" bash -c '
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" -d "{\"settings\":{\"CORRAL_UPDATE_CHECK\":\"off\"}}")
+  [ "$code" = 200 ] || exit 1
+  grep -q "^CORRAL_UPDATE_CHECK=off$" "$CORRAL_ENV_FILE" || exit 1
+  curl -s --max-time 5 "$CORRAL_URL/api/update" | grep -q "\"checksEnabled\":false" || exit 1
+  exit 0
+'
+check "update: a write of only the live toggle returns restartRequired false" bash -c '
+  out=$(curl -s -X PUT "$CORRAL_URL/api/config" \
+    -H "Content-Type: application/json" -d "{\"settings\":{\"CORRAL_UPDATE_CHECK\":\"on\"}}")
+  printf "%s" "$out" | grep -q "\"restartRequired\":false" || exit 1
+  exit 0
+'
 check "config precedence: daemon.env port beats inherited env across restart" check_13_precedence
 
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"

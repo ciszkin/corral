@@ -60,6 +60,7 @@ class DaemonConfig(
         "CORRAL_EMULATOR" -> adbValueUsable(value)
         "CORRAL_EMULATOR_LAUNCHER" -> value.trim().lowercase() in setOf("", "systemd", "direct")
         "CORRAL_SCREENSHOTS" -> value.trim().lowercase() in setOf("strict", "open")
+        "CORRAL_UPDATE_CHECK" -> value.trim().lowercase() in setOf("on", "off")
         else -> true
     }
 
@@ -72,6 +73,9 @@ class DaemonConfig(
 
     /** The built-in default for a registry key ("" for unknown keys). */
     fun defaultValue(key: String): String = KEYS.firstOrNull { it.key == key }?.default ?: ""
+
+    /** Whether changing [key] needs a restart (unknown keys: yes, the safe report). */
+    fun restartRequired(key: String): Boolean = KEYS.firstOrNull { it.key == key }?.restartRequired ?: true
 
     /** The raw value from the config file, or null when the key is absent. */
     fun fileValue(key: String): String? = fileValues[key]
@@ -95,6 +99,8 @@ class DaemonConfig(
             ConfigKey("CORRAL_EMULATOR_LAUNCHER", ""),
             ConfigKey("CORRAL_DB", Path.of(System.getProperty("user.home"), ".corral", "corral.db").toString()),
             ConfigKey("CORRAL_GRADLE_TASKS", ""),
+            // Read live every check cycle, so flipping it takes effect without a restart.
+            ConfigKey("CORRAL_UPDATE_CHECK", "on", restartRequired = false),
         )
     }
 }

@@ -23,9 +23,24 @@ class DaemonConfigTest {
     @Test fun registryCoversTheDaemonKeysWithRestartFlags() {
         assertEquals(
             listOf("CORRAL_PORT", "CORRAL_SCREENSHOTS", "CORRAL_SCREENSHOT_OBSERVERS",
-                   "CORRAL_ADB", "CORRAL_EMULATOR", "CORRAL_EMULATOR_LAUNCHER", "CORRAL_DB", "CORRAL_GRADLE_TASKS"),
+                   "CORRAL_ADB", "CORRAL_EMULATOR", "CORRAL_EMULATOR_LAUNCHER", "CORRAL_DB", "CORRAL_GRADLE_TASKS",
+                   "CORRAL_UPDATE_CHECK"),
             DaemonConfig.KEYS.map { it.key })
-        assertTrue(DaemonConfig.KEYS.all { it.restartRequired })
+        assertTrue(DaemonConfig.KEYS.filter { it.key != "CORRAL_UPDATE_CHECK" }.all { it.restartRequired })
+        assertFalse(DaemonConfig.KEYS.first { it.key == "CORRAL_UPDATE_CHECK" }.restartRequired)
+    }
+
+    @Test fun updateCheckDefaultsOnAndAcceptsOnlyOnOff() {
+        assertEquals("on", DaemonConfig(fileValues = emptyMap(), inherited = emptyMap()).get("CORRAL_UPDATE_CHECK"))
+        val c = DaemonConfig(fileValues = emptyMap())
+        assertTrue(c.usable("CORRAL_UPDATE_CHECK", "on"))
+        assertTrue(c.usable("CORRAL_UPDATE_CHECK", "OFF"))
+        assertFalse(c.usable("CORRAL_UPDATE_CHECK", "yes"))
+        assertFalse(c.restartRequired("CORRAL_UPDATE_CHECK"))
+        assertTrue(c.restartRequired("CORRAL_SCREENSHOTS"))
+        assertTrue(c.restartRequired("UNKNOWN_KEY"))
+        // a hand-edited bad value is unusable and falls through to the safe default, never silently off
+        assertEquals("on", DaemonConfig(fileValues = mapOf("CORRAL_UPDATE_CHECK" to "maybe")).get("CORRAL_UPDATE_CHECK"))
     }
 
     @Test fun emulatorLauncherDefaultsToBlankAndAcceptsOnlyKnownValues() {

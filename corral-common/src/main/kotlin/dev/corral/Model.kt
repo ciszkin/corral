@@ -38,10 +38,19 @@ data class Lease(val serial: String, val owner: String, val pid: Long = 0,
 enum class UpdateState { DISABLED, UNKNOWN, CURRENT, UPDATE_AVAILABLE }
 
 /**
+ * Why a check came back [UpdateState.UNKNOWN]. UNKNOWN has several honest causes — the feed was
+ * never reached, it answered non-200, its tag was unreadable, or no check has run yet — and they
+ * must not be collapsed into one sentence that asserts a cause the daemon did not observe.
+ */
+@Serializable
+enum class UpdateReason { NOT_CHECKED, UNREACHABLE, HTTP_ERROR, UNPARSEABLE }
+
+/**
  * The result of one update check. [state] is authoritative; [updateAvailable] and [checksEnabled]
  * are derived defaults that cannot disagree with it (the constructor refuses an inconsistent pair).
  * A failed or unreadable feed is [UpdateState.UNKNOWN] — never expressed as "up to date", which is
  * the lie this type exists to prevent. [latestVersion] is present iff [state] is CURRENT/UPDATE_AVAILABLE.
+ * [reason] and [httpStatus] explain an UNKNOWN without over-claiming its cause, and are additive.
  */
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable
@@ -51,7 +60,9 @@ data class UpdateInfo(
     @EncodeDefault val latestVersion: String? = null,
     @EncodeDefault val updateAvailable: Boolean = state == UpdateState.UPDATE_AVAILABLE,
     @EncodeDefault val releaseUrl: String? = null,
-    @EncodeDefault val checksEnabled: Boolean = state != UpdateState.DISABLED) {
+    @EncodeDefault val checksEnabled: Boolean = state != UpdateState.DISABLED,
+    @EncodeDefault val reason: UpdateReason? = null,
+    @EncodeDefault val httpStatus: Int? = null) {
     init {
         val known = state == UpdateState.CURRENT || state == UpdateState.UPDATE_AVAILABLE
         require(known == (latestVersion != null)) {
@@ -62,6 +73,17 @@ data class UpdateInfo(
         }
         require((state != UpdateState.DISABLED) == checksEnabled) {
             "checksEnabled must be false iff state is DISABLED"
+        }
+        // an "update available" without a page to open renders a null URL; the parser already
+        // guarantees both tag and url, so the wire must not smuggle in a half-object
+        require(state != UpdateState.UPDATE_AVAILABLE || !releaseUrl.isNullOrBlank()) {
+            "releaseUrl must be present when state is UPDATE_AVAILABLE"
+        }
+        require(reason == null || state == UpdateState.UNKNOWN) {
+            "reason is only meaningful when state is UNKNOWN"
+        }
+        require(httpStatus == null || reason == UpdateReason.HTTP_ERROR) {
+            "httpStatus is only meaningful with an HTTP_ERROR reason"
         }
     }
 }

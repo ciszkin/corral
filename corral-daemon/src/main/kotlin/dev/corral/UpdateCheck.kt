@@ -14,11 +14,22 @@ import kotlinx.serialization.json.jsonObject
 private const val FEED_TIMEOUT_SECONDS = 10L
 
 /**
- * Fetch the GitHub `releases/latest` body. The daemon's only outbound call: unauthenticated,
- * no token, no credentials. Every failure — 404 (the repo is private today, so this is the normal
- * answer), 403, timeout, DNS, TLS — collapses to null, i.e. "we could not learn anything".
+ * What the one outbound call observed: a 200 body, a non-200 status, or no response at all. The
+ * distinction is the whole point — "GitHub answered 404" and "GitHub was unreachable" are different
+ * operator problems, and collapsing them into null is what let doctor assert the wrong cause.
  */
-internal fun defaultUpdateFeed(): String? = runCatching {
+sealed interface FeedResult {
+    data class Body(val json: String) : FeedResult
+    data class Http(val status: Int) : FeedResult
+    data object Unreachable : FeedResult
+}
+
+/**
+ * Fetch the GitHub `releases/latest` body. The daemon's only outbound call: unauthenticated,
+ * no token, no credentials. A 404 (the repo is private today, so this is the normal answer) is an
+ * observed HTTP status, while a timeout, DNS, or TLS failure is [FeedResult.Unreachable].
+ */
+internal fun defaultUpdateFeed(): FeedResult = runCatching {
     val repo = System.getenv("CORRAL_REPO")?.takeIf { it.isNotBlank() } ?: "ciszkin/corral"
     val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(FEED_TIMEOUT_SECONDS)).build()
     val request = HttpRequest.newBuilder(URI.create("https://api.github.com/repos/$repo/releases/latest"))
@@ -31,8 +42,8 @@ internal fun defaultUpdateFeed(): String? = runCatching {
     val response = client.sendAsync(request, HttpResponse.BodyHandlers.ofString())
         .orTimeout(FEED_TIMEOUT_SECONDS, TimeUnit.SECONDS)
         .join()
-    if (response.statusCode() == 200) response.body() else null
-}.getOrNull()
+    if (response.statusCode() == 200) FeedResult.Body(response.body()) else FeedResult.Http(response.statusCode())
+}.getOrElse { FeedResult.Unreachable }
 
 private val updateJson = Json { ignoreUnknownKeys = true }
 
@@ -114,38 +125,67 @@ internal fun updateVerdict(current: String, latest: String): Boolean? {
  * "update available" would assert something about a feed we just failed to read.
  */
 class UpdateCheck(
-    private val feed: () -> String? = ::defaultUpdateFeed,
+    private val feed: () -> FeedResult = ::defaultUpdateFeed,
     private val config: () -> DaemonConfig = { DaemonConfig() },
     private val version: String = VersionSource.version,
+    /** Runs a kicked check off the caller's thread; tests inject a synchronous runner. */
+    private val dispatch: (() -> Unit) -> Unit = { task ->
+        Thread(task, "corral-update-check").apply { isDaemon = true }.start()
+    },
 ) {
     @Volatile private var cached: UpdateInfo? = null
+
+    /** The switch value at the last check cycle; null until the first cycle has run. */
+    @Volatile private var lastEnabled: Boolean? = null
 
     /**
      * The cached result without touching the network. Disabled always reports disabled; when the
      * switch is now enabled a cache recorded while disabled is ignored, so re-enabling is live and
      * needs neither a `?force` nor the next 24 h cycle.
+     *
+     * A switch that has changed since the last recorded cycle kicks exactly one check (off the
+     * caller's thread, so this never blocks on the network). It runs at most once per transition —
+     * the same cadence guard the 24 h loop relies on — so a flip cannot become a retry storm; the
+     * caller sees UNKNOWN/NOT_CHECKED for the moment the check is in flight.
      */
     fun current(): UpdateInfo {
-        if (!checksEnabled()) return UpdateInfo(currentVersion = version, state = UpdateState.DISABLED)
+        if (!checksEnabled()) {
+            lastEnabled = false
+            return UpdateInfo(currentVersion = version, state = UpdateState.DISABLED)
+        }
+        if (lastEnabled != true) {
+            lastEnabled = true   // claim the transition before dispatching so it is kicked exactly once
+            dispatch { runCatching { checkNow() } }
+        }
         return cached?.takeIf { it.state != UpdateState.DISABLED }
-            ?: UpdateInfo(currentVersion = version, state = UpdateState.UNKNOWN)
+            ?: UpdateInfo(currentVersion = version, state = UpdateState.UNKNOWN,
+                reason = UpdateReason.NOT_CHECKED)
     }
 
     /** Run a fresh check (or report it disabled) and cache the result. Never throws. */
     fun checkNow(): UpdateInfo {
-        if (!checksEnabled()) {
+        val enabled = checksEnabled()
+        lastEnabled = enabled
+        if (!enabled) {
             return UpdateInfo(currentVersion = version, state = UpdateState.DISABLED).also { cached = it }
         }
-        val release = parseRelease(feed())
-        val verdict = release?.let { updateVerdict(version, it.tag) }
-        val info = when {
-            release == null || verdict == null ->
-                UpdateInfo(currentVersion = version, state = UpdateState.UNKNOWN)
-            else -> UpdateInfo(
-                currentVersion = version,
-                state = if (verdict) UpdateState.UPDATE_AVAILABLE else UpdateState.CURRENT,
-                latestVersion = release.tag,
-                releaseUrl = release.url)
+        val info = when (val result = feed()) {
+            is FeedResult.Body -> {
+                val release = parseRelease(result.json)
+                val verdict = release?.let { updateVerdict(version, it.tag) }
+                when {
+                    release == null || verdict == null -> UpdateInfo(currentVersion = version,
+                        state = UpdateState.UNKNOWN, reason = UpdateReason.UNPARSEABLE)
+                    verdict -> UpdateInfo(currentVersion = version, state = UpdateState.UPDATE_AVAILABLE,
+                        latestVersion = release.tag, releaseUrl = release.url)
+                    else -> UpdateInfo(currentVersion = version, state = UpdateState.CURRENT,
+                        latestVersion = release.tag)
+                }
+            }
+            is FeedResult.Http -> UpdateInfo(currentVersion = version, state = UpdateState.UNKNOWN,
+                reason = UpdateReason.HTTP_ERROR, httpStatus = result.status)
+            FeedResult.Unreachable -> UpdateInfo(currentVersion = version, state = UpdateState.UNKNOWN,
+                reason = UpdateReason.UNREACHABLE)
         }
         cached = info
         return info

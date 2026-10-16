@@ -51,7 +51,14 @@ internal fun emulatorProblems(doctor: DoctorResponse?): List<String> =
 internal fun updateLine(info: UpdateInfo?): String = when (info?.state) {
     null -> "update: unknown (could not read /api/update)"
     UpdateState.DISABLED -> "update: disabled (CORRAL_UPDATE_CHECK=off)"
-    UpdateState.UNKNOWN -> "update: unknown (could not reach the release feed)"
+    // UNKNOWN has several causes; name the one the daemon actually observed, never a guess
+    UpdateState.UNKNOWN -> when (info.reason) {
+        UpdateReason.NOT_CHECKED -> "update: unknown (no update check has run yet)"
+        UpdateReason.UNREACHABLE -> "update: unknown (could not reach the release feed)"
+        UpdateReason.HTTP_ERROR -> "update: unknown (release feed answered HTTP ${info.httpStatus})"
+        UpdateReason.UNPARSEABLE -> "update: unknown (release feed's tag is not a version)"
+        null -> "update: unknown (cause not recorded)"
+    }
     UpdateState.UPDATE_AVAILABLE -> {
         // tags arrive with or without a leading v; render one v either way
         val latest = info.latestVersion.orEmpty().removePrefix("v").removePrefix("V")

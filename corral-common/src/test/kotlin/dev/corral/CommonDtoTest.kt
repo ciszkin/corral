@@ -32,8 +32,16 @@ class CommonDtoTest {
         val unknown = corralJson.decodeFromString(UpdateInfo.serializer(), """{"currentVersion":"1.0.0"}""")
         assertEquals(UpdateState.UNKNOWN, unknown.state)
         assertNull(unknown.latestVersion)
+        assertNull(unknown.reason)          // an older daemon's payload carries no reason, and must not blow up
         assertFalse(unknown.updateAvailable)
         assertTrue(unknown.checksEnabled)
+
+        // P3 3: an UPDATE_AVAILABLE payload with no releaseUrl would render "(null)" — the wire refuses it
+        val truncated = assertFails {
+            corralJson.decodeFromString(UpdateInfo.serializer(),
+                """{"currentVersion":"1.0.0","state":"UPDATE_AVAILABLE","latestVersion":"2.0.0"}""")
+        }
+        assertTrue(truncated is IllegalArgumentException || truncated is SerializationException, "was $truncated")
 
         // a wire payload whose fields disagree with its state is refused by the type, not trusted
         val thrown = assertFails {
@@ -41,6 +49,11 @@ class CommonDtoTest {
                 """{"currentVersion":"1.0.0","state":"UNKNOWN","latestVersion":"x"}""")
         }
         assertTrue(thrown is IllegalArgumentException || thrown is SerializationException, "was $thrown")
+    }
+
+    @Test fun updateReasonRoundTripsAdditively() {
+        val u = UpdateInfo("1.0.0", UpdateState.UNKNOWN, reason = UpdateReason.HTTP_ERROR, httpStatus = 404)
+        assertEquals(u, corralJson.decodeFromString(UpdateInfo.serializer(), corralJson.encodeToString(UpdateInfo.serializer(), u)))
     }
 
     @Test fun jsonIgnoresUnknownKeys() {

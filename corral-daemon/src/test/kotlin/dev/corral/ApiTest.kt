@@ -757,7 +757,7 @@ class ApiTest {
         var calls = 0
         var body = """{"tag_name":"v2.0.0","html_url":"https://example/2.0.0"}"""
         val check = UpdateCheck(
-            feed = { calls++; body },
+            feed = { calls++; FeedResult.Body(body) },
             config = { DaemonConfig(fileValues = mapOf("CORRAL_UPDATE_CHECK" to "on"), inherited = emptyMap()) },
             version = "1.0.0")
         application { corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), updateCheck = check)) }
@@ -779,15 +779,16 @@ class ApiTest {
         assertEquals("v3.0.0", refreshed.latestVersion)
     }
 
-    /** Defect 1 at the route: enabling the switch is served live, with no ?force and no restart. */
+    /** Defect 1 + P3 2 at the route: enabling the switch serves a fresh check, no ?force, no restart. */
     @Test fun enablingTheSwitchIsServedLiveWithoutForce() = testApplication {
         val file = createTempDirectory("update").resolve("daemon.env")
         EnvFile.write(file, mapOf("CORRAL_UPDATE_CHECK" to "off"))
         var calls = 0
         val check = UpdateCheck(
-            feed = { calls++; """{"tag_name":"v2.0.0","html_url":"https://example/2.0.0"}""" },
+            feed = { calls++; FeedResult.Body("""{"tag_name":"v2.0.0","html_url":"https://example/2.0.0"}""") },
             config = { DaemonConfig(EnvFile.read(file), emptyMap()) },
-            version = "1.0.0")
+            version = "1.0.0",
+            dispatch = { it() })
         application { corralModule(AppEnv(testDevices, LeaseManager(testDevices, db = null), updateCheck = check)) }
 
         // a check cycle while disabled caches DISABLED (and never calls the feed)
@@ -797,9 +798,12 @@ class ApiTest {
 
         EnvFile.write(file, mapOf("CORRAL_UPDATE_CHECK" to "on"))
         val live = Json.decodeFromString<UpdateInfo>(client.get("/api/update").bodyAsText())
-        assertNotEquals(UpdateState.DISABLED, live.state)
+        assertEquals(UpdateState.UPDATE_AVAILABLE, live.state)   // the transition ran the check itself
         assertTrue(live.checksEnabled)
-        assertEquals(0, calls)
+        assertEquals(1, calls)
+
+        client.get("/api/update")
+        assertEquals(1, calls)                                   // and it does not re-kick on every poll
     }
 
     @Test fun putObserversTrimmedAndDeduped() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->

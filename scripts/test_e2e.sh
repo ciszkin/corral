@@ -521,6 +521,37 @@ check_free_bare_foreign() {
   return 0
 }
 
+# --- M8e: the console update surface's CLI verbs ---
+
+# `corral update` prints the honest summary (version + the daemon's update line) and exits 0; it
+# downloads nothing and runs no apply. The switch is pinned off so no network check decides the row.
+check_update_bare() {
+  local out rc
+  curl -s -o /dev/null -X PUT "$CORRAL_URL/api/config" -H 'Content-Type: application/json' \
+    -d '{"settings":{"CORRAL_UPDATE_CHECK":"off"}}'
+  out=$(corral update 2>&1); rc=$?
+  curl -s -o /dev/null -X PUT "$CORRAL_URL/api/config" -H 'Content-Type: application/json' \
+    -d '{"settings":{"CORRAL_UPDATE_CHECK":"on"}}'
+  [ "$rc" = 0 ] || { echo "# corral update: rc=$rc out=$out"; return 1; }
+  printf '%s\n' "$out" | grep -qE '[0-9]+\.[0-9]+\.[0-9]+' || { echo "# corral update version: $out"; return 1; }
+  printf '%s\n' "$out" | grep -q '^update: ' || { echo "# corral update line: $out"; return 1; }
+  return 0
+}
+
+# `corral update --apply` with no release available refuses cleanly and installs nothing (no download,
+# no systemctl, no install.sh): the apply path is not even entered.
+check_update_apply_none() {
+  local out rc
+  curl -s -o /dev/null -X PUT "$CORRAL_URL/api/config" -H 'Content-Type: application/json' \
+    -d '{"settings":{"CORRAL_UPDATE_CHECK":"off"}}'
+  out=$(corral update --apply 2>&1); rc=$?
+  curl -s -o /dev/null -X PUT "$CORRAL_URL/api/config" -H 'Content-Type: application/json' \
+    -d '{"settings":{"CORRAL_UPDATE_CHECK":"on"}}'
+  [ "$rc" != 0 ] || { echo "# update --apply no release: expected non-zero exit: $out"; return 1; }
+  printf '%s\n' "$out" | grep -qi 'no update available' || { echo "# update --apply refusal: $out"; return 1; }
+  return 0
+}
+
 # --- pass-38: stopping a running AVD adb doesn't list ends the tracked spawn and says so,
 # distinct from the `{"stopped":[]}` no-op when nothing was running. SmallAVD is started but
 # never appended to fake-devices, so the route has no serial and must fall through to stopAvd. ---
@@ -790,6 +821,8 @@ check "M8a corral --version prints a version and exits 0" check_version
 check "M8a bare corral free with no lease is an honest no-op" check_free_bare_noop
 check "M8a bare corral free releases the caller's own lease" check_free_bare_own
 check "M8a bare corral free never frees another owner's lease" check_free_bare_foreign
+check "M8e corral update prints the honest summary and exits 0" check_update_bare
+check "M8e corral update --apply with no release refuses and installs nothing" check_update_apply_none
 
 stop_daemon
 rm -f "$TMP/corral.db"*

@@ -14,6 +14,7 @@ compose.resources {
 
 dependencies {
     implementation(project(":corral-common"))
+    implementation(project(":corral-update"))
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.ktor.client.cio)
     implementation(libs.ktor.client.contentnegotiation)

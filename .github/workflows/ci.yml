@@ -24,7 +24,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v6
 
       - name: Run module tests
-        run: ./gradlew :corral-common:test :corral-daemon:test :corral-ui:test
+        run: ./gradlew :corral-common:test :corral-update:test :corral-daemon:test :corral-ui:test
 
       - name: Upload test reports
         if: always()

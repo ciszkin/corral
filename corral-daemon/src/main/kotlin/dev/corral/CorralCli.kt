@@ -25,6 +25,7 @@ import java.net.http.HttpResponse
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicReference
+import java.util.jar.JarFile
 import kotlin.system.exitProcess
 
 /** Percent-encodes a path segment; spaces must be `%20`, not the form-encoding `+`. */
@@ -66,6 +67,30 @@ internal fun updateLine(info: UpdateInfo?): String = when (info?.state) {
     }
     UpdateState.CURRENT -> "update: current"
 }
+
+/**
+ * `corral update`'s summary: the console's own version on the first line, then the daemon's honest
+ * update line. Naming the version makes the answer checkable even when no release is known.
+ */
+internal fun updateSummary(info: UpdateInfo?): String {
+    val current = info?.currentVersion?.takeIf { it.isNotBlank() }
+    return if (current == null) updateLine(info) else "corral v$current\n${updateLine(info)}"
+}
+
+/**
+ * The version stamped into the daemon jar that is actually installed at `~/.corral`, read from its
+ * `/corral-version` resource. `corral update --apply` reports THIS, not the release feed's tag: only
+ * the bytes on disk are a claim the install performed, and an unreadable jar yields null (no claim).
+ */
+internal fun installedDaemonVersion(home: Path): String? = runCatching {
+    val jar = home.resolve(".corral/corral-daemon-all.jar")
+    if (!Files.isRegularFile(jar)) return@runCatching null
+    JarFile(jar.toFile()).use { jf ->
+        jf.getJarEntry("corral-version")?.let { entry ->
+            jf.getInputStream(entry).bufferedReader().use { it.readText() }.trim().takeIf { it.isNotBlank() }
+        }
+    }
+}.getOrNull()
 
 /** True on Windows, where a `.bat`/`.cmd` shim is not a PE image and needs `cmd.exe /c`. */
 internal val isWindows: Boolean = System.getProperty("os.name").startsWith("Windows")
@@ -312,6 +337,13 @@ object CorralCli {
         HttpRequest.newBuilder(URI.create("$url$path")).timeout(Duration.ofSeconds(5)).GET().build(),
         HttpResponse.BodyHandlers.ofString()).let(::ok).body()
 
+    /** The daemon's cached update check for the plumbing verbs; null when unreachable or non-200. */
+    private fun fetchUpdate(): UpdateInfo? = runCatching {
+        val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/update"))
+            .timeout(Duration.ofSeconds(15)).GET().build(), HttpResponse.BodyHandlers.ofString())
+        if (r.statusCode() == 200) corralJson.decodeFromString<UpdateInfo>(r.body()) else null
+    }.getOrNull()
+
     /** Fetch a device PNG and exit; on non-200 print the denial body and exit 1. */
     private fun screenshot(serial: String, out: String): Nothing {
         val resp = http.send(
@@ -517,6 +549,28 @@ object CorralCli {
                 }.getOrNull()
                 println(updateLine(info))
                 if (problems > 0) exitProcess(1)
+            }
+            "update" -> {
+                val apply = args.drop(1).any { it == "--apply" }
+                val info = fetchUpdate()
+                println(updateSummary(info))
+                // Without --apply this downloads nothing and runs nothing — the explicit-apply rule.
+                if (!apply) { exitProcess(0) }
+                val tag = info?.latestVersion
+                if (info?.state != UpdateState.UPDATE_AVAILABLE || tag.isNullOrBlank()) {
+                    System.err.println("corral: no update available to install — refusing to download or change anything")
+                    exitProcess(1)
+                }
+                when (val result = UpdateApplier.forCli(tag).run()) {
+                    is ApplyResult.Completed -> {
+                        // The feed's tag is not a claim we verified; read the version back off disk.
+                        val installed = installedDaemonVersion(Path.of(System.getProperty("user.home")))
+                        println(if (installed != null) "update: installed v$installed" else "update: installed")
+                        exitProcess(0)
+                    }
+                    is ApplyResult.Refused -> { System.err.println("corral: ${result.reason}"); exitProcess(1) }
+                    is ApplyResult.Failed -> { System.err.println("corral: ${result.reason}"); exitProcess(1) }
+                }
             }
             "check" -> {
                 val checkOwner: String
@@ -732,6 +786,7 @@ object CorralCli {
 
     private fun usage(code: Int): Nothing {
         println("usage: corral devices|status|queue|owner|doctor|check [--owner <o>] [<serial>...]" +
+            "|update [--apply]" +
             "|claim [--all|<serial>] [selector]|free [--all|<serial>]|renew <serial>" +
             "|wait [--timeout S (max 600)] [selector]|lease [--all] [selector] -- <cmd>" +
             "|gate [--owner o] -- <adb args>" +

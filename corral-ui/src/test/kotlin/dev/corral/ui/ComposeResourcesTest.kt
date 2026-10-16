@@ -47,6 +47,21 @@ class ComposeResourcesTest {
         }
     }
 
+    @Test fun updateStringsExistInBothLanguages() {
+        val names = listOf(
+            "update_section", "update_current", "update_latest", "update_check_now", "update_install",
+            "update_state_current", "update_state_available", "update_state_disabled",
+            "update_state_not_checked", "update_state_unreachable", "update_state_http",
+            "update_state_unparseable", "update_state_cause_unknown", "update_state_unknown",
+            "update_check_failed", "update_installing", "update_installed", "update_install_failed",
+            "update_confirm_title", "update_confirm_body", "update_pill",
+        )
+        names.forEach { name ->
+            assertTrue(stringValue(enStrings, name).isNotBlank(), "en missing or blank: $name")
+            assertTrue(stringValue(beStrings, name).isNotBlank(), "be missing or blank: $name")
+        }
+    }
+
     @Test fun pluralQuantitiesMatchTheLanguage() {
         val en = pluralQuantities(enStrings)
         val be = pluralQuantities(beStrings)

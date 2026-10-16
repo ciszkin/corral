@@ -8,6 +8,7 @@ kotlin { jvmToolchain(17) }
 
 dependencies {
     implementation(project(":corral-common"))
+    implementation(project(":corral-update"))
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.ktor.server.cio)

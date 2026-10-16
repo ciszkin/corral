@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.Button
+import androidx.compose.material.ButtonDefaults
 import androidx.compose.material.MaterialTheme
 import androidx.compose.material.OutlinedTextField
 import androidx.compose.material.Text
@@ -29,6 +30,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import dev.corral.UpdateInfo
+import dev.corral.UpdateReason
+import dev.corral.UpdateState
 import dev.corral.ui.UiVersionSource
 import dev.corral.ui.app.AppIntent
 import dev.corral.ui.app.AppState
@@ -78,6 +82,24 @@ import dev.corral.ui.resources.settings_version_unknown
 import dev.corral.ui.resources.theme_dark
 import dev.corral.ui.resources.theme_light
 import dev.corral.ui.resources.theme_system
+import dev.corral.ui.resources.update_check_failed
+import dev.corral.ui.resources.update_check_now
+import dev.corral.ui.resources.update_current
+import dev.corral.ui.resources.update_install
+import dev.corral.ui.resources.update_install_failed
+import dev.corral.ui.resources.update_installed
+import dev.corral.ui.resources.update_installing
+import dev.corral.ui.resources.update_latest
+import dev.corral.ui.resources.update_section
+import dev.corral.ui.resources.update_state_available
+import dev.corral.ui.resources.update_state_cause_unknown
+import dev.corral.ui.resources.update_state_current
+import dev.corral.ui.resources.update_state_disabled
+import dev.corral.ui.resources.update_state_http
+import dev.corral.ui.resources.update_state_not_checked
+import dev.corral.ui.resources.update_state_unknown
+import dev.corral.ui.resources.update_state_unparseable
+import dev.corral.ui.resources.update_state_unreachable
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.Language
 import dev.corral.ui.theme.LocalExtendedColors
@@ -123,6 +145,8 @@ fun SettingsSection(
                     }
                 }
             }
+            Spacer(Modifier.size(Dimens.space12))
+            UpdateGroup(state, onConfigIntent)
             Spacer(Modifier.size(Dimens.space12))
         }
         SettingsFooter(
@@ -255,6 +279,86 @@ private fun DaemonGroup(
             SettingRow(setting, state.settings[setting.key] ?: setting.value,
                 state.errors.firstOrNull { it.contains(setting.key) && !it.isRulesMessage() }, onConfigIntent)
         }
+    }
+}
+
+@Composable
+private fun UpdateGroup(
+    state: ConfigState,
+    onConfigIntent: (ConfigIntent) -> Unit,
+) {
+    val colors = LocalExtendedColors.current
+    val info = state.update
+    val available = info?.state == UpdateState.UPDATE_AVAILABLE
+    val busy = state.updateChecking || state.installing
+    SectionGroup(stringResource(Res.string.update_section), Icons.RefreshCw) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Dimens.space16)) {
+            FieldBlock(stringResource(Res.string.update_current)) {
+                Text(
+                    versionText(info?.currentVersion.orEmpty(), stringResource(Res.string.settings_version_unknown)),
+                    fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.body2,
+                )
+            }
+            FieldBlock(stringResource(Res.string.update_latest)) {
+                Text(
+                    info?.latestVersion?.removePrefix("v")?.removePrefix("V")?.takeIf { it.isNotBlank() }
+                        ?.let { "v$it" } ?: stringResource(Res.string.settings_version_unknown),
+                    fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.body2,
+                )
+            }
+        }
+        Text(
+            updateStateText(info),
+            style = MaterialTheme.typography.body2,
+            color = if (available) colors.positive else colors.onSurfaceVariant,
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(Dimens.space8)) {
+            TextButton(onClick = { onConfigIntent(ConfigIntent.CheckUpdate) }, enabled = !busy) {
+                Text(stringResource(Res.string.update_check_now))
+            }
+            // The one destructive action here: error colours, never wired into ordinary Save.
+            Button(
+                onClick = { onConfigIntent(ConfigIntent.AskInstall) },
+                enabled = available && !busy,
+                colors = ButtonDefaults.buttonColors(
+                    backgroundColor = MaterialTheme.colors.error,
+                    contentColor = MaterialTheme.colors.onError,
+                ),
+            ) { Text(stringResource(Res.string.update_install)) }
+        }
+        when {
+            state.installing -> Text(
+                stringResource(Res.string.update_installing),
+                style = MaterialTheme.typography.caption, color = colors.onSurfaceVariant,
+            )
+            state.installed -> Text(
+                stringResource(Res.string.update_installed),
+                style = MaterialTheme.typography.caption, color = colors.positive,
+            )
+            state.installError != null -> Text(
+                stringResource(Res.string.update_install_failed, state.installError),
+                style = MaterialTheme.typography.caption, color = MaterialTheme.colors.error,
+            )
+            state.updateCheckFailed -> Text(
+                stringResource(Res.string.update_check_failed),
+                style = MaterialTheme.typography.caption, color = MaterialTheme.colors.error,
+            )
+        }
+    }
+}
+
+@Composable
+private fun updateStateText(info: UpdateInfo?): String = when (info?.state) {
+    null -> stringResource(Res.string.update_state_unknown)
+    UpdateState.CURRENT -> stringResource(Res.string.update_state_current)
+    UpdateState.UPDATE_AVAILABLE -> stringResource(Res.string.update_state_available)
+    UpdateState.DISABLED -> stringResource(Res.string.update_state_disabled)
+    UpdateState.UNKNOWN -> when (info.reason) {
+        UpdateReason.NOT_CHECKED -> stringResource(Res.string.update_state_not_checked)
+        UpdateReason.UNREACHABLE -> stringResource(Res.string.update_state_unreachable)
+        UpdateReason.HTTP_ERROR -> stringResource(Res.string.update_state_http, info.httpStatus ?: 0)
+        UpdateReason.UNPARSEABLE -> stringResource(Res.string.update_state_unparseable)
+        null -> stringResource(Res.string.update_state_cause_unknown)
     }
 }
 

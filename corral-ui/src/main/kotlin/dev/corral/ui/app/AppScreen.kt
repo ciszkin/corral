@@ -46,11 +46,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import dev.corral.UpdateInfo
+import dev.corral.UpdateState
 import dev.corral.ui.config.ConfigEffect
 import dev.corral.ui.config.ConfigIntent
 import dev.corral.ui.config.ConfigViewModel
 import dev.corral.ui.config.RulesSection
 import dev.corral.ui.config.SettingsSection
+import dev.corral.ui.components.CorralPill
 import dev.corral.ui.icons.AppIcon
 import dev.corral.ui.icons.Icons
 import dev.corral.ui.pool.DevicesSection
@@ -90,6 +93,9 @@ import dev.corral.ui.resources.settings_save_failed
 import dev.corral.ui.resources.theme_dark
 import dev.corral.ui.resources.theme_light
 import dev.corral.ui.resources.theme_system
+import dev.corral.ui.resources.update_confirm_body
+import dev.corral.ui.resources.update_confirm_title
+import dev.corral.ui.resources.update_pill
 import dev.corral.ui.theme.Dimens
 import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.ThemeMode
@@ -128,6 +134,17 @@ internal fun deniedBannerText(base: String, reason: String?): String =
  */
 internal fun statusBarText(status: String, url: String, version: String): String =
     if (version.isBlank()) "$status — $url" else "$status — $url · v$version"
+
+/**
+ * The latest version to show in the status-bar pill, or null when no pill belongs there. Only an
+ * UPDATE_AVAILABLE state renders one, so it disappears the moment the state moves on.
+ */
+internal fun updatePillVersion(update: UpdateInfo?): String? =
+    if (update?.state == UpdateState.UPDATE_AVAILABLE) {
+        update.latestVersion?.removePrefix("v")?.removePrefix("V")?.takeIf { it.isNotBlank() }
+    } else {
+        null
+    }
 
 @Composable
 fun AppScreen(
@@ -225,7 +242,7 @@ fun AppScreen(
                 ) { confirmQuit = true }
             }
             Column(Modifier.weight(1f)) {
-                StatusBar(state) { mode -> app.onIntent(AppIntent.SetTheme(mode)) }
+                StatusBar(state, configState.update) { mode -> app.onIntent(AppIntent.SetTheme(mode)) }
                 if (poolState.denied) {
                     val colors = LocalExtendedColors.current
                     Banner(
@@ -337,6 +354,14 @@ fun AppScreen(
             },
         )
     }
+    if (configState.confirmInstall) {
+        InstallDialog(
+            version = configState.update?.latestVersion?.removePrefix("v")?.removePrefix("V").orEmpty(),
+            busy = configState.installing,
+            onConfirm = { config.onIntent(ConfigIntent.ConfirmInstall) },
+            onCancel = { config.onIntent(ConfigIntent.CancelInstall) },
+        )
+    }
     if (confirmQuit) {
         QuitDialog(
             onConfirm = {
@@ -346,6 +371,28 @@ fun AppScreen(
             onCancel = { confirmQuit = false },
         )
     }
+}
+
+@Composable
+private fun InstallDialog(version: String, busy: Boolean, onConfirm: () -> Unit, onCancel: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(stringResource(Res.string.update_confirm_title, version)) },
+        text = { Text(stringResource(Res.string.update_confirm_body)) },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                enabled = !busy,
+                colors = ButtonDefaults.buttonColors(
+                    backgroundColor = MaterialTheme.colors.error,
+                    contentColor = MaterialTheme.colors.onError,
+                ),
+            ) { Text(stringResource(Res.string.confirm)) }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text(stringResource(Res.string.cancel)) }
+        },
+    )
 }
 
 @Composable
@@ -449,7 +496,7 @@ private fun RailItem(
 }
 
 @Composable
-private fun StatusBar(state: AppState, onTheme: (ThemeMode) -> Unit) {
+private fun StatusBar(state: AppState, update: UpdateInfo?, onTheme: (ThemeMode) -> Unit) {
     val colors = LocalExtendedColors.current
     val status = when (val connection = state.connection) {
         is Connection.Connected -> stringResource(Res.string.status_connected, connection.seq)
@@ -467,6 +514,7 @@ private fun StatusBar(state: AppState, onTheme: (ThemeMode) -> Unit) {
             style = MaterialTheme.typography.caption,
             modifier = Modifier.weight(1f),
         )
+        UpdatePill(update)
         Row(
             Modifier.clip(RoundedCornerShape(Dimens.radiusPill))
                 .background(colors.containerLow)
@@ -484,6 +532,19 @@ private fun StatusBar(state: AppState, onTheme: (ThemeMode) -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun UpdatePill(update: UpdateInfo?) {
+    val version = updatePillVersion(update) ?: return
+    val colors = LocalExtendedColors.current
+    CorralPill(
+        text = stringResource(Res.string.update_pill, version),
+        container = colors.tertiaryContainer,
+        content = colors.onTertiaryContainer,
+        icon = Icons.RefreshCw,
+        modifier = Modifier.padding(end = Dimens.space8),
+    )
 }
 
 @Composable

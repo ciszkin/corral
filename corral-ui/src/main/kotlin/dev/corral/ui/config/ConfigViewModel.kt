@@ -1,5 +1,9 @@
 package dev.corral.ui.config
 
+import dev.corral.ApplyResult
+import dev.corral.CONSOLE_RELAUNCH_UNKNOWN
+import dev.corral.UpdateApplier
+import dev.corral.UpdateState
 import dev.corral.ui.ConfigApiException
 import dev.corral.ui.CorralApi
 import dev.corral.ui.architecture.BaseMviViewModel
@@ -12,6 +16,13 @@ import kotlinx.coroutines.launch
 class ConfigViewModel(
     private val apiFactory: () -> CorralApi?,
     vmScope: CoroutineScope,
+    /**
+     * The confirmed apply, injected so a test never downloads or spawns anything. The default is the
+     * real applier, bound to this console's own relaunch. It runs only on [ConfigIntent.ConfirmInstall].
+     */
+    private val applyUpdate: (String) -> ApplyResult = { tag ->
+        UpdateApplier.forConsole(tag)?.run() ?: ApplyResult.Failed(CONSOLE_RELAUNCH_UNKNOWN)
+    },
 ) : BaseMviViewModel<ConfigIntent, ConfigState, ConfigEffect>(vmScope) {
 
     override fun initialState() = ConfigState()
@@ -34,6 +45,10 @@ class ConfigViewModel(
             ConfigIntent.Discard -> discard()
             ConfigIntent.ResetToDefaults -> resetToDefaults()
             ConfigIntent.ResetRules -> resetRules()
+            ConfigIntent.CheckUpdate -> checkUpdate(force = true)
+            ConfigIntent.AskInstall -> reduceState { copy(confirmInstall = true, installError = null) }
+            ConfigIntent.CancelInstall -> reduceState { copy(confirmInstall = false) }
+            ConfigIntent.ConfirmInstall -> installUpdate()
         }
     }
 
@@ -65,6 +80,54 @@ class ConfigViewModel(
                 throw e
             } catch (_: Exception) {
                 reduceState { copy(loadFailed = true) }
+            }
+            // the check is automatic: populate the update section from the daemon's cached result
+            refreshUpdate(api, force = false)
+        }
+    }
+
+    private fun checkUpdate(force: Boolean) {
+        val api = apiFactory()
+        if (api == null) {
+            reduceState { copy(updateChecking = false, updateCheckFailed = true) }
+            return
+        }
+        reduceState { copy(updateChecking = true, updateCheckFailed = false) }
+        vmScope.launch { refreshUpdate(api, force) }
+    }
+
+    private suspend fun refreshUpdate(api: CorralApi, force: Boolean) {
+        try {
+            val info = api.update(force)
+            reduceState { copy(update = info, updateChecking = false, updateCheckFailed = false) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            reduceState { copy(updateChecking = false, updateCheckFailed = true) }
+        }
+    }
+
+    private fun installUpdate() {
+        if (state.value.installing) return
+        // Re-check the STATE at confirm time, not just the tag: it can flip under an open dialog.
+        val info = state.value.update
+        if (info?.state != UpdateState.UPDATE_AVAILABLE) {
+            reduceState { copy(confirmInstall = false, installError = "no release to install") }
+            return
+        }
+        val tag = info.latestVersion ?: run {
+            reduceState { copy(confirmInstall = false, installError = "no release to install") }
+            return
+        }
+        reduceState { copy(confirmInstall = false, installing = true, installed = false, installError = null) }
+        vmScope.launch {
+            val result = applyUpdate(tag)
+            reduceState {
+                when (result) {
+                    is ApplyResult.Completed -> copy(installing = false, installed = true, installError = null)
+                    is ApplyResult.Refused -> copy(installing = false, installError = result.reason)
+                    is ApplyResult.Failed -> copy(installing = false, installError = result.reason)
+                }
             }
         }
     }

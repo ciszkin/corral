@@ -1,5 +1,8 @@
 package dev.corral.ui.app
 
+import dev.corral.UpdateInfo
+import dev.corral.UpdateReason
+import dev.corral.UpdateState
 import dev.corral.ui.CorralClient
 import dev.corral.ui.UiVersionSource
 import dev.corral.ui.config.ConfigViewModel
@@ -16,6 +19,7 @@ import org.koin.core.context.stopKoin
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 
 class AppScreenTest {
 
@@ -74,6 +78,19 @@ class AppScreenTest {
         assertEquals("1.2.3", versionText(AppState(daemonVersion = "1.2.3").daemonVersion, unknown))
         assertEquals(unknown, versionText(AppState().daemonVersion, unknown))
         assertEquals(UiVersionSource.version, versionText(UiVersionSource.version, unknown))
+    }
+
+    @Test fun updatePillOnlyRendersWhenAnUpdateIsAvailable() {
+        assertNull(updatePillVersion(null))
+        assertNull(updatePillVersion(UpdateInfo(currentVersion = "1.0.0", state = UpdateState.DISABLED)))
+        assertNull(updatePillVersion(UpdateInfo(currentVersion = "1.0.0", state = UpdateState.UNKNOWN,
+            reason = UpdateReason.NOT_CHECKED)))
+        assertNull(updatePillVersion(UpdateInfo(currentVersion = "1.0.0", state = UpdateState.CURRENT, latestVersion = "1.0.0")))
+        assertEquals(
+            "9.9.9",
+            updatePillVersion(UpdateInfo(currentVersion = "1.0.0", state = UpdateState.UPDATE_AVAILABLE,
+                latestVersion = "v9.9.9", releaseUrl = "https://example/9.9.9")),
+        )
     }
 
     @Test fun koinWiresTheViewModel() {

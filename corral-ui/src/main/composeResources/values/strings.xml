@@ -192,4 +192,26 @@
     <string name="force_free_nobody">nobody</string>
     <string name="force_free_failed">Force free failed — the daemon refused the request.</string>
     <string name="retry">Retry</string>
+
+    <string name="update_section">Update</string>
+    <string name="update_current">Current version</string>
+    <string name="update_latest">Latest version</string>
+    <string name="update_check_now">Check now</string>
+    <string name="update_install">Install update</string>
+    <string name="update_state_current">up to date</string>
+    <string name="update_state_available">update available</string>
+    <string name="update_state_disabled">checks disabled (CORRAL_UPDATE_CHECK=off)</string>
+    <string name="update_state_not_checked">no update check has run yet</string>
+    <string name="update_state_unreachable">could not reach the release feed</string>
+    <string name="update_state_http">release feed answered HTTP %1$d</string>
+    <string name="update_state_unparseable">release feed's tag is not a version</string>
+    <string name="update_state_cause_unknown">unknown (cause not recorded)</string>
+    <string name="update_state_unknown">unknown</string>
+    <string name="update_check_failed">check failed — the daemon is unreachable</string>
+    <string name="update_installing">installing…</string>
+    <string name="update_installed">update installed — the daemon is restarting and this console will relaunch</string>
+    <string name="update_install_failed">install failed: %1$s</string>
+    <string name="update_confirm_title">Install update v%1$s?</string>
+    <string name="update_confirm_body">Corral will download the release, verify its checksum, install it, restart the daemon and relaunch this console. Active leases and connected devices are interrupted.</string>
+    <string name="update_pill">v%1$s available</string>
 </resources>

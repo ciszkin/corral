@@ -209,4 +209,27 @@
     <string name="force_free_nobody">ніхто</string>
     <string name="force_free_failed">Не ўдалося вызваліць — дэман адхіліў запыт.</string>
     <string name="retry">Паўтарыць</string>
+
+    <!-- Draft additions pending OWNER REVIEW — update surface -->
+    <string name="update_section">Абнаўленне</string>
+    <string name="update_current">Бягучая версія</string>
+    <string name="update_latest">Апошняя версія</string>
+    <string name="update_check_now">Праверыць зараз</string>
+    <string name="update_install">Устанавіць абнаўленне</string>
+    <string name="update_state_current">актуальна</string>
+    <string name="update_state_available">даступна абнаўленне</string>
+    <string name="update_state_disabled">праверкі адключаны (CORRAL_UPDATE_CHECK=off)</string>
+    <string name="update_state_not_checked">праверка абнаўленняў яшчэ не запускалася</string>
+    <string name="update_state_unreachable">не ўдалося дасягнуць струменя рэлізаў</string>
+    <string name="update_state_http">струмень рэлізаў адказаў HTTP %1$d</string>
+    <string name="update_state_unparseable">цэтлік струменя рэлізаў не з'яўляецца версіяй</string>
+    <string name="update_state_cause_unknown">невядома (прычына не запісана)</string>
+    <string name="update_state_unknown">невядома</string>
+    <string name="update_check_failed">праверка не ўдалася — дэман недасяжны</string>
+    <string name="update_installing">усталяванне…</string>
+    <string name="update_installed">абнаўленне ўсталявана — дэман перазапускаецца, і гэта кансоль перазапусціцца</string>
+    <string name="update_install_failed">усталяванне не ўдалося: %1$s</string>
+    <string name="update_confirm_title">Устанавіць абнаўленне v%1$s?</string>
+    <string name="update_confirm_body">Corral спампуе рэліз, праверыць яго кантрольную суму, усталюе яго, перазапусціць дэман і перазапусціць гэту кансоль. Актыўныя лизы і падключаныя прылады будуць перапынены.</string>
+    <string name="update_pill">даступна v%1$s</string>
 </resources>

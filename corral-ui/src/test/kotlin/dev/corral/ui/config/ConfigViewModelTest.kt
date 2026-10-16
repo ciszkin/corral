@@ -3,6 +3,9 @@ package dev.corral.ui.config
 import dev.corral.Device
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
+import dev.corral.ApplyResult
+import dev.corral.UpdateInfo
+import dev.corral.UpdateState
 import dev.corral.ui.AvdStatus
 import dev.corral.ui.Capabilities
 import dev.corral.ui.ConfigApiException
@@ -34,11 +37,18 @@ class ConfigViewModelTest {
         var configResponse: ConfigResponse = response(),
         var configError: Exception? = null,
         var putResult: Result<PutConfigResponse> = Result.success(PutConfigResponse(restartRequired = false)),
+        var updateResponse: UpdateInfo = UpdateInfo(currentVersion = "1.0.0", state = UpdateState.DISABLED),
+        var updateError: Exception? = null,
     ) : CorralApi {
         val putCalls = mutableListOf<Pair<Map<String, String>, ConfigRules?>>()
+        val updateForces = mutableListOf<Boolean>()
         var putGate: CompletableDeferred<Unit>? = null
 
         override suspend fun config(): ConfigResponse = configError?.let { throw it } ?: configResponse
+        override suspend fun update(force: Boolean): UpdateInfo {
+            updateForces += force
+            return updateError?.let { throw it } ?: updateResponse
+        }
         override suspend fun putConfig(settings: Map<String, String>, rules: ConfigRules?): Result<PutConfigResponse> {
             putCalls += settings to rules
             putGate?.await()
@@ -291,6 +301,54 @@ class ConfigViewModelTest {
         assertTrue(vm.state.value.errors.isEmpty())
         assertEquals(ConfigEffect.Saved(false), vm.effect.first())
     }
+
+    @Test fun checkUpdateFillsState() = runTest {
+        val api = FakeApi(updateResponse = available("9.9.9"))
+        val vm = newVm(api)
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+
+        assertEquals(UpdateState.UPDATE_AVAILABLE, vm.state.value.update?.state)
+        assertEquals("9.9.9", vm.state.value.update?.latestVersion)
+        assertFalse(vm.state.value.updateChecking)
+        assertFalse(vm.state.value.updateCheckFailed)
+        assertEquals(listOf(true), api.updateForces)   // "Check now" forces a fresh check
+    }
+
+    @Test fun installUpdateRunsTheApplierAndSurfacesTheResult() = runTest {
+        val api = FakeApi(updateResponse = available("9.9.9"))
+        val applied = mutableListOf<String>()
+        val vm = ConfigViewModel({ api }, backgroundScope) { tag ->
+            applied += tag
+            ApplyResult.Completed(listOf(listOf("unzip", "-o", "bundle.zip", "-d", "bundle")))
+        }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.AskInstall)
+        assertTrue(vm.state.value.confirmInstall)
+
+        vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
+
+        assertEquals(listOf("9.9.9"), applied)
+        assertTrue(vm.state.value.installed)
+        assertFalse(vm.state.value.installing)
+        assertNull(vm.state.value.installError)
+    }
+
+    @Test fun installUpdateSurfacesAFailureHonestly() = runTest {
+        val api = FakeApi(updateResponse = available("9.9.9"))
+        val vm = ConfigViewModel({ api }, backgroundScope) {
+            ApplyResult.Failed("checksum mismatch for corral-9.9.9.zip: expected sha256 aa but the archive is bb — refusing to install")
+        }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
+
+        assertFalse(vm.state.value.installed)
+        assertFalse(vm.state.value.installing)
+        assertTrue(vm.state.value.installError!!.contains("checksum mismatch"))
+    }
+
+    private fun available(tag: String) =
+        UpdateInfo(currentVersion = "1.0.0", state = UpdateState.UPDATE_AVAILABLE, latestVersion = tag,
+            releaseUrl = "https://example/$tag")
 
     private companion object {
         fun response(

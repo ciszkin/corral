@@ -3,6 +3,8 @@ package dev.corral.ui
 import dev.corral.Device
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
+import dev.corral.UpdateInfo
+import dev.corral.UpdateState
 import dev.corral.ui.data.ConfigResponse
 import dev.corral.ui.data.ConfigRules
 import dev.corral.ui.data.DoctorResponse
@@ -40,6 +42,9 @@ interface CorralApi {
     suspend fun forceFree(serial: String)
     suspend fun config(): ConfigResponse
     suspend fun putConfig(settings: Map<String, String>, rules: ConfigRules?): Result<PutConfigResponse>
+    /** The daemon's cached update check; [force] runs a fresh check instead of the cached one. */
+    suspend fun update(force: Boolean = false): UpdateInfo =
+        UpdateInfo(currentVersion = "", state = UpdateState.DISABLED)
     suspend fun doctor(): DoctorResponse
     suspend fun emulators(): List<AvdStatus>
     suspend fun emulatorStart(avd: String)

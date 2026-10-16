@@ -3,6 +3,7 @@ package dev.corral.ui
 import dev.corral.Device
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
+import dev.corral.UpdateInfo
 import dev.corral.corralJson
 import dev.corral.ui.data.ConfigErrors
 import dev.corral.ui.data.ConfigResponse
@@ -20,6 +21,7 @@ import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.client.plugins.websocket.webSocketSession
 import io.ktor.client.request.delete
 import io.ktor.client.request.get
+import io.ktor.client.request.parameter
 import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.request.setBody
@@ -102,6 +104,10 @@ class CorralClient internal constructor(
             Result.failure(ConfigApiException(errors, e))
         } else throw e
     }
+
+    override suspend fun update(force: Boolean): UpdateInfo = http.get("$baseUrl/api/update") {
+        if (force) parameter("force", "1")
+    }.body()
 
     override suspend fun doctor(): DoctorResponse = http.get("$baseUrl/api/doctor").body()
 

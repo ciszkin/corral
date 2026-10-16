@@ -6,4 +6,4 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "corral"
-include("corral-common", "corral-daemon", "corral-ui")
+include("corral-common", "corral-update", "corral-daemon", "corral-ui")

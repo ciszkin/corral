@@ -83,8 +83,11 @@ if [[ $UNINSTALL -eq 1 ]]; then
   rm -f "$TARGET_HOME/.config/corral/daemon.env"
   rm -f "$TARGET_HOME/.config/corral/ui.conf"
   rm -rf "$CORRAL_HOME"
-  # restore the SDK adb if it was shimmed (adb.real -> adb)
-  for d in "$TARGET_HOME/Android/Sdk/platform-tools" "${ANDROID_HOME:-}/platform-tools" "${ANDROID_SDK_ROOT:-}/platform-tools"; do
+  # restore the SDK adb if it was shimmed (adb.real -> adb). Under --home only the sandbox's own
+  # SDK is ours to restore; an ambient SDK belongs to the real install and must not be touched.
+  SDK_DIRS=("$TARGET_HOME/Android/Sdk/platform-tools")
+  if [[ -z "$HOME_ARG" ]]; then SDK_DIRS+=("${ANDROID_HOME:-}/platform-tools" "${ANDROID_SDK_ROOT:-}/platform-tools"); fi
+  for d in "${SDK_DIRS[@]}"; do
     if [[ -e "$d/adb.real" ]]; then
       rm -f "$d/adb"
       mv "$d/adb.real" "$d/adb"
@@ -114,6 +117,13 @@ detect_java() {
 
 detect_adb() {
   if [[ -n "$ADB_ARG" ]]; then echo "$ADB_ARG"; return 0; fi
+  # --home is a sandbox: install_sdk_shim overwrites the adb it resolves, so an adb outside
+  # TARGET_HOME must never be used. Only an SDK inside the root is acceptable (explicit --adb
+  # above is the operator opting in to a specific path).
+  if [[ -n "$HOME_ARG" ]]; then
+    if [[ -x "$TARGET_HOME/Android/Sdk/platform-tools/adb" ]]; then echo "$TARGET_HOME/Android/Sdk/platform-tools/adb"; return 0; fi
+    return 1
+  fi
   if [[ -n "${ANDROID_HOME:-}" && -x "$ANDROID_HOME/platform-tools/adb" ]]; then echo "$ANDROID_HOME/platform-tools/adb"; return 0; fi
   if [[ -n "${ANDROID_SDK_ROOT:-}" && -x "$ANDROID_SDK_ROOT/platform-tools/adb" ]]; then echo "$ANDROID_SDK_ROOT/platform-tools/adb"; return 0; fi
   if [[ -x "$TARGET_HOME/Android/Sdk/platform-tools/adb" ]]; then echo "$TARGET_HOME/Android/Sdk/platform-tools/adb"; return 0; fi
@@ -162,6 +172,13 @@ JAVA_BIN=$(detect_java)
 if [[ -z "$JAVA_BIN" ]]; then echo "ERROR: could not detect a usable Java; pass --java PATH." >&2; exit 1; fi
 if ADB=$(detect_adb); then
   echo "Using adb: $ADB"
+elif [[ -n "$HOME_ARG" ]]; then
+  echo "ERROR: no adb at $TARGET_HOME/Android/Sdk/platform-tools/adb; refusing to shim one from outside." >&2
+  echo "       A --home install deliberately ignores \$ANDROID_HOME and \$ANDROID_SDK_ROOT even when they" >&2
+  echo "       point inside the root at a non-standard path, and ignores PATH — because" >&2
+  echo "       install_sdk_shim OVERWRITES the adb it resolves. Put an SDK at the path above, or pass" >&2
+  echo "       --adb PATH for one you accept being rewritten." >&2
+  exit 1
 else
   ADB=""
   echo "WARNING: no real adb found — the daemon will have an empty device inventory."

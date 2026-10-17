@@ -298,5 +298,57 @@ env -u CORRAL_UI_JAR bash "$BUNDLE3/install.sh" --home "$TMPHOME5" --uninstall >
 dump_on_fail "$rcau" "$TMP/bundle-adopt-uninstall.log"
 check "uninstall removes an adopted icon" test ! -e "$TMPHOME5/.local/share/icons/corral.png"
 
+# ===== --home isolation: adb resolution must never reach outside the install root =====
+# A decoy adb OUTSIDE every sandbox stands in for the user's real ~/bin/adb. Under --home the
+# installer must only use an SDK inside the root (or an explicit --adb); it must never fall back
+# to this decoy, because install_sdk_shim overwrites whichever adb it resolves.
+DECDIR="$TMP/ambient-bin"; DECOY="$DECDIR/adb"
+mkdir -p "$DECDIR"
+printf '%s\n' '#!/bin/sh' 'echo "decoy-adb $@"' > "$DECOY"; chmod +x "$DECOY"
+DECOY_SHA=$(sha256sum "$DECOY" | cut -d' ' -f1)
+
+# isolate_home <home> [args...]: run the installer with --home and the ambient decoy first on PATH.
+isolate_home() {
+  local h="$1"; shift
+  env HOME="$TMPHOME" PATH="$DECDIR:$STUB:$PATH" \
+    bash "$SRC/install.sh" --java "$FAKE_JAVA" --jar "$JAR" --no-ui --home "$h" "$@"
+}
+
+# 1 + 4: a sandbox with its own SDK, decoy also on PATH -> decoy untouched, in-root SDK used/shimmed.
+TMPHOME6="$TMP/home6"; SB6_SDK="$TMPHOME6/Android/Sdk/platform-tools"
+mkdir -p "$SB6_SDK" "$TMPHOME6/bin"
+printf '%s\n' '#!/bin/sh' 'echo "sandbox-adb6 $@"' > "$SB6_SDK/adb"; chmod +x "$SB6_SDK/adb"
+: > "$TMPHOME6/.bashrc"
+isolate_home "$TMPHOME6" >"$TMP/iso-sdk.log" 2>&1; rc6=$?
+dump_on_fail "$rc6" "$TMP/iso-sdk.log"
+check "sandboxed install with --home does not write outside the sandbox" bash -c \
+  "[ '$rc6' -eq 0 ] && [ -x '$TMPHOME6/bin/adb' ] && grep -q 'corral adb wrapper' '$TMPHOME6/bin/adb' && grep -q 'corral adb wrapper' '$SB6_SDK/adb' && grep -q 'sandbox-adb6' '$SB6_SDK/adb.real' && [ \"\$(sha256sum '$DECOY' | cut -d' ' -f1)\" = '$DECOY_SHA' ] && [ ! -e '$DECOY.real' ]"
+check "sandboxed install uses an SDK inside the sandbox" grep -qF "Using adb: $SB6_SDK/adb" "$TMP/iso-sdk.log"
+
+# 2: an empty sandbox with only the out-of-sandbox decoy available must be a loud, early refusal.
+TMPHOME7="$TMP/home7"; mkdir -p "$TMPHOME7/bin"; : > "$TMPHOME7/.bashrc"
+isolate_home "$TMPHOME7" >"$TMP/iso-refuse.log" 2>&1; rc7=$?
+check "sandboxed install refuses an out-of-sandbox adb" bash -c \
+  "[ '$rc7' -ne 0 ] && grep -q -- '--adb' '$TMP/iso-refuse.log' && [ \"\$(sha256sum '$DECOY' | cut -d' ' -f1)\" = '$DECOY_SHA' ] && [ ! -e '$DECOY.real' ] && [ ! -e '$TMPHOME7/.corral' ] && [ ! -e '$TMPHOME7/bin/adb' ]"
+
+# 3: an explicit --adb inside the sandbox is honoured.
+TMPHOME8="$TMP/home8"; SB8_TOOL="$TMPHOME8/tools"
+mkdir -p "$SB8_TOOL" "$TMPHOME8/bin"
+printf '%s\n' '#!/bin/sh' 'echo "explicit-adb8 $@"' > "$SB8_TOOL/adb"; chmod +x "$SB8_TOOL/adb"
+isolate_home "$TMPHOME8" --adb "$SB8_TOOL/adb" >"$TMP/iso-explicit.log" 2>&1; rc8=$?
+dump_on_fail "$rc8" "$TMP/iso-explicit.log"
+check "sandboxed install honours an explicit --adb" bash -c \
+  "[ '$rc8' -eq 0 ] && [ -x '$TMPHOME8/bin/adb' ] && grep -q 'explicit-adb8' '$SB8_TOOL/adb.real' && [ \"\$(sha256sum '$DECOY' | cut -d' ' -f1)\" = '$DECOY_SHA' ]"
+
+# 5: regression guard — without --home, adb still resolves from PATH exactly as before and is shimmed.
+TMPHOME9="$TMP/home9"; PATHDIR="$TMP/path-bin"; mkdir -p "$TMPHOME9" "$PATHDIR"
+printf '%s\n' '#!/bin/sh' 'echo "path-adb9 $@"' > "$PATHDIR/adb"; chmod +x "$PATHDIR/adb"
+: > "$TMPHOME9/.bashrc"
+env HOME="$TMPHOME9" PATH="$PATHDIR:$STUB:$PATH" bash "$SRC/install.sh" \
+  --java "$FAKE_JAVA" --jar "$JAR" --no-ui >"$TMP/iso-nohome.log" 2>&1; rc9=$?
+dump_on_fail "$rc9" "$TMP/iso-nohome.log"
+check "a normal install still resolves adb from PATH as before" bash -c \
+  "[ '$rc9' -eq 0 ] && grep -qF 'Using adb: $PATHDIR/adb' '$TMP/iso-nohome.log' && grep -q 'path-adb9' '$PATHDIR/adb.real'"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

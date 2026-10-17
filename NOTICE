@@ -1,0 +1,23 @@
+Corral
+
+This product includes the following third-party material, bundled in the
+shipped jars:
+
+  - Lucide icons (https://lucide.dev), ISC licensed. The icons vendored under
+    corral-ui/src/main/composeResources/drawable/ are compiled into the
+    corral-ui jar. Their licence text, which also carries the MIT terms for
+    the Feather-derived subset, travels in the jar at
+    composeResources/dev.corral.ui.resources/files/LUCIDE-LICENSE.
+
+  - JetBrains Mono (https://www.jetbrains.com/lp/mono/), SIL Open Font
+    License 1.1. The font ships in the corral-ui jar at
+    composeResources/dev.corral.ui.resources/font/JetBrainsMono-Regular.ttf;
+    its licence text is beside it at
+    composeResources/dev.corral.ui.resources/font/OFL.txt.
+
+The Kotlin, Ktor, kotlinx, sqlite-jdbc, MCP SDK, Compose/Skiko, Koin and
+slf4j libraries are not bundled as separate files: they are shaded into the
+two shadow jars (corral-daemon-all.jar and corral-ui-all.jar). They are not
+relicensed here. Their upstream licence files are carried inside those jars
+under META-INF/, and the exact versions are pinned in gradle/libs.versions.toml;
+consult each dependency's own licence for its terms.

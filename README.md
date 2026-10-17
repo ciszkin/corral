@@ -157,7 +157,7 @@ the same device.
   observer, not a leaser: its identity is `CORRAL_OWNER` (default `corral-ui`). The one adb it can
   spawn is the read-only scrcpy live view above: scrcpy resolves adb itself (a static build ships
   its own), so that one path generally sits outside corral's lease gate — an acknowledged
-  exception, not an oversight (see `cutover.md` §4). Install it with `install.sh --ui` (or
+  exception, not an oversight (see the "Known limits" section of [CUTOVER.md](CUTOVER.md#known-limits)). Install it with `install.sh --ui` (or
   `--no-ui` to skip; the default follows whether a `corral-ui-all.jar` is found — beside the
   installer in the bundle, or in `corral-ui/build/libs/` in a source checkout). Because
   screenshots are strict by default, the installer seeds `CORRAL_SCREENSHOT_OBSERVERS=corral-ui`

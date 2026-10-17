@@ -103,15 +103,37 @@ class UpdateApplierTest {
     @Test fun missingChecksumFileAbortsTheSameWay() {
         val workDir = newWorkDir()
         Files.write(workDir.resolve("corral-1.2.3.zip"), "real bytes".toByteArray())
+        val downloads = mutableListOf<URI>()
         val ran = mutableListOf<List<String>>()
 
-        val result = applier(workDir, execute = { ran += it; 0 }).run()
+        val result = applier(workDir, download = { uri, _ -> downloads += uri }, execute = { ran += it; 0 }).run()
 
         assertTrue(result is ApplyResult.Failed, "expected a hard stop, got $result")
         assertTrue("no .sha256" in (result as ApplyResult.Failed).reason, result.reason)
         assertTrue("refusing to install" in result.reason, result.reason)
+        // reached both downloads, then stopped at the gate before any command ran
+        assertEquals(2, downloads.size, "both the zip and its .sha256 must be fetched")
         assertTrue(ran.isEmpty(), "no step may run without a checksum: $ran")
-        assertFalse(Files.exists(workDir.resolve("bundle")), "nothing may be extracted")
+    }
+
+    @Test fun cliApplyWithAnUncreatableScratchDirFailsHonestly() {
+        // A regular file where the scratch parent should be: creating the dir must fail, not throw.
+        val blocked = Files.createTempFile("corral-blocked", ".tmp")
+        val workDir = blocked.resolve("scratch")
+
+        val result = UpdateApplier.forCli("v1.2.3", home = newWorkDir(), repo = "ciszkin/corral", workDir = workDir).run()
+
+        assertTrue(result is ApplyResult.Failed, "expected a clean Failed, got $result")
+        val reason = (result as ApplyResult.Failed).reason
+        assertTrue("scratch" in reason, "the message must name what actually went wrong: $reason")
+        assertFalse(reason.contains("daemon unreachable"), "the CLI must not blame the daemon: $reason")
+    }
+
+    @Test fun scratchDirIsAPurePathSoTheFactoryNeverTouchesTheFilesystem() {
+        // The old eager Files.createTempDirectory threw at the call site, before run()'s try. The
+        // factory now only picks a path; run() owns creating it and reporting a failure.
+        val path = scratchDir()
+        assertFalse(Files.exists(path), "provisioning the scratch path must not create anything: $path")
     }
 
     @Test fun componentsAreDerivedFromWhatIsInstalled() {

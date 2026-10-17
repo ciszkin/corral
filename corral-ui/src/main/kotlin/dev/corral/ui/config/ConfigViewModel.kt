@@ -99,7 +99,8 @@ class ConfigViewModel(
     private suspend fun refreshUpdate(api: CorralApi, force: Boolean) {
         try {
             val info = api.update(force)
-            reduceState { copy(update = info, updateChecking = false, updateCheckFailed = false) }
+            // A fresh result invalidates the "installed" caption: it described the previous state.
+            reduceState { copy(update = info, updateChecking = false, updateCheckFailed = false, installed = false) }
         } catch (e: CancellationException) {
             throw e
         } catch (_: Exception) {
@@ -121,7 +122,15 @@ class ConfigViewModel(
         }
         reduceState { copy(confirmInstall = false, installing = true, installed = false, installError = null) }
         vmScope.launch {
-            val result = applyUpdate(tag)
+            // The applier is built for ApplyResult, but a throw must not escape into the scope and
+            // leave installing latched with no error: turn any exception into an honest Failed.
+            val result = try {
+                applyUpdate(tag)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                ApplyResult.Failed("update failed: ${e.message ?: e::class.simpleName ?: "unknown error"}")
+            }
             reduceState {
                 when (result) {
                     is ApplyResult.Completed -> copy(installing = false, installed = true, installError = null)

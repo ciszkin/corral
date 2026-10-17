@@ -4,6 +4,9 @@ import dev.corral.Device
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
 import dev.corral.ApplyResult
+import dev.corral.InstalledComponents
+import dev.corral.Relaunch
+import dev.corral.UpdateApplier
 import dev.corral.UpdateInfo
 import dev.corral.UpdateState
 import dev.corral.ui.AvdStatus
@@ -15,6 +18,9 @@ import dev.corral.ui.data.ConfigRules
 import dev.corral.ui.data.ConfigSetting
 import dev.corral.ui.data.DoctorResponse
 import dev.corral.ui.data.PutConfigResponse
+import java.io.IOException
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -344,6 +350,52 @@ class ConfigViewModelTest {
         assertFalse(vm.state.value.installed)
         assertFalse(vm.state.value.installing)
         assertTrue(vm.state.value.installError!!.contains("checksum mismatch"))
+    }
+
+    /** A regular file where the scratch parent should be: the applier must report Failed, not throw. */
+    private fun uncreatableWorkDir(): Path = Files.createTempFile("corral-blocked", ".tmp").resolve("scratch")
+
+    @Test fun installReleasesInstallingAndShowsErrorWhenTheScratchDirCannotBeCreated() = runTest {
+        val api = FakeApi(updateResponse = available("9.9.9"))
+        val workDir = uncreatableWorkDir()
+        val vm = ConfigViewModel({ api }, backgroundScope) { tag ->
+            UpdateApplier(
+                tag = tag, repo = "ciszkin/corral", workDir = workDir,
+                components = InstalledComponents(daemon = true, ui = true), relaunch = Relaunch.None,
+            ).run()
+        }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
+
+        assertFalse(vm.state.value.installing, "the section must not stay busy-locked")
+        assertFalse(vm.state.value.installed)
+        assertTrue(vm.state.value.installError!!.contains("scratch"), vm.state.value.installError!!)
+    }
+
+    @Test fun installReleasesInstallingAndShowsErrorWhenTheApplierThrows() = runTest {
+        val api = FakeApi(updateResponse = available("9.9.9"))
+        val vm = ConfigViewModel({ api }, backgroundScope) {
+            throw IOException("could not create the update scratch directory at /x: Not a directory")
+        }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
+
+        assertFalse(vm.state.value.installing, "a throw must never latch installing")
+        assertFalse(vm.state.value.installed)
+        assertTrue(vm.state.value.installError!!.contains("scratch"), vm.state.value.installError!!)
+    }
+
+    @Test fun aFreshCheckClearsTheInstalledCaption() = runTest {
+        val api = FakeApi(updateResponse = available("9.9.9"))
+        val vm = ConfigViewModel({ api }, backgroundScope) { ApplyResult.Completed(emptyList()) }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
+        assertTrue(vm.state.value.installed)
+
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+
+        assertFalse(vm.state.value.installed, "a fresh state must not sit next to the stale caption")
+        assertEquals(UpdateState.UPDATE_AVAILABLE, vm.state.value.update?.state)
     }
 
     private fun available(tag: String) =

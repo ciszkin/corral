@@ -10,6 +10,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
 import java.time.Duration
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 private const val DOWNLOAD_CONNECT_TIMEOUT_SECONDS = 15L
@@ -92,6 +93,8 @@ class UpdateApplier(
     private val execute: (List<String>) -> Int = ::runProcess,
     /** Starts the console replacement and returns at once — [run] never waits on the relaunch. */
     private val spawn: (List<String>) -> Unit = ::spawnProcess,
+    /** Set when the applier could not even be prepared: [run] reports it instead of running. */
+    private val setupError: String? = null,
 ) {
     private val version = tag.trim().removePrefix("v").removePrefix("V")
     private val zip: Path = workDir.resolve("corral-$version.zip")
@@ -108,10 +111,12 @@ class UpdateApplier(
     }
 
     fun run(): ApplyResult {
+        // Preparing the applier can fail before run() is ever entered; report that, never throw it.
+        setupError?.let { return ApplyResult.Failed(it) }
         // A host that cannot restart the unit must refuse, not half-apply: name the remedy first.
         platformRefusal?.let { return ApplyResult.Refused(it) }
         return try {
-            Files.createDirectories(workDir)
+            createScratchDir()
             val zipUri = releaseZipUrl(repo, tag)
             download(zipUri, zip)
             download(URI.create("$zipUri.sha256"), sha)
@@ -142,6 +147,21 @@ class UpdateApplier(
         }
     }
 
+    /**
+     * The scratch dir is created HERE, inside [run]'s contract: an unwritable or full temp filesystem
+     * is reported as a [ApplyResult.Failed] naming the directory, not a throw before run() is entered.
+     */
+    private fun createScratchDir() {
+        try {
+            Files.createDirectories(workDir)
+        } catch (e: Exception) {
+            throw IOException(
+                "could not create the update scratch directory at $workDir (${e.message ?: e::class.simpleName ?: "unknown error"})",
+                e,
+            )
+        }
+    }
+
     companion object {
         /** The CLI applies for the host; it has no console window to relaunch. */
         fun forCli(
@@ -149,12 +169,7 @@ class UpdateApplier(
             home: Path = userHome(),
             repo: String = defaultRepo(),
             workDir: Path = scratchDir(),
-        ): UpdateApplier = UpdateApplier(
-            tag = tag, repo = repo, workDir = workDir,
-            components = InstalledComponents.detect(corralHome(home)),
-            relaunch = Relaunch.None,
-            platformRefusal = defaultPlatformRefusal(),
-        )
+        ): UpdateApplier = build(tag, home, repo, workDir, Relaunch.None)
 
         /** The console applies and then relaunches itself; null when its own argv cannot be re-derived. */
         fun forConsole(
@@ -169,13 +184,31 @@ class UpdateApplier(
                 info.arguments().orElse(null)?.toList(),
                 info.commandLine().orElse(null),
             ) ?: return null
-            return UpdateApplier(
-                tag = tag, repo = repo, workDir = workDir,
-                components = InstalledComponents.detect(corralHome(home)),
-                relaunch = Relaunch.Console(argv),
-                platformRefusal = defaultPlatformRefusal(),
-            )
+            return build(tag, home, repo, workDir, Relaunch.Console(argv))
         }
+
+        /**
+         * Everything a factory does besides pick the scratch path touches the filesystem (detecting
+         * what is installed, resolving the platform refusal), and none of it may escape as an
+         * exception: a caller that only understands [ApplyResult] must never get a throw before
+         * [run]. On failure, hand back an applier whose [run] reports the honest Failed instead.
+         */
+        private fun build(tag: String, home: Path, repo: String, workDir: Path, relaunch: Relaunch): UpdateApplier =
+            runCatching {
+                UpdateApplier(
+                    tag = tag, repo = repo, workDir = workDir,
+                    components = InstalledComponents.detect(corralHome(home)),
+                    relaunch = relaunch,
+                    platformRefusal = defaultPlatformRefusal(),
+                )
+            }.getOrElse { e ->
+                UpdateApplier(
+                    tag = tag, repo = repo, workDir = workDir,
+                    components = InstalledComponents(daemon = false, ui = false),
+                    relaunch = relaunch,
+                    setupError = "could not prepare the update: ${e.message ?: e::class.simpleName ?: "unknown error"}",
+                )
+            }
     }
 }
 
@@ -192,7 +225,15 @@ internal fun userHome(): Path = Path.of(System.getProperty("user.home"))
 
 internal fun corralHome(home: Path = userHome()): Path = home.resolve(".corral")
 
-internal fun scratchDir(): Path = Files.createTempDirectory("corral-update")
+/**
+ * A unique scratch path; it is NOT created here. [UpdateApplier.run] creates it inside its try, so a
+ * full or unwritable temp filesystem becomes a reported apply failure instead of a throw at the call
+ * site (where a default argument would evaluate it before run()).
+ */
+internal fun scratchDir(): Path = Path.of(
+    System.getProperty("java.io.tmpdir") ?: System.getProperty("user.dir") ?: ".",
+    "corral-update-${UUID.randomUUID()}",
+)
 
 /** The platform refusal, worded with the remedy; null when this host can restart a user unit. */
 internal fun systemdRefusal(osName: String, hasSystemctl: Boolean): String? =

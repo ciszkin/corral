@@ -1,3 +1,8 @@
+# A `v*` tag push STAGES a release: it runs every gate and builds/checksums the zip, but creates no
+# GitHub release. Publishing is a separate, explicit workflow_dispatch with publish=true run on the
+# tag ref. This mirrors the project's rule for updates -- automatic CHECK, explicit APPLY -- and lets
+# the costliest first release be rehearsed: push the tag, read the staged summary, then dispatch on
+# that tag to publish. Pushing the tag alone publishes nothing.
 name: Release
 
 on:
@@ -24,8 +29,9 @@ jobs:
       group: release
       cancel-in-progress: false
     env:
-      # A tag push is always a real release; a dispatch publishes only when asked.
-      PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+      # A tag push STAGES only (build + verify + checksum, create nothing). PUBLISH is true ONLY for
+      # an explicit dispatch with publish=true, run on the tag ref -- the deliberate second step.
+      PUBLISH: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
     steps:
       # fetch-depth 0: a manual dispatch derives its tag from the repo's history, which a
       # depth-1 checkout would not carry.
@@ -33,10 +39,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      # First, before any expensive work. Phase F supplies LICENSE and NOTICE; until those land a
-      # real publish (tag push, or dispatch with publish=true) is EXPECTED to abort here. That is
-      # correct behaviour, not a bug to work around — we will not ship an Apache-2.0 public release
-      # with no licence text. A dry run only warns and carries on.
+      # First, before any expensive work. Phase F supplies LICENSE and NOTICE; until those land an
+      # explicit publish (dispatch with publish=true) is EXPECTED to abort here. That is correct
+      # behaviour, not a bug to work around -- we will not ship an Apache-2.0 public release with no
+      # licence text. A staging run (tag push) or a dry run only warns and carries on.
       - name: Check licence artifacts
         run: |
           set -euo pipefail
@@ -65,17 +71,21 @@ jobs:
       - name: Resolve release tag
         id: tag
         env:
-          EVENT_NAME: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          if [ "$EVENT_NAME" = "push" ]; then
-            TAG="$REF_NAME"
-          else
-            # Manual run: derive from the latest v* tag. Never fall back to the branch name —
-            # that would stamp and publish "main" as if it were a version.
-            TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
-          fi
+          case "${REF_NAME:-}" in
+            v*)
+              # A tag push, or a dispatch run on the tag ref: use the tag the operator selected
+              # directly. Never re-derive it with `git describe`, which could pick a different tag.
+              TAG="$REF_NAME"
+              ;;
+            *)
+              # A dispatch run from a branch: derive from the latest v* tag. Never fall back to the
+              # branch name -- that would stamp and publish "main" as if it were a version.
+              TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+              ;;
+          esac
           if [ -z "$TAG" ]; then
             echo "::error::no release tag: push a v* tag, or create one before a manual publish."
             exit 1
@@ -184,24 +194,30 @@ jobs:
           echo "--- checksum file ---"
           cat "$ZIP.sha256"
 
-      - name: Dry run summary
+      - name: Staged release summary
         if: env.PUBLISH != 'true'
         run: |
           set -euo pipefail
           ZIP="dist/corral-${VERSION}.zip"
           SIZE="$(du -h "$ZIP" | cut -f1)"
+          DIGEST="$(cut -d' ' -f1 "$ZIP.sha256")"
           echo "=========================================="
-          echo " DRY RUN — no release created"
+          echo " STAGED — no release created"
           echo "=========================================="
           echo "tag             : $TAG"
           echo "version stamped : $VERSION (CORRAL_VERSION)"
           echo "asset           : $ZIP ($SIZE)"
           echo "checksum        : $ZIP.sha256"
+          echo "sha256          : $DIGEST"
           echo "--- files in the zip ---"
           unzip -l "$ZIP"
           echo "--- digest ---"
           cat "$ZIP.sha256"
-          echo "Re-run with publish=true (or push the tag) to create the GitHub release."
+          echo
+          echo "Pushing tag $TAG alone publishes NOTHING. This run only staged and verified the artifact."
+          echo "To publish this exact build, re-run this workflow on the tag ref with publish=true:"
+          echo "  gh workflow run release.yml --ref $TAG -f publish=true"
+          echo "That dispatch must run on the tag ref $TAG: it asserts HEAD is $TAG before publishing."
 
       # A tag can be force-moved server-side after checkout; our local ref never changes, so the
       # resolve-time identity assertion cannot see it, while `gh release create "$TAG"` targets the

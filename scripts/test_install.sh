@@ -350,5 +350,93 @@ dump_on_fail "$rc9" "$TMP/iso-nohome.log"
 check "a normal install still resolves adb from PATH as before" bash -c \
   "[ '$rc9' -eq 0 ] && grep -qF 'Using adb: $PATHDIR/adb' '$TMP/iso-nohome.log' && grep -q 'path-adb9' '$PATHDIR/adb.real'"
 
+# ===== closing protection-state claim: report what is TRUE after the attempt =====
+# The installer must never say "shim is active" unless the adb it resolved really is the wrapper.
+# A sandbox run that needs no systemd/systemctl: --home keeps everything under the temp root.
+shim_sandbox() { # shim_sandbox <home> [args...]
+  local h="$1"; shift
+  env HOME="$TMPHOME" PATH="$STUB:$PATH" \
+    bash "$SRC/install.sh" --java "$FAKE_JAVA" --jar "$JAR" --no-ui --home "$h" "$@"
+}
+
+# 1: no adb resolvable at all. The old code requested SHIM=1, printed the warning, shimmed nothing,
+# then still claimed the shim was active. Reproduce faithfully: no --home (the --home sandbox refuses
+# a missing adb before the closing message), default shim, and a PATH of only the tools install.sh needs
+# so the host's own /usr/bin/adb cannot leak in.
+CORETOOLS="$TMP/coretools"; mkdir -p "$CORETOOLS"
+for t in dirname sed head awk grep cp chmod mkdir cut sha256sum readlink mv rm cat; do
+  p=$(command -v "$t") && ln -sf "$p" "$CORETOOLS/$t"
+done
+BASH_BIN=$(command -v bash)
+TMPHOME10="$TMP/home10"; mkdir -p "$TMPHOME10/bin"; : > "$TMPHOME10/.bashrc"
+env HOME="$TMPHOME10" PATH="$CORETOOLS:$STUB" \
+  "$BASH_BIN" "$SRC/install.sh" --java "$FAKE_JAVA" --jar "$JAR" --no-ui >"$TMP/claim-noadb.log" 2>&1; rc10=$?
+dump_on_fail "$rc10" "$TMP/claim-noadb.log"
+check "no adb found -> does NOT claim the shim is active, and says absolute-path calls are not gated" \
+  bash -c "[ '$rc10' -eq 0 ] && ! grep -qi 'shim is active' '$TMP/claim-noadb.log' && grep -qi 'absolute-path adb calls are NOT lease-gated' '$TMP/claim-noadb.log'"
+
+# 2: a real adb inside the root is shimmed -> the claim is made, and scoped to the SDK path.
+TMPHOME11="$TMP/home11"; SDK11="$TMPHOME11/Android/Sdk/platform-tools"
+mkdir -p "$SDK11" "$TMPHOME11/bin"; : > "$TMPHOME11/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "sandbox-adb11 $@"' > "$SDK11/adb"; chmod +x "$SDK11/adb"
+shim_sandbox "$TMPHOME11" >"$TMP/claim-active.log" 2>&1; rc11=$?
+dump_on_fail "$rc11" "$TMP/claim-active.log"
+check "shim actually installed -> claims active, scoped to the SDK platform-tools path" bash -c \
+  "[ '$rc11' -eq 0 ] && grep -qi 'shim is active' '$TMP/claim-active.log' && grep -q 'corral adb wrapper' '$SDK11/adb' && grep -qi 'platform-tools path is lease-gated' '$TMP/claim-active.log'"
+
+# 3: a shim left by a previous install (wrapper already at the adb path) still counts as active.
+TMPHOME12="$TMP/home12"; SDK12="$TMPHOME12/Android/Sdk/platform-tools"
+mkdir -p "$SDK12" "$TMPHOME12/bin"; : > "$TMPHOME12/.bashrc"
+cp "$SRC/adb-wrapper" "$SDK12/adb"; chmod +x "$SDK12/adb"
+printf '%s\n' '#!/bin/sh' 'echo "previous-real-adb12 $@"' > "$SDK12/adb.real"; chmod +x "$SDK12/adb.real"
+shim_sandbox "$TMPHOME12" >"$TMP/claim-rerun.log" 2>&1; rc12=$?
+dump_on_fail "$rc12" "$TMP/claim-rerun.log"
+check "a shim left by a previous install still counts as active" bash -c \
+  "[ '$rc12' -eq 0 ] && grep -qi 'shim is active' '$TMP/claim-rerun.log' && grep -q 'previous-real-adb12' '$SDK12/adb.real'"
+
+# 4: --no-sdk-shim opts out -> never claims active, even with a real adb in the root.
+TMPHOME13="$TMP/home13"; SDK13="$TMPHOME13/Android/Sdk/platform-tools"
+mkdir -p "$SDK13" "$TMPHOME13/bin"; : > "$TMPHOME13/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "sandbox-adb13 $@"' > "$SDK13/adb"; chmod +x "$SDK13/adb"
+shim_sandbox "$TMPHOME13" --no-sdk-shim >"$TMP/claim-noshim.log" 2>&1; rc13=$?
+dump_on_fail "$rc13" "$TMP/claim-noshim.log"
+check "--no-sdk-shim -> never claims active" bash -c \
+  "[ '$rc13' -eq 0 ] && ! grep -qi 'shim is active' '$TMP/claim-noshim.log'"
+
+# 5: an incomplete bundle must be refused BEFORE any mutation: the adb-wrapper pre-check runs before
+# the shim stash, so the real adb at the SDK path is never even moved aside.
+BROKEN="$TMP/broken-bundle"; mkdir -p "$BROKEN"
+cp "$SRC/install.sh" "$BROKEN/install.sh"
+TMPHOME14="$TMP/home14"; SDK14="$TMPHOME14/Android/Sdk/platform-tools"
+mkdir -p "$SDK14" "$TMPHOME14/bin"; : > "$TMPHOME14/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "broken-adb14 $@"' > "$SDK14/adb"; chmod +x "$SDK14/adb"
+env HOME="$TMPHOME" PATH="$STUB:$PATH" \
+  "$BASH_BIN" "$BROKEN/install.sh" --java "$FAKE_JAVA" --jar "$JAR" --no-ui --home "$TMPHOME14" >"$TMP/claim-shimfail.log" 2>&1; rc14=$?
+dump_on_fail "$rc14" "$TMP/claim-shimfail.log"
+check "incomplete bundle -> refused before any mutation (real adb never stashed aside)" bash -c \
+  "[ '$rc14' -ne 0 ] && grep -qi 'adb-wrapper missing from the bundle' '$TMP/claim-shimfail.log' && ! grep -qi 'shim is active' '$TMP/claim-shimfail.log' && ! grep -qi 'Ensured SDK adb shim' '$TMP/claim-shimfail.log' && ! grep -qi 'Stashed real adb' '$TMP/claim-shimfail.log' && grep -q 'broken-adb14' '$SDK14/adb' && [ ! -e '$SDK14/adb.real' ]"
+
+# 6: the reviewer's data-loss scenario. A wrapper sits at adb_path with NO adb.real; an incomplete
+# bundle makes the earlier cp fail. The old rollback's `rm -f` deleted the only adb on the system —
+# the pre-check must leave it byte-for-byte intact. This row fails on 2d948e2.
+BROKEN2="$TMP/broken-bundle2"; mkdir -p "$BROKEN2"
+cp "$SRC/install.sh" "$BROKEN2/install.sh"
+TMPHOME15="$TMP/home15"; SDK15="$TMPHOME15/Android/Sdk/platform-tools"
+mkdir -p "$SDK15" "$TMPHOME15/bin"; : > "$TMPHOME15/.bashrc"
+cp "$SRC/adb-wrapper" "$SDK15/adb"; chmod +x "$SDK15/adb"   # previous install; adb.real deliberately absent
+before_sha=$(sha256sum "$SDK15/adb" | cut -d' ' -f1)
+env HOME="$TMPHOME" PATH="$STUB:$PATH" \
+  "$BASH_BIN" "$BROKEN2/install.sh" --java "$FAKE_JAVA" --jar "$JAR" --no-ui --home "$TMPHOME15" >"$TMP/claim-nodelete.log" 2>&1; rc15=$?
+dump_on_fail "$rc15" "$TMP/claim-nodelete.log"
+check "failed shim install keeps an existing wrapper with no adb.real byte-for-byte intact" bash -c \
+  "[ '$rc15' -ne 0 ] && [ -f '$SDK15/adb' ] && [ \"\$(sha256sum '$SDK15/adb' | cut -d' ' -f1)\" = '$before_sha' ] && grep -q 'corral adb wrapper' '$SDK15/adb' && [ ! -e '$SDK15/adb.real' ] && ! grep -qi 'shim is active' '$TMP/claim-nodelete.log'"
+
+# 7: the TRACKED .gitignore (not .git/info/exclude) must ignore both generated trees for every clone.
+# `git check-ignore -q` only takes one path per call, so assert each — this fails if either entry is gone.
+if [ "$BUILD" = 1 ]; then
+  check "tracked .gitignore ignores corral-installer/ and dist/" bash -c \
+    "git -C '$ROOT' check-ignore -q corral-installer/x && git -C '$ROOT' check-ignore -q dist/y"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

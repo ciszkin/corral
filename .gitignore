@@ -5,3 +5,5 @@ build/
 .kotlin/
 .worktrees/
 __pycache__/
+/corral-installer/
+/dist/

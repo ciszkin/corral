@@ -14,6 +14,7 @@ JAR_ARG=""
 HOME_ARG=""
 UNINSTALL=0
 SHIM=1
+SHIM_ACTIVE=0
 INSTALL_UI=auto
 
 usage() {
@@ -160,11 +161,34 @@ install_sdk_shim() {
   # (first install OR a freshly SDK-updated adb), stash it as adb.real — replacing a stale
   # adb.real is correct, never clobbering the newer binary.
   if ! grep -q 'corral adb wrapper' "$adb_path" 2>/dev/null; then
-    mv "$adb_path" "$adb_path.real"
+    if ! mv "$adb_path" "$adb_path.real"; then
+      echo "ERROR: cannot move the real adb aside ($adb_path -> $adb_path.real); the SDK adb shim was NOT installed." >&2
+      echo "       gradle/AGP absolute-path adb calls are NOT lease-gated; fix the SDK path and re-run." >&2
+      exit 1
+    fi
     echo "Stashed real adb as $ADB.real (or replaced a stale one)"
   fi
-  cp "$SCRIPT_DIR/adb-wrapper" "$adb_path"; chmod +x "$adb_path"
+  # cp/chmod are unchecked by set -u; on an incomplete bundle, a read-only SDK dir or a full disk they
+  # can fail AFTER the real adb was moved to adb.real, which would leave the SDK with no adb at all.
+  # Treat any failure as fatal and put the real adb back rather than keep a false "active" claim.
+  if ! cp "$SCRIPT_DIR/adb-wrapper" "$adb_path" || ! chmod +x "$adb_path" \
+     || ! grep -q 'corral adb wrapper' "$adb_path" 2>/dev/null; then
+    if [ -e "$adb_path.real" ]; then
+      mv -f "$adb_path.real" "$adb_path"
+      echo "ERROR: failed to install the SDK adb shim at $adb_path; restored the real adb from $adb_path.real." >&2
+    else
+      # No adb.real: the stash mv never ran, so whatever is here now is either a valid wrapper left by a
+      # previous install (keep it) or a partial file from our failed cp (remove only that). Never a real
+      # adb — a real adb would have been stashed to adb.real above.
+      grep -q 'corral adb wrapper' "$adb_path" 2>/dev/null || rm -f "$adb_path"
+      echo "ERROR: failed to install the SDK adb shim at $adb_path; no adb.real was present to restore." >&2
+    fi
+    echo "       gradle/AGP absolute-path adb calls are NOT lease-gated. Check scripts/adb-wrapper in the" >&2
+    echo "       bundle, the SDK path permissions and free space, then re-run install.sh." >&2
+    exit 1
+  fi
   ADB="$adb_path.real"
+  SHIM_ACTIVE=1
   echo "Ensured SDK adb shim at $adb_path (real: $ADB; re-run install.sh after SDK updates)"
 }
 
@@ -201,11 +225,20 @@ if want_ui && [[ ! -f "$SCRIPT_DIR/corral.png" ]]; then
   echo "ERROR: $SCRIPT_DIR/corral.png missing (incomplete bundle); cannot install the launcher icon" >&2
   exit 1
 fi
+# Both the ~/bin wrapper and the SDK shim copy this file; validate it before anything is moved so an
+# incomplete bundle fails with the filesystem completely untouched (no adb stashed aside).
+if [[ ! -f "$SCRIPT_DIR/adb-wrapper" ]]; then
+  echo "ERROR: $SCRIPT_DIR/adb-wrapper missing from the bundle; the adb wrapper and SDK adb shim were NOT installed." >&2
+  exit 1
+fi
 
 echo "==> Installing to $TARGET_HOME"
 mkdir -p "$CORRAL_HOME" "$BIN_DIR" "$UNIT_DIR"
 cp "$JAR" "$CORRAL_HOME/corral-daemon-all.jar"
-cp "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb";  chmod +x "$BIN_DIR/adb"
+if ! cp "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb" || ! chmod +x "$BIN_DIR/adb"; then
+  echo "ERROR: cannot install the executable adb wrapper at $BIN_DIR/adb." >&2
+  exit 1
+fi
 cp "$SCRIPT_DIR/corral"      "$BIN_DIR/corral"; chmod +x "$BIN_DIR/corral"
 
 if want_ui; then
@@ -347,8 +380,14 @@ echo
 echo "==> Installed. Smoke-test:"
 echo "  curl -s http://127.0.0.1:8798/api/devices"
 echo "  corral devices | python3 -m json.tool"
-if [[ $SHIM -eq 1 ]]; then
-  echo "SDK adb shim is active — gradle/AGP absolute-path adb calls are lease-gated."
+if [[ $SHIM_ACTIVE -eq 1 ]]; then
+  echo "SDK adb shim is active — adb reached through the SDK's platform-tools path is lease-gated"
+  echo "  (gradle/AGP absolute-path calls to it included). An adb elsewhere on this host is not gated."
+elif [[ $SHIM -eq 0 ]]; then
+  echo "SDK adb shim is off (--no-sdk-shim, as requested) — gradle/AGP absolute-path adb calls are NOT lease-gated."
+else
+  echo "SDK adb shim is NOT active — gradle/AGP absolute-path adb calls are NOT lease-gated."
+  echo "  Install Android platform-tools, or pass --adb PATH to the real adb, then re-run to gate them."
 fi
 echo
 echo "Cutover checklist (in the corral source repo, scripts/cutover.md): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi,"

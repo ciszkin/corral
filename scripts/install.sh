@@ -59,31 +59,76 @@ UNIT_DIR="$TARGET_HOME/.config/systemd/user"
 SANDBOX=0
 if [[ "$TARGET_HOME" != "${HOME:-}" ]]; then SANDBOX=1; fi
 
+# Windows (Git Bash/MSYS/Cygwin) needs .bat shims and has no systemd; the POSIX path is untouched.
+# `uname -s` is the probe (never an env var a test cannot inject), so a stubbed `uname` on PATH
+# can drive the platform from scripts/test_install.sh.
+# Caveat: Cygwin is matched here, but its $HOME is a POSIX path corral.bat cannot consume; detection
+# is left alone deliberately (a Cygwin operator still needs a Windows-style install root).
+UNAME_S=$(uname -s 2>/dev/null || true)
+IS_WINDOWS=0
+case "$UNAME_S" in
+  MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1;;
+esac
+
 if [[ $UNINSTALL -eq 1 ]]; then
   echo "==> Uninstalling corral"
+  # Name only what was actually removed: entries are appended as they happen, so the summary can
+  # never claim a file this install did not create (on Windows the POSIX shims and the unit do not
+  # exist; a hard-coded list there is exactly the lie row 15 set out to remove from install).
+  REMOVED=""
+  note_removed() { REMOVED="$REMOVED$1, "; }
+
   if [[ $SANDBOX -eq 1 ]]; then
     echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
+  elif [[ $IS_WINDOWS -eq 1 ]]; then
+    echo "Windows: skipping systemctl (no systemd user session here)"
   else
     systemctl --user disable --now corral 2>/dev/null || true
   fi
-  rm -f "$UNIT_DIR/corral.service"
-  if [[ $SANDBOX -eq 0 ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
-  rm -f "$BIN_DIR/adb" "$BIN_DIR/corral" "$BIN_DIR/corral-ui"
-  rm -f "$TARGET_HOME/.local/share/applications/corral-ui.desktop"
+  if [[ -e "$UNIT_DIR/corral.service" ]]; then rm -f "$UNIT_DIR/corral.service"; note_removed "corral.service"; fi
+  if [[ $SANDBOX -eq 0 && $IS_WINDOWS -eq 0 ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
+
+  # Remove a PATH shim ONLY when its content carries our marker. A hand-written ~/bin/adb or a
+  # hand-edited corral.bat belongs to the operator, not to us (the exact collision F2 warned about),
+  # and deleting it is data loss. Anything unrecognised is left on disk and named in the summary.
+  # The markers already shipped in the shims before this change, so a pre-change install is still
+  # removed; an unrecognised file is never treated as "ours anyway".
+  KEPT_SHIMS=""
+  remove_shim() { # remove_shim <path> <marker> <label>
+    [[ -e "$1" ]] || return 0
+    if grep -qF "$2" "$1" 2>/dev/null; then
+      rm -f "$1"; note_removed "$3"
+    else
+      KEPT_SHIMS="$KEPT_SHIMS $1"
+    fi
+  }
+  if [[ $IS_WINDOWS -eq 1 ]]; then
+    remove_shim "$BIN_DIR/corral.bat" 'dev.corral.CorralCli' '~/bin/corral.bat'
+    remove_shim "$BIN_DIR/adb-wrapper.bat" 'corral adb wrapper' '~/bin/adb-wrapper.bat'
+  else
+    remove_shim "$BIN_DIR/adb" 'corral adb wrapper' '~/bin/adb'
+    remove_shim "$BIN_DIR/corral" 'dev.corral.CorralCli' '~/bin/corral'
+    remove_shim "$BIN_DIR/corral-ui" 'dev.corral.ui.CorralUiKt' '~/bin/corral-ui'
+  fi
+
+  if [[ -e "$TARGET_HOME/.local/share/applications/corral-ui.desktop" ]]; then
+    rm -f "$TARGET_HOME/.local/share/applications/corral-ui.desktop"; note_removed "Corral launcher"
+  fi
   ICON="$TARGET_HOME/.local/share/icons/corral.png"
   if [[ -f "$ICON.sha" && "$(sha256sum "$ICON" 2>/dev/null | cut -d' ' -f1)" = "$(cat "$ICON.sha")" ]]; then
-    rm -f "$ICON"
+    rm -f "$ICON"; note_removed "Corral icon"
   fi
   rm -f "$ICON.sha"
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$TARGET_HOME/.local/share/applications" >/dev/null 2>&1 || true
   fi
-  rm -f "$TARGET_HOME/.gradle/init.d/corral-gate.gradle" "$TARGET_HOME/.gradle/init.d/corral-gate.gradle.kts"
-  rm -f "$TARGET_HOME/.config/corral/gradle-tasks"
-  rm -f "$TARGET_HOME/.config/corral/rules"
-  rm -f "$TARGET_HOME/.config/corral/daemon.env"
-  rm -f "$TARGET_HOME/.config/corral/ui.conf"
-  rm -rf "$CORRAL_HOME"
+  for f in "$TARGET_HOME/.gradle/init.d/corral-gate.gradle" "$TARGET_HOME/.gradle/init.d/corral-gate.gradle.kts" \
+           "$TARGET_HOME/.config/corral/gradle-tasks" "$TARGET_HOME/.config/corral/rules" \
+           "$TARGET_HOME/.config/corral/daemon.env" "$TARGET_HOME/.config/corral/ui.conf"; do
+    if [[ -e "$f" ]]; then rm -f "$f"; note_removed "~/${f#"$TARGET_HOME"/}"; fi
+  done
+  if [[ -e "$CORRAL_HOME" ]]; then rm -rf "$CORRAL_HOME"; note_removed "~/.corral"; fi
+
   # restore the SDK adb if it was shimmed (adb.real -> adb). Under --home only the sandbox's own
   # SDK is ours to restore; an ambient SDK belongs to the real install and must not be touched.
   SDK_DIRS=("$TARGET_HOME/Android/Sdk/platform-tools")
@@ -95,8 +140,23 @@ if [[ $UNINSTALL -eq 1 ]]; then
       echo "Restored SDK adb at $d/adb"
     fi
   done
-  echo "Removed: corral.service, ~/bin/adb, ~/bin/corral, ~/bin/corral-ui, Corral launcher, ~/.corral, ~/.gradle/init.d/corral-gate.gradle*, ~/.config/corral/gradle-tasks, ~/.config/corral/rules, ~/.config/corral/daemon.env, ~/.config/corral/ui.conf"
-  echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
+
+  if [[ -n "$REMOVED" ]]; then
+    echo "Removed: ${REMOVED%, }"
+  else
+    echo "Removed: nothing (no corral install found here)"
+  fi
+  if [[ -n "$KEPT_SHIMS" ]]; then
+    echo "Left alone (not installed by corral; unrecognised shim content):$KEPT_SHIMS"
+  fi
+  if [[ $IS_WINDOWS -eq 1 ]]; then
+    # Only claim to have left something alone when there is something there to leave.
+    if [[ -e "$BIN_DIR/adb" || -e "$BIN_DIR/corral" || -e "$BIN_DIR/corral-ui" ]]; then
+      echo "Windows: ~/bin/adb, ~/bin/corral and ~/bin/corral-ui are POSIX shims Corral never installs here — left alone."
+    fi
+  elif [[ "$REMOVED" == *"~/bin/adb,"* ]]; then
+    echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
+  fi
   rmdir "$TARGET_HOME/.gradle/init.d" "$TARGET_HOME/.config/corral" 2>/dev/null || true
   exit 0
 fi
@@ -217,31 +277,56 @@ if [[ "$INSTALL_UI" = 1 && ! -f "$UI_JAR" ]]; then
   echo "ERROR: --ui given but corral-ui-all.jar not found at $UI_JAR; pass CORRAL_UI_JAR or build it." >&2
   exit 1
 fi
-if want_ui && [[ ! -f "$SCRIPT_DIR/corral-ui" ]]; then
-  echo "ERROR: scripts/corral-ui missing (incomplete bundle); cannot install the ui shim" >&2
-  exit 1
-fi
-if want_ui && [[ ! -f "$SCRIPT_DIR/corral.png" ]]; then
-  echo "ERROR: $SCRIPT_DIR/corral.png missing (incomplete bundle); cannot install the launcher icon" >&2
-  exit 1
+if [[ $IS_WINDOWS -eq 0 ]]; then
+  if want_ui && [[ ! -f "$SCRIPT_DIR/corral-ui" ]]; then
+    echo "ERROR: scripts/corral-ui missing (incomplete bundle); cannot install the ui shim" >&2
+    exit 1
+  fi
+  if want_ui && [[ ! -f "$SCRIPT_DIR/corral.png" ]]; then
+    echo "ERROR: $SCRIPT_DIR/corral.png missing (incomplete bundle); cannot install the launcher icon" >&2
+    exit 1
+  fi
 fi
 # Both the ~/bin wrapper and the SDK shim copy this file; validate it before anything is moved so an
 # incomplete bundle fails with the filesystem completely untouched (no adb stashed aside).
-if [[ ! -f "$SCRIPT_DIR/adb-wrapper" ]]; then
+if [[ $IS_WINDOWS -eq 1 ]]; then
+  for f in corral.bat adb-wrapper.bat; do
+    if [[ ! -f "$SCRIPT_DIR/$f" ]]; then
+      echo "ERROR: $SCRIPT_DIR/$f missing from the bundle; the Windows shims were NOT installed." >&2
+      exit 1
+    fi
+  done
+elif [[ ! -f "$SCRIPT_DIR/adb-wrapper" ]]; then
   echo "ERROR: $SCRIPT_DIR/adb-wrapper missing from the bundle; the adb wrapper and SDK adb shim were NOT installed." >&2
   exit 1
 fi
 
 echo "==> Installing to $TARGET_HOME"
-mkdir -p "$CORRAL_HOME" "$BIN_DIR" "$UNIT_DIR"
+mkdir -p "$CORRAL_HOME" "$BIN_DIR"
+if [[ $IS_WINDOWS -eq 0 ]]; then mkdir -p "$UNIT_DIR"; fi
 cp "$JAR" "$CORRAL_HOME/corral-daemon-all.jar"
-if ! cp "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb" || ! chmod +x "$BIN_DIR/adb"; then
-  echo "ERROR: cannot install the executable adb wrapper at $BIN_DIR/adb." >&2
-  exit 1
+if [[ $IS_WINDOWS -eq 1 ]]; then
+  # The bundle ships .bat twins; on Windows they replace the POSIX shims. An extensionless POSIX
+  # `adb` on the Windows PATH would shadow/confuse the real adb.exe, so it is never installed here.
+  cp "$SCRIPT_DIR/corral.bat" "$BIN_DIR/corral.bat" \
+    || { echo "ERROR: cannot install $BIN_DIR/corral.bat." >&2; exit 1; }
+  cp "$SCRIPT_DIR/adb-wrapper.bat" "$BIN_DIR/adb-wrapper.bat" \
+    || { echo "ERROR: cannot install $BIN_DIR/adb-wrapper.bat." >&2; exit 1; }
+  echo "Installed: corral.bat, adb-wrapper.bat ($BIN_DIR) — no POSIX corral/adb shim on Windows"
+else
+  if ! cp "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb" || ! chmod +x "$BIN_DIR/adb"; then
+    echo "ERROR: cannot install the executable adb wrapper at $BIN_DIR/adb." >&2
+    exit 1
+  fi
+  cp "$SCRIPT_DIR/corral"      "$BIN_DIR/corral"; chmod +x "$BIN_DIR/corral"
 fi
-cp "$SCRIPT_DIR/corral"      "$BIN_DIR/corral"; chmod +x "$BIN_DIR/corral"
 
-if want_ui; then
+if want_ui && [[ $IS_WINDOWS -eq 1 ]]; then
+  # The bundle has no corral-ui.bat, so there is no working Windows UI shim or launcher to install.
+  # Copy the jar so it can be started with java -jar, and say plainly what is missing.
+  cp "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" || { echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2; exit 1; }
+  echo "Installed: corral-ui jar ($CORRAL_HOME/corral-ui-all.jar) — no corral-ui shim or app-grid launcher on Windows"
+elif want_ui; then
   cp "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" || { echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2; exit 1; }
   install -m 755 "$SCRIPT_DIR/corral-ui" "$BIN_DIR/corral-ui" || { echo "ERROR: cannot install $BIN_DIR/corral-ui" >&2; exit 1; }
   echo "Installed: corral-ui (~/bin/corral-ui, jar in ~/.corral)"
@@ -281,7 +366,10 @@ EOF
 fi
 
 # Shimming changes $ADB to the real binary (adb.real), used by the unit + the rc export.
-[[ $SHIM -eq 1 ]] && install_sdk_shim
+# The SDK shim copies the POSIX adb-wrapper over the SDK's adb; on Windows that is the same stray
+# POSIX-script-on-the-adb-path defect as the ~/bin shim (and the real binary is adb.exe anyway), so
+# it is not installed there — reported honestly at the end.
+[[ $SHIM -eq 1 && $IS_WINDOWS -eq 0 ]] && install_sdk_shim
 
 # gradle gate: init.d script + editable task-pattern config
 if [[ ! -f "$SCRIPT_DIR/corral-gate.gradle.kts" ]]; then
@@ -289,7 +377,7 @@ if [[ ! -f "$SCRIPT_DIR/corral-gate.gradle.kts" ]]; then
   exit 1
 fi
 mkdir -p "$TARGET_HOME/.gradle/init.d" "$TARGET_HOME/.config/corral"
-CORRAL_SHIM="$BIN_DIR/corral"
+if [[ $IS_WINDOWS -eq 1 ]]; then CORRAL_SHIM="$BIN_DIR/corral.bat"; else CORRAL_SHIM="$BIN_DIR/corral"; fi
 CORRAL_SHIM_ESCAPED=${CORRAL_SHIM//\\/\\\\}
 CORRAL_SHIM_ESCAPED=${CORRAL_SHIM_ESCAPED//&/\\&}
 CORRAL_SHIM_ESCAPED=${CORRAL_SHIM_ESCAPED//#/\\#}
@@ -317,6 +405,7 @@ if [ ! -f "$TARGET_HOME/.config/corral/daemon.env" ]; then
   echo "Created ~/.config/corral/daemon.env (absent-only)"
 fi
 
+if [[ $IS_WINDOWS -eq 0 ]]; then
 # Carry an existing observer line verbatim — including an emptied value (observers off); seed
 # corral-ui only when the line is truly absent and the UI installs.
 OBS_LINE=""
@@ -346,6 +435,7 @@ if [[ -n "$OBS_LINE" ]]; then
     "$UNIT_DIR/corral.service" > "$UNIT_DIR/corral.service.tmp" \
     && mv "$UNIT_DIR/corral.service.tmp" "$UNIT_DIR/corral.service"
 fi
+fi
 
 # Ensure ~/bin is on PATH (the wrapper must precede the SDK dir) and the wrapper
 # knows the real adb path.
@@ -365,6 +455,37 @@ for rc in "$TARGET_HOME/.bashrc" "$TARGET_HOME/.zshrc"; do
   fi
 done
 
+if [[ $IS_WINDOWS -eq 1 ]]; then
+  echo
+  echo "==> Installed to $TARGET_HOME (platform: Windows, uname: $UNAME_S)"
+  echo "Installed Windows shims: corral.bat, adb-wrapper.bat ($BIN_DIR) — run corral from cmd.exe/PowerShell (PATH note at the end)"
+  echo "Installed gradle gate (~/.gradle/init.d/corral-gate.gradle.kts -> $CORRAL_SHIM)"
+  echo "NOT done on Windows:"
+  echo "  - no POSIX corral/adb shim (an extensionless 'adb' on the Windows PATH would shadow the real adb.exe)"
+  echo "  - no systemd unit and no systemctl call (this host has no systemd user session)"
+  echo "  - no corral-ui shim and no app-grid launcher (the bundle ships no corral-ui.bat)"
+  if want_ui; then
+    echo "    start the console instead: \"$JAVA_BIN\" -jar \"$CORRAL_HOME/corral-ui-all.jar\""
+  else
+    echo "    (corral-ui not installed; start corral-ui-all.jar with: \"$JAVA_BIN\" -jar <path-to-corral-ui-all.jar>)"
+  fi
+  echo
+  echo "Start the daemon in the foreground:"
+  echo "  \"$JAVA_BIN\" -Xms24m -Xmx64m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=64m -XX:TieredStopAtLevel=1 -jar \"$CORRAL_HOME/corral-daemon-all.jar\""
+  echo
+  echo "Smoke-test from cmd.exe/PowerShell — add %USERPROFILE%\\bin to your PATH first (the PATH and"
+  echo "  CORRAL_REAL_ADB exports this install wrote went to .bashrc/.zshrc only; cmd.exe/PowerShell never read them):"
+  echo "  curl -s http://127.0.0.1:8798/api/devices"
+  echo "  corral devices"
+  echo
+  if [[ $SHIM_ACTIVE -eq 1 ]]; then
+    echo "SDK adb shim is active — the SDK's platform-tools path is lease-gated."
+  elif [[ $SHIM -eq 0 ]]; then
+    echo "SDK adb shim is off (--no-sdk-shim, as requested) — absolute-path adb calls are NOT lease-gated."
+  else
+    echo "SDK adb shim is NOT installed on Windows — adb is NOT lease-gated by this install."
+  fi
+else
 if [[ $SANDBOX -eq 1 ]]; then
   echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
 elif systemctl --user daemon-reload 2>/dev/null; then
@@ -392,3 +513,4 @@ fi
 echo
 echo "Cutover checklist (in the corral source repo, scripts/cutover.md): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi,"
 echo "then verify a gradle installDebug allow/deny, retire the adb-lease hook, keep old scripts backed up a week."
+fi

@@ -47,7 +47,10 @@ mkdir -p "$STUB" "$SDK" "$TMPHOME/bin"
 printf '%s\n' '#!/bin/sh' 'echo "fake-sdk-adb $@"' > "$FAKE_ADB"
 printf '%s\n' '#!/bin/sh' 'echo "openjdk version \"17.0.12\" 2024-07-16" >&2' 'exit 0' > "$FAKE_JAVA"
 printf '%s\n' '#!/bin/sh' "echo \"systemctl \$*\" >> \"$TMP/systemctl.log\"" 'exit 0' > "$STUB/systemctl"
-chmod +x "$FAKE_ADB" "$FAKE_JAVA" "$STUB/systemctl"
+# Pin the platform to POSIX for the whole suite so a run on a Windows host still exercises the
+# Linux path; the Windows section below overrides this with its own MINGW `uname` first on PATH.
+printf '%s\n' '#!/bin/sh' 'echo "Linux"' > "$STUB/uname"
+chmod +x "$FAKE_ADB" "$FAKE_JAVA" "$STUB/systemctl" "$STUB/uname"
 : > "$TMPHOME/.bashrc"
 
 # Sandbox the child env: HOME is both exported and passed via --home (belt and braces).
@@ -437,6 +440,153 @@ if [ "$BUILD" = 1 ]; then
   check "tracked .gitignore ignores corral-installer/ and dist/" bash -c \
     "git -C '$ROOT' check-ignore -q corral-installer/x && git -C '$ROOT' check-ignore -q dist/y"
 fi
+
+# ===== Windows platform: install .bat shims, skip systemd, report honestly =====
+# install.sh detects Windows from `uname -s`; a stubbed `uname` first on PATH is how this suite tells
+# it MINGW*. This is a SIMULATION of Windows (Git Bash semantics); only a real Windows box can truly
+# verify cmd.exe/PowerShell behaviour.
+WIN_STUB="$TMP/winstub"; mkdir -p "$WIN_STUB"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$WIN_STUB/uname"; chmod +x "$WIN_STUB/uname"
+
+TMPHOME_W="$TMP/home-win"; SDK_W="$TMPHOME_W/Android/Sdk/platform-tools"
+mkdir -p "$SDK_W" "$TMPHOME_W/bin"; : > "$TMPHOME_W/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "win-sdk-adb $@"' > "$SDK_W/adb"; chmod +x "$SDK_W/adb"
+WIN_ADB_SHA=$(sha256sum "$SDK_W/adb" | cut -d' ' -f1)
+UNIT_W="$TMPHOME_W/.config/systemd/user/corral.service"
+sc_before=$(wc -l < "$TMP/systemctl.log" 2>/dev/null || echo 0)
+
+env HOME="$TMPHOME_W" PATH="$WIN_STUB:$STUB:$PATH" \
+  bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$SDK_W/adb" --jar "$JAR" --no-ui --home "$TMPHOME_W" \
+  >"$TMP/win-install.log" 2>&1; rcw=$?
+dump_on_fail "$rcw" "$TMP/win-install.log"
+sc_after=$(wc -l < "$TMP/systemctl.log" 2>/dev/null || echo 0)
+
+check "win: install exits 0" test "$rcw" -eq 0
+check "win: corral.bat installed verbatim" bash -c \
+  "[ -f '$TMPHOME_W/bin/corral.bat' ] && cmp -s '$SRC/corral.bat' '$TMPHOME_W/bin/corral.bat'"
+check "win: adb-wrapper.bat installed verbatim" bash -c \
+  "[ -f '$TMPHOME_W/bin/adb-wrapper.bat' ] && cmp -s '$SRC/adb-wrapper.bat' '$TMPHOME_W/bin/adb-wrapper.bat'"
+# F2 regression: the POSIX corral/adb scripts must NOT land on the Windows user PATH
+check "win: POSIX corral/adb shims are NOT installed (F2)" bash -c \
+  "[ ! -e '$TMPHOME_W/bin/corral' ] && [ ! -e '$TMPHOME_W/bin/adb' ]"
+check "win: no systemd unit generated" test ! -e "$UNIT_W"
+check "win: systemctl never invoked" test "$sc_before" = "$sc_after"
+# the SDK shim is the same POSIX-on-the-adb-path defect, so Windows must not install it either
+check "win: SDK adb left untouched (no POSIX wrapper on the adb path)" \
+  test "$(sha256sum "$SDK_W/adb" | cut -d' ' -f1)" = "$WIN_ADB_SHA"
+# honest reporting: platform, the not-done lines, and no claim of an absent shim/unit/launcher
+check "win: output states the platform" grep -q 'platform: Windows' "$TMP/win-install.log"
+check "win: output says the POSIX shim, systemd unit and UI launcher were NOT done" bash -c \
+  "grep -q 'no POSIX corral/adb shim' '$TMP/win-install.log' && grep -q 'no systemd unit' '$TMP/win-install.log' && grep -q 'no corral-ui shim' '$TMP/win-install.log'"
+check "win: never claims a shim/unit that does not exist" bash -c \
+  "! grep -qi 'shim is active' '$TMP/win-install.log' && ! grep -q 'Installed: corral-ui (~/bin/corral-ui' '$TMP/win-install.log'"
+check "win: gate points at the .bat shim" grep -qF "$TMPHOME_W/bin/corral.bat" "$TMPHOME_W/.gradle/init.d/corral-gate.gradle.kts"
+
+# ===== POSIX byte-for-byte guard: the Linux path must not change =====
+# Compare the current installer against the pre-change installer (the commit this row branched from,
+# ee9cc77) on identical POSIX sandboxes: same exit code, same messages, same installed files/content.
+# Reusing one sandbox path keeps absolute paths identical so hashes and messages are comparable.
+# The skip is LOUD: a silent skip would leave every Linux user unguarded without anyone noticing.
+if [ "$BUILD" != 1 ]; then
+  echo "skip: POSIX byte-for-byte guard needs the source tree + git history (a deployed bundle has neither)"
+elif ! git -C "$ROOT" cat-file -e ee9cc77:scripts/install.sh 2>/dev/null; then
+  echo "skip: POSIX byte-for-byte guard — base commit ee9cc77 is not in this clone, so the Linux path is"
+  echo "      UNGUARDED here; CI must check out with actions/checkout fetch-depth: 0."
+else
+  # Each installer runs from its own bundle dir with identical sibling assets, so SCRIPT_DIR is
+  # analogous and the only difference is install.sh itself.
+  for label in pre new; do
+    mkdir -p "$TMP/posix-$label-bundle"
+    cp "$SRC/adb-wrapper" "$SRC/corral" "$SRC/corral.service" "$SRC/corral-gate.gradle.kts" \
+       "$SRC/corral-rules" "$TMP/posix-$label-bundle/"
+  done
+  git -C "$ROOT" show ee9cc77:scripts/install.sh > "$TMP/posix-pre-bundle/install.sh"
+  cp "$SRC/install.sh" "$TMP/posix-new-bundle/install.sh"
+
+  CMP_HOME="$TMP/cmp-home"
+  posix_snapshot() { # posix_snapshot <bundle-dir> <label>
+    rm -rf "$CMP_HOME"
+    mkdir -p "$CMP_HOME/Android/Sdk/platform-tools" "$CMP_HOME/bin"
+    printf '%s\n' '#!/bin/sh' 'echo "cmp-adb $@"' > "$CMP_HOME/Android/Sdk/platform-tools/adb"
+    chmod +x "$CMP_HOME/Android/Sdk/platform-tools/adb"
+    : > "$CMP_HOME/.bashrc"
+    env HOME="$CMP_HOME" PATH="$STUB:$PATH" bash "$1/install.sh" --java "$FAKE_JAVA" \
+      --adb "$CMP_HOME/Android/Sdk/platform-tools/adb" --jar "$JAR" --no-ui --home "$CMP_HOME" \
+      > "$TMP/$2.log" 2>&1
+    echo "$?" > "$TMP/$2.rc"
+    ( cd "$CMP_HOME" && find . -type f | sort | xargs sha256sum ) > "$TMP/$2.files"
+  }
+  posix_snapshot "$TMP/posix-pre-bundle" posix-pre
+  posix_snapshot "$TMP/posix-new-bundle" posix-new
+  check "POSIX: exit code matches the pre-change installer" cmp -s "$TMP/posix-pre.rc" "$TMP/posix-new.rc"
+  check "POSIX: every message matches the pre-change installer (byte-for-byte)" cmp -s "$TMP/posix-pre.log" "$TMP/posix-new.log"
+  check "POSIX: installed files + contents match the pre-change installer" cmp -s "$TMP/posix-pre.files" "$TMP/posix-new.files"
+fi
+
+# ===== uninstall provenance (POSIX): only remove shims whose content carries our marker =====
+# The row-14 defect class: uninstall must never delete a file Corral did not install. Overwrite our
+# own ~/bin/corral with a hand-written one and plant a user's ~/bin/adb; both must survive. UI on, so
+# an untouched shim of ours (~/bin/corral-ui) is present to prove the marker path still removes ours.
+TMPHOME_UP="$TMP/home-uninstall-posix"; SDK_UP="$TMPHOME_UP/Android/Sdk/platform-tools"
+mkdir -p "$SDK_UP" "$TMPHOME_UP/bin"; : > "$TMPHOME_UP/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "up-sdk-adb $@"' > "$SDK_UP/adb"; chmod +x "$SDK_UP/adb"
+env HOME="$TMPHOME_UP" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_UP/adb" --jar "$JAR" --home "$TMPHOME_UP" >"$TMP/up-install.log" 2>&1; rci=$?
+dump_on_fail "$rci" "$TMP/up-install.log"
+printf '%s\n' '#!/bin/sh' 'echo mine' > "$TMPHOME_UP/bin/corral"
+printf '%s\n' '#!/bin/sh' 'echo user-adb' > "$TMPHOME_UP/bin/adb"
+env HOME="$TMPHOME_UP" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_UP" --uninstall \
+  >"$TMP/up-uninstall.log" 2>&1; rcup=$?
+dump_on_fail "$rcup" "$TMP/up-uninstall.log"
+check "uninstall provenance: hand-written ~/bin/corral survives" bash -c \
+  "[ -f '$TMPHOME_UP/bin/corral' ] && grep -q 'echo mine' '$TMPHOME_UP/bin/corral'"
+check "uninstall provenance: user-planted ~/bin/adb survives" bash -c \
+  "[ -f '$TMPHOME_UP/bin/adb' ] && grep -q 'echo user-adb' '$TMPHOME_UP/bin/adb'"
+check "uninstall provenance: output says the unrecognised shims were left alone" bash -c \
+  "grep -q 'Left alone' '$TMP/up-uninstall.log' && grep -qF '$TMPHOME_UP/bin/corral' '$TMP/up-uninstall.log' && grep -qF '$TMPHOME_UP/bin/adb' '$TMP/up-uninstall.log'"
+check "uninstall provenance: our own files are still removed" bash -c \
+  "[ ! -e '$TMPHOME_UP/.config/systemd/user/corral.service' ] && [ ! -e '$TMPHOME_UP/.corral' ]"
+# The marker must MATCH our shipped shim, or the guard would silently never remove it.
+check "uninstall provenance: an untouched shim of ours (~/bin/corral-ui) is still removed" bash -c \
+  "[ ! -e '$TMPHOME_UP/bin/corral-ui' ] && grep -qF '~/bin/corral-ui' '$TMP/up-uninstall.log'"
+# The summary must name the kept shims only under 'Left alone', never under 'Removed:'.
+check "uninstall provenance: the Removed: line never claims the kept shims were removed" bash -c \
+  "! grep '^Removed:' '$TMP/up-uninstall.log' | grep -qE '~/bin/(adb|corral),'"
+
+# ===== Windows uninstall: remove our .bat shims, never the POSIX names, keep a user's files =====
+# The exact QA repro: simulated-Windows install -> plant ~/bin/adb and a hand-edited corral.bat ->
+# --uninstall -> both survive. Before the fix the POSIX list was rm -f'd unconditionally.
+TMPHOME_WU="$TMP/home-win-uninstall"; SDK_WU="$TMPHOME_WU/Android/Sdk/platform-tools"
+mkdir -p "$SDK_WU" "$TMPHOME_WU/bin"; : > "$TMPHOME_WU/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "winup-sdk-adb $@"' > "$SDK_WU/adb"; chmod +x "$SDK_WU/adb"
+env HOME="$TMPHOME_WU" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_WU/adb" --jar "$JAR" --no-ui --home "$TMPHOME_WU" >"$TMP/winup-install.log" 2>&1; rciw=$?
+dump_on_fail "$rciw" "$TMP/winup-install.log"
+printf '%s\n' '#!/bin/sh' 'echo user-win-adb' > "$TMPHOME_WU/bin/adb"
+printf '@echo off\r\necho user corral\r\n' > "$TMPHOME_WU/bin/corral.bat"
+env HOME="$TMPHOME_WU" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_WU" --uninstall \
+  >"$TMP/winup-uninstall.log" 2>&1; rcwu=$?
+dump_on_fail "$rcwu" "$TMP/winup-uninstall.log"
+check "win uninstall: exits 0" test "$rcwu" -eq 0
+check "win uninstall: the user's ~/bin/adb (POSIX name) survives" bash -c \
+  "[ -f '$TMPHOME_WU/bin/adb' ] && grep -q 'user-win-adb' '$TMPHOME_WU/bin/adb'"
+check "win uninstall: the hand-edited corral.bat survives" bash -c \
+  "[ -f '$TMPHOME_WU/bin/corral.bat' ] && grep -q 'user corral' '$TMPHOME_WU/bin/corral.bat'"
+check "win uninstall: our adb-wrapper.bat is removed" test ! -e "$TMPHOME_WU/bin/adb-wrapper.bat"
+check "win uninstall: summary names the removed .bat shim and says the POSIX names were left alone" bash -c \
+  "grep -qF '~/bin/adb-wrapper.bat' '$TMP/winup-uninstall.log' && grep -q 'never installs here' '$TMP/winup-uninstall.log'"
+# The Windows summary must name what it removed and never list the POSIX shims as removed.
+check "win uninstall: the Removed: line names only the removed .bat shim" bash -c \
+  "line=\$(grep '^Removed:' '$TMP/winup-uninstall.log'); printf '%s' \"\$line\" | grep -qF '~/bin/adb-wrapper.bat' && ! printf '%s' \"\$line\" | grep -qE '~/bin/(adb|corral),'"
+
+# Windows normal uninstall: our own .bat shims go and the summary names them
+env HOME="$TMPHOME_W" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_W" --uninstall \
+  >"$TMP/win-uninstall.log" 2>&1; rcuw=$?
+dump_on_fail "$rcuw" "$TMP/win-uninstall.log"
+check "win uninstall: our corral.bat + adb-wrapper.bat are removed" bash -c \
+  "[ ! -e '$TMPHOME_W/bin/corral.bat' ] && [ ! -e '$TMPHOME_W/bin/adb-wrapper.bat' ]"
+check "win uninstall: summary names both .bat shims" bash -c \
+  "grep -qF '~/bin/corral.bat' '$TMP/win-uninstall.log' && grep -qF '~/bin/adb-wrapper.bat' '$TMP/win-uninstall.log'"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

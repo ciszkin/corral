@@ -13,7 +13,11 @@ jobs:
     # Pinned (not ubuntu-latest): the distro wine package version is fixed per Ubuntu release.
     runs-on: ubuntu-24.04
     steps:
+      # fetch-depth 0: scripts/test_install.sh diffs install.sh against the pre-change base commit
+      # (the byte-for-byte POSIX guard); a depth-1 checkout silently drops that history.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-java@v5
         with:

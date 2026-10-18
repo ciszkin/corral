@@ -26,3 +26,17 @@ val corralVersion: String = normalizedVersion(System.getenv("CORRAL_VERSION"))
 allprojects {
     version = corralVersion
 }
+
+// L1 hermeticity for every module's test JVM: no test may read or write the developer's real home.
+// `user.home` is a mutable global that the daemon resolves config/db/emulator paths from, and a
+// spawned emulator's reaper resolves it asynchronously — after a per-test override has restored it —
+// so a per-test override alone leaks to the real home. Point it at each module's build/test-home
+// (the same directory corral-daemon's CORRAL_RULES/CORRAL_ENV_FILE already use) and create it before
+// the test worker boots. corral-daemon's own tasks.test block still adds its env-file overrides.
+subprojects {
+    tasks.withType<Test>().configureEach {
+        val testHome = layout.buildDirectory.dir("test-home")
+        doFirst { testHome.get().asFile.mkdirs() }
+        systemProperty("user.home", testHome.get().asFile.absolutePath)
+    }
+}

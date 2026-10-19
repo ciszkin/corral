@@ -450,7 +450,17 @@ fi
 # it MINGW*. This is a SIMULATION of Windows (Git Bash semantics); only a real Windows box can truly
 # verify cmd.exe/PowerShell behaviour.
 WIN_STUB="$TMP/winstub"; mkdir -p "$WIN_STUB"
-printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$WIN_STUB/uname"; chmod +x "$WIN_STUB/uname"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$WIN_STUB/uname"
+# A successful schtasks stub: the existing Windows scenarios must exercise the Scheduled Task path
+# (its own /sc onlogon create, then /run). Individual task rows below use their own stubs to force
+# the refusal and error-line cases.
+cat > "$WIN_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/win-schtasks.log"
+echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
+exit 0
+EOF
+chmod +x "$WIN_STUB/uname" "$WIN_STUB/schtasks"
 
 TMPHOME_W="$TMP/home-win"; SDK_W="$TMPHOME_W/Android/Sdk/platform-tools"
 mkdir -p "$SDK_W" "$TMPHOME_W/bin"; : > "$TMPHOME_W/.bashrc"
@@ -975,6 +985,241 @@ check "escape: the PowerShell line is still printed for that path" \
 # ===== usage() documents where adb is looked for (NIT 6) =====
 check "usage documents the Windows SDK location for --adb" bash -c \
   "bash '$SRC/install.sh' --help | grep -q 'AppData/Local/Android/Sdk'"
+
+# ===== Windows: durable daemon via a per-user Scheduled Task =====
+# Windows has no systemd. install.sh writes ~/bin/corral-daemon.bat (carrying CORRAL_ADB) and
+# registers CorralDaemon, trying /sc onlogon and falling back to /sc once + /run when the token is
+# UAC-filtered. schtasks is stubbed here: only a real Windows box can prove the task really
+# survives a logout, so these rows pin the install's commands, claims and fallback, not the OS.
+winp() { cygpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
+
+# (a) happy path: onlogon works, task created, launcher carries CORRAL_ADB.
+TASK_A_HOME="$TMP/home-task-a"; TASK_A_SDK="$TASK_A_HOME/Android/Sdk/platform-tools"
+TASK_A_STUB="$TMP/taskstub-a"; TASK_A_LOG="$TMP/taskstub-a.log"
+mkdir -p "$TASK_A_SDK" "$TASK_A_HOME/bin" "$TASK_A_STUB"; : > "$TASK_A_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-a-adb $@"' > "$TASK_A_SDK/adb"; chmod +x "$TASK_A_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_A_STUB/uname"
+cat > "$TASK_A_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_A_LOG"
+echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
+exit 0
+EOF
+chmod +x "$TASK_A_STUB/uname" "$TASK_A_STUB/schtasks"
+env HOME="$TASK_A_HOME" PATH="$TASK_A_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_A_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_A_HOME" >"$TMP/task-a.log" 2>&1; rcta=$?
+dump_on_fail "$rcta" "$TMP/task-a.log"
+TASK_A_BAT="$TASK_A_HOME/bin/corral-daemon.bat"
+check "task: Windows install exits 0" test "$rcta" -eq 0
+check "task: ~/bin/corral-daemon.bat carries CORRAL_ADB (the adb the installer resolved)" \
+  grep -qF "set \"CORRAL_ADB=$(winp "$TASK_A_SDK/adb")\"" "$TASK_A_BAT"
+check "task: the launcher runs the daemon jar with the tuned JVM flags" bash -c \
+  "grep -qF -- '-Xmx64m' '$TASK_A_BAT' && grep -qF -- 'corral-daemon-all.jar' '$TASK_A_BAT'"
+check "task: /create registers CorralDaemon for onlogon with the .bat as /tr" \
+  grep -qF -- "/create /tn CorralDaemon /tr $(winp "$TASK_A_BAT") /sc onlogon /rl LIMITED /f" "$TASK_A_LOG"
+check "task: summary reports the task created and auto-starting" \
+  grep -q 'Scheduled Task CorralDaemon created; auto-starts at logon' "$TMP/task-a.log"
+
+# (b) the onlogon create is refused (UAC-filtered token): /sc once + /run must run instead,
+#     and the operator must be given the exact elevated command for real auto-start.
+TASK_B_HOME="$TMP/home-task-b"; TASK_B_SDK="$TASK_B_HOME/Android/Sdk/platform-tools"
+TASK_B_STUB="$TMP/taskstub-b"; TASK_B_LOG="$TMP/taskstub-b.log"
+mkdir -p "$TASK_B_SDK" "$TASK_B_HOME/bin" "$TASK_B_STUB"; : > "$TASK_B_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-b-adb $@"' > "$TASK_B_SDK/adb"; chmod +x "$TASK_B_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_B_STUB/uname"
+cat > "$TASK_B_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_B_LOG"
+case " \$* " in
+  *" /sc onlogon "*) echo "ERROR: Access is denied." >&2; exit 5;;
+  *) echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'; exit 0;;
+esac
+EOF
+chmod +x "$TASK_B_STUB/uname" "$TASK_B_STUB/schtasks"
+env HOME="$TASK_B_HOME" PATH="$TASK_B_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_B_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_B_HOME" >"$TMP/task-b.log" 2>&1; rctb=$?
+dump_on_fail "$rctb" "$TMP/task-b.log"
+TASK_B_BAT="$TASK_B_HOME/bin/corral-daemon.bat"
+TASK_B_ELEV="schtasks /create /tn CorralDaemon /tr \"$(winp "$TASK_B_BAT")\" /sc onlogon /rl LIMITED /f"
+check "task fallback: install exits 0" test "$rctb" -eq 0
+check "task fallback: a /sc once create runs when onlogon is access-denied" \
+  grep -qF -- "/create /tn CorralDaemon /tr $(winp "$TASK_B_BAT") /sc once /st 00:00 /rl LIMITED /f" "$TASK_B_LOG"
+check "task fallback: schtasks /run starts the once task now" \
+  grep -qF -- "/run /tn CorralDaemon" "$TASK_B_LOG"
+check "task fallback: the exact elevated command for auto-start is PRINTED" \
+  grep -qF -- "$TASK_B_ELEV" "$TMP/task-b.log"
+check "task fallback: summary says NOT auto-starting" \
+  grep -q 'NOT auto-starting' "$TMP/task-b.log"
+
+# (c) schtasks exits 0 but prints an error: that is FAILURE (exit code AND output), and the
+#     summary must not claim a durable daemon.
+TASK_C_HOME="$TMP/home-task-c"; TASK_C_SDK="$TASK_C_HOME/Android/Sdk/platform-tools"
+TASK_C_STUB="$TMP/taskstub-c"; TASK_C_LOG="$TMP/taskstub-c.log"
+mkdir -p "$TASK_C_SDK" "$TASK_C_HOME/bin" "$TASK_C_STUB"; : > "$TASK_C_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-c-adb $@"' > "$TASK_C_SDK/adb"; chmod +x "$TASK_C_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_C_STUB/uname"
+cat > "$TASK_C_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_C_LOG"
+case " \$* " in
+  *" /create "*) echo "ERROR: The parameter is incorrect." >&2; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_C_STUB/uname" "$TASK_C_STUB/schtasks"
+env HOME="$TASK_C_HOME" PATH="$TASK_C_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_C_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_C_HOME" >"$TMP/task-c.log" 2>&1; rctc=$?
+dump_on_fail "$rctc" "$TMP/task-c.log"
+check "task error-line: install exits 0" test "$rctc" -eq 0
+check "task error-line: exit 0 + an error line is treated as task creation FAILURE" \
+  grep -q 'Scheduled Task CorralDaemon was NOT created' "$TMP/task-c.log"
+check "task error-line: the summary does NOT claim a durable daemon" bash -c \
+  "grep -q 'daemon was NOT started' '$TMP/task-c.log' && ! grep -q 'auto-starts at logon' '$TMP/task-c.log' && ! grep -q 'created and running' '$TMP/task-c.log'"
+
+# (c2) a path that literally contains a space-delimited "error" segment must not be mistaken for a
+#      schtasks error report: task_ok anchors error/failed to the START of a line, which a path can
+#      never be. Before the narrowing this reported a successful create as a failure and skipped /run.
+TASK_D_HOME="$TMP/home qa error home"; TASK_D_SDK="$TASK_D_HOME/Android/Sdk/platform-tools"
+TASK_D_STUB="$TMP/taskstub-d"; TASK_D_LOG="$TMP/taskstub-d.log"
+mkdir -p "$TASK_D_SDK" "$TASK_D_HOME/bin" "$TASK_D_STUB"; : > "$TASK_D_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-d-adb $@"' > "$TASK_D_SDK/adb"; chmod +x "$TASK_D_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_D_STUB/uname"
+cat > "$TASK_D_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_D_LOG"
+printf 'SUCCESS: %s\n' "\$*"
+exit 0
+EOF
+chmod +x "$TASK_D_STUB/uname" "$TASK_D_STUB/schtasks"
+env HOME="$TASK_D_HOME" PATH="$TASK_D_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_D_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_D_HOME" >"$TMP/task-d.log" 2>&1; rctd=$?
+dump_on_fail "$rctd" "$TMP/task-d.log"
+check "task path: an 'error' path segment does not turn a successful create into a failure" bash -c \
+  "[ '$rctd' -eq 0 ] && grep -q 'Scheduled Task CorralDaemon created; auto-starts at logon and is running now' '$TMP/task-d.log'"
+check "task path: /create and /run are both attempted for that path" bash -c \
+  "grep -qF -- '/create /tn CorralDaemon' '$TASK_D_LOG' && grep -qF -- '/run /tn CorralDaemon' '$TASK_D_LOG'"
+
+# (d) uninstall deletes the task and the launcher, and names both in the Removed: summary.
+TASK_A_BAT_BEFORE=0; [ -f "$TASK_A_BAT" ] && TASK_A_BAT_BEFORE=1
+env HOME="$TASK_A_HOME" PATH="$TASK_A_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_A_HOME" --uninstall \
+  >"$TMP/task-uninstall.log" 2>&1; rctu=$?
+dump_on_fail "$rctu" "$TMP/task-uninstall.log"
+check "task uninstall: exits 0" test "$rctu" -eq 0
+check "task uninstall: /end runs BEFORE /delete (a deleted task cannot be ended)" bash -c \
+  "awk '/\\/end \\/tn CorralDaemon/{e=NR} /\\/delete \\/tn CorralDaemon/{d=NR} END{exit !(e && d && e < d)}' '$TASK_A_LOG'"
+check "task uninstall: the Scheduled Task is deleted" \
+  grep -qF -- "/delete /tn CorralDaemon /f" "$TASK_A_LOG"
+check "task uninstall: ~/bin/corral-daemon.bat (written by the install) is removed" bash -c \
+  "[ '$TASK_A_BAT_BEFORE' = 1 ] && [ ! -e '$TASK_A_BAT' ]"
+check "task uninstall: Removed: names the task and the .bat" bash -c \
+  "line=\$(grep '^Removed:' '$TMP/task-uninstall.log'); printf '%s' \"\$line\" | grep -qF 'Scheduled Task CorralDaemon' && printf '%s' \"\$line\" | grep -qF '~/bin/corral-daemon.bat'"
+check "task uninstall: Removed: names the stopped daemon when /end succeeded" bash -c \
+  "grep '^Removed:' '$TMP/task-uninstall.log' | grep -qF 'Scheduled Task CorralDaemon (daemon stopped)'"
+
+# (e) a box that never had the task: schtasks /delete fails, uninstall still exits 0 and does not
+#     claim it removed a task. The log assertion is what makes these rows fail on the old installer,
+#     which never called schtasks on uninstall at all.
+TASK_E_HOME="$TMP/home-task-e"; TASK_E_STUB="$TMP/taskstub-e"; TASK_E_LOG="$TMP/taskstub-e.log"
+mkdir -p "$TASK_E_HOME/bin" "$TASK_E_STUB"; : > "$TASK_E_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_E_STUB/uname"
+cat > "$TASK_E_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_E_LOG"
+case " \$* " in
+  *" /delete "*) echo "ERROR: The system cannot find the task." >&2; exit 1;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_E_STUB/uname" "$TASK_E_STUB/schtasks"
+env HOME="$TASK_E_HOME" PATH="$TASK_E_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_E_HOME" --uninstall \
+  >"$TMP/task-e-uninstall.log" 2>&1; rcte=$?
+dump_on_fail "$rcte" "$TMP/task-e-uninstall.log"
+check "task uninstall: no task present still exits 0 and /delete is attempted" bash -c \
+  "[ '$rcte' -eq 0 ] && grep -qF -- '/delete /tn CorralDaemon /f' '$TASK_E_LOG'"
+check "task uninstall: no task present is not claimed as removed" bash -c \
+  "grep -qF -- '/delete /tn CorralDaemon /f' '$TASK_E_LOG' && ! grep '^Removed:' '$TMP/task-e-uninstall.log' | grep -q 'Scheduled Task CorralDaemon'"
+
+# (e2) the task is deleted but /end fails (e.g. it was not running): the uninstall still exits 0,
+#     reports the task removed, and must NOT claim the daemon was stopped.
+TASK_G_HOME="$TMP/home-task-g"; TASK_G_STUB="$TMP/taskstub-g"; TASK_G_LOG="$TMP/taskstub-g.log"
+mkdir -p "$TASK_G_HOME/bin" "$TASK_G_STUB"; : > "$TASK_G_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_G_STUB/uname"
+cat > "$TASK_G_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_G_LOG"
+case " \$* " in
+  *" /end "*) echo "ERROR: The task is not running." >&2; exit 1;;
+  *) echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been deleted.'; exit 0;;
+esac
+EOF
+chmod +x "$TASK_G_STUB/uname" "$TASK_G_STUB/schtasks"
+env HOME="$TASK_G_HOME" PATH="$TASK_G_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_G_HOME" --uninstall \
+  >"$TMP/task-g-uninstall.log" 2>&1; rctg=$?
+dump_on_fail "$rctg" "$TMP/task-g-uninstall.log"
+check "task uninstall: a failed /end still exits 0 and /delete is attempted" bash -c \
+  "[ '$rctg' -eq 0 ] && grep -qF -- '/delete /tn CorralDaemon /f' '$TASK_G_LOG'"
+check "task uninstall: a failed /end does not claim the daemon was stopped" bash -c \
+  "line=\$(grep '^Removed:' '$TMP/task-g-uninstall.log'); printf '%s' \"\$line\" | grep -qF 'Scheduled Task CorralDaemon' && ! printf '%s' \"\$line\" | grep -q 'daemon stopped'"
+
+# (e3) schtasks exits 0 but prints the error on STDERR: /end must capture both streams, or the
+#     summary claims a stop that never happened. The old installer's `2>/dev/null` lost this line.
+TASK_H_HOME="$TMP/home-task-h"; TASK_H_STUB="$TMP/taskstub-h"; TASK_H_LOG="$TMP/taskstub-h.log"
+mkdir -p "$TASK_H_HOME/bin" "$TASK_H_STUB"; : > "$TASK_H_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_H_STUB/uname"
+cat > "$TASK_H_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_H_LOG"
+case " \$* " in
+  *" /end "*) echo "ERROR: Access is denied." >&2; exit 0;;
+  *) echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been deleted.'; exit 0;;
+esac
+EOF
+chmod +x "$TASK_H_STUB/uname" "$TASK_H_STUB/schtasks"
+env HOME="$TASK_H_HOME" PATH="$TASK_H_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_H_HOME" --uninstall \
+  >"$TMP/task-h-uninstall.log" 2>&1; rcth=$?
+dump_on_fail "$rcth" "$TMP/task-h-uninstall.log"
+check "task uninstall: a /end error on STDERR with exit 0 still exits 0 and /delete is attempted" bash -c \
+  "[ '$rcth' -eq 0 ] && grep -qF -- '/delete /tn CorralDaemon /f' '$TASK_H_LOG'"
+check "task uninstall: a /end error on STDERR with exit 0 is NOT claimed as a stopped daemon" bash -c \
+  "line=\$(grep '^Removed:' '$TMP/task-h-uninstall.log'); printf '%s' \"\$line\" | grep -qF 'Scheduled Task CorralDaemon' && ! printf '%s' \"\$line\" | grep -q 'daemon stopped'"
+
+# (f) POSIX is untouched: no Scheduled Task call and no daemon .bat.
+POSIX_T_HOME="$TMP/home-posix-task"; POSIX_T_SDK="$POSIX_T_HOME/Android/Sdk/platform-tools"
+POSIX_T_STUB="$TMP/posix-task-stub"; POSIX_T_LOG="$TMP/posix-schtasks.log"
+mkdir -p "$POSIX_T_SDK" "$POSIX_T_HOME/bin" "$POSIX_T_STUB"; : > "$POSIX_T_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "posix-task-adb $@"' > "$POSIX_T_SDK/adb"; chmod +x "$POSIX_T_SDK/adb"
+cat > "$POSIX_T_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$POSIX_T_LOG"
+exit 0
+EOF
+: > "$POSIX_T_LOG"
+chmod +x "$POSIX_T_STUB/schtasks"
+env HOME="$POSIX_T_HOME" PATH="$POSIX_T_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$POSIX_T_SDK/adb" --jar "$JAR" --no-ui --home "$POSIX_T_HOME" >"$TMP/posix-task.log" 2>&1; rcpt=$?
+dump_on_fail "$rcpt" "$TMP/posix-task.log"
+check "task: a POSIX install creates no task, no daemon .bat, and never calls schtasks" bash -c \
+  "[ '$rcpt' -eq 0 ] && [ ! -e '$POSIX_T_HOME/bin/corral-daemon.bat' ] && [ ! -s '$POSIX_T_LOG' ]"
+
+# (f2) the launcher write itself fails (ENOSPC here via /dev/full): the summary must name the WRITE
+#      failure, not blame an unspellable path, and must still say no task/no daemon.
+TASK_F_HOME="$TMP/home-task-f"; TASK_F_SDK="$TASK_F_HOME/Android/Sdk/platform-tools"
+TASK_F_STUB="$TMP/taskstub-f"
+mkdir -p "$TASK_F_SDK" "$TASK_F_HOME/bin" "$TASK_F_STUB"; : > "$TASK_F_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-f-adb $@"' > "$TASK_F_SDK/adb"; chmod +x "$TASK_F_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_F_STUB/uname"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$TASK_F_STUB/schtasks"
+chmod +x "$TASK_F_STUB/uname" "$TASK_F_STUB/schtasks"
+ln -s /dev/full "$TASK_F_HOME/bin/corral-daemon.bat"
+env HOME="$TASK_F_HOME" PATH="$TASK_F_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_F_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_F_HOME" >"$TMP/task-f.log" 2>&1; rctf=$?
+dump_on_fail "$rctf" "$TMP/task-f.log"
+check "task launcher: a failed write exits 0 and names the WRITE failure" bash -c \
+  "[ '$rctf' -eq 0 ] && grep -q 'could NOT be written to' '$TMP/task-f.log' && grep -q '(the write failed)' '$TMP/task-f.log'"
+check "task launcher: a failed write is not blamed on an unspellable path" bash -c \
+  "! grep -q 'cannot spell' '$TMP/task-f.log'"
+check "task launcher: a failed write still says no task was created and no daemon started" bash -c \
+  "grep -q 'Scheduled Task was NOT created and the daemon was NOT started' '$TMP/task-f.log'"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

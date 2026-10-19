@@ -3,3 +3,22 @@
 # targets — the constructs that break without it. Wine tolerates LF, so the wrapper suite's CRLF
 # check is what keeps this honest. Covers gradlew.bat as well.
 *.bat text eol=crlf
+
+# Shell scripts and the extensionless launchers must be LF on every checkout, including a Windows
+# one where core.autocrlf would otherwise rewrite them. A CRLF shebang is a dead script
+# (`/usr/bin/env bash\r`), and make-installer.sh mirrors these files into the published bundle.
+# `*.sh` covers scripts added later; the explicit entries below are what pins the extensionless ones.
+*.sh text eol=lf
+scripts/adb-wrapper     text eol=lf
+scripts/corral          text eol=lf
+scripts/corral-ui       text eol=lf
+scripts/corral-rules    text eol=lf
+scripts/corral.service  text eol=lf
+scripts/fake-adb        text eol=lf
+scripts/fake-emulator   text eol=lf
+scripts/install.sh      text eol=lf
+scripts/make-installer.sh text eol=lf
+scripts/test_e2e.sh     text eol=lf
+scripts/test_install.sh text eol=lf
+scripts/test_wrapper.sh text eol=lf
+gradlew                 text eol=lf

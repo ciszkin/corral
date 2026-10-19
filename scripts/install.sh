@@ -115,6 +115,18 @@ cmd_unspellable() { # cmd_unspellable <value>
   return 1
 }
 
+# schtasks can exit 0 and still print an error line, so success needs BOTH a zero exit and clean
+# output. Used for create, end and delete; a delete of a task that does not exist is not an error.
+task_ok() { # task_ok <exit-code> <output>
+  [ "$1" -eq 0 ] || return 1
+  ! printf '%s' "$2" | grep -qiE '^(error|failed)([[:space:]:]|$)|access is denied'
+}
+
+# Git Bash rewrites native-program arguments that start with `/` (e.g. /create) into paths. These
+# two switches are the documented opt-out; without them install.sh's schtasks calls reach the
+# executable as C:/Program Files/Git/create. The printed elevated command is for cmd/PowerShell.
+schtasks_run() { MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 schtasks "$@"; }
+
 # --- what counts as OUR shim: one guard, shared by --uninstall and by a Windows install ----------
 # Remove a PATH shim ONLY when its content carries our marker. A hand-written ~/bin/adb or a
 # hand-edited corral.bat belongs to the operator, not to us (the exact collision F2 warned about),
@@ -139,6 +151,7 @@ MARKER_ADB='corral adb wrapper'
 MARKER_CORRAL='CORRAL_JAR:-$HOME/.corral/corral-daemon-all.jar'
 MARKER_CORRAL_UI='CORRAL_UI_JAR:-$HOME/.corral/corral-ui-all.jar'
 MARKER_CORRAL_BAT='rem corral CLI shim'
+MARKER_DAEMON_BAT='rem corral daemon launcher'
 
 # Name only what was actually removed: entries are appended as they happen, so a summary can never
 # claim a file this install did not create (on Windows the POSIX shims and the unit do not exist; a
@@ -161,6 +174,21 @@ if [[ $UNINSTALL -eq 1 ]]; then
     echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
   elif [[ $IS_WINDOWS -eq 1 ]]; then
     echo "Windows: skipping systemctl (no systemd user session here)"
+    # Stop the running task BEFORE deleting it: deleting a task does not stop its process, and the
+    # daemon would otherwise keep port 8798 and a deleted ~/.corral. A task that is not running fails
+    # the /end; that is not an error worth failing on, and the summary must not claim a stop then.
+    # A box that never had the task fails this delete; that is not an error worth failing on either.
+    if command -v schtasks >/dev/null 2>&1; then
+      end_out=$(schtasks_run /end /tn CorralDaemon 2>&1); end_rc=$?
+      del_out=$(schtasks_run /delete /tn CorralDaemon /f 2>&1); del_rc=$?
+      if task_ok "$del_rc" "$del_out"; then
+        if task_ok "$end_rc" "$end_out"; then
+          note_removed "Scheduled Task CorralDaemon (daemon stopped)"
+        else
+          note_removed "Scheduled Task CorralDaemon"
+        fi
+      fi
+    fi
   else
     systemctl --user disable --now corral 2>/dev/null || true
   fi
@@ -175,6 +203,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   # `adb` F2 was about), and nothing else would ever remove them. The marker guard is the safety
   # property; the platform gate was only belt-and-braces, and it is what left them behind forever.
   if [[ $IS_WINDOWS -eq 1 ]]; then
+    remove_shim "$BIN_DIR/corral-daemon.bat" "$MARKER_DAEMON_BAT" '~/bin/corral-daemon.bat'
     remove_shim "$BIN_DIR/corral.bat" "$MARKER_CORRAL_BAT" '~/bin/corral.bat'
     remove_shim "$BIN_DIR/adb-wrapper.bat" "$MARKER_ADB" '~/bin/adb-wrapper.bat'
   fi
@@ -583,14 +612,125 @@ for rc in "$TARGET_HOME/.bashrc" "$TARGET_HOME/.zshrc"; do
   fi
 done
 
+# On Windows there is no systemd unit. A per-user Scheduled Task's parent chain is svchost.exe
+# (not the SSH session), so the daemon survives a logout; a foreground command does not. The
+# launcher carries CORRAL_ADB because Java cannot exec a bare `adb`, and without it the daemon
+# comes up with devices:[].
+DAEMON_FLAGS="-Xms24m -Xmx64m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=64m -XX:TieredStopAtLevel=1"
+if [[ $IS_WINDOWS -eq 1 ]]; then
+  WIN_JAVA=$(win_path "$JAVA_BIN")
+  WIN_JAR=$(win_path "$CORRAL_HOME/corral-daemon-all.jar")
+  WIN_ADB=""
+  if [[ -n "$ADB" ]]; then WIN_ADB=$(win_path "$ADB"); fi
+  DAEMON_BAT="$BIN_DIR/corral-daemon.bat"
+  LAUNCHER_OK=0
+  LAUNCHER_UNSPELLABLE=0
+  # A `"` or a %NAME% pair cannot be spelled in a .bat at all, so do not write a launcher that
+  # silently runs a different path: the summary then says the task was not created.
+  if ! cmd_unspellable "$WIN_JAR" && { [[ -z "$WIN_ADB" ]] || ! cmd_unspellable "$WIN_ADB"; }; then
+    if {
+      printf '@echo off\r\n'
+      printf 'rem corral daemon launcher: started by the CorralDaemon Scheduled Task\r\n'
+      printf 'rem java lookup mirrors corral.bat: CORRAL_JAVA, then %%JAVA_HOME%%\\bin\\java.exe, then PATH.\r\n'
+      printf 'setlocal\r\n'
+      printf 'set "JAVA=%%CORRAL_JAVA%%"\r\n'
+      printf 'if not defined JAVA if defined JAVA_HOME if exist "%%JAVA_HOME%%\\bin\\java.exe" set "JAVA=%%JAVA_HOME%%\\bin\\java.exe"\r\n'
+      printf 'if not defined JAVA for %%%%d in ("%%PATH:;=" "%%") do if not defined JAVA call :find_java "%%%%~d"\r\n'
+      printf 'if not defined JAVA (\r\n'
+      printf '  echo corral: java not found ^(set CORRAL_JAVA or JAVA_HOME, or put java on PATH^) - failing closed\r\n'
+      printf '  exit /b 1\r\n'
+      printf ')\r\n'
+      if [[ -n "$WIN_ADB" ]]; then printf 'set "CORRAL_ADB=%s"\r\n' "$WIN_ADB"; fi
+      printf '"%%JAVA%%" %s -jar "%s"\r\n' "$DAEMON_FLAGS" "$WIN_JAR"
+      printf 'exit /b %%errorlevel%%\r\n'
+      printf '\r\n'
+      printf ':find_java\r\n'
+      printf 'rem %%~1 is one PATH entry (quotes stripped): skip empty, ".", and non-absolute entries.\r\n'
+      printf 'set "e=%%~1"\r\n'
+      printf 'if "%%e%%"=="" exit /b 0\r\n'
+      printf 'if "%%e%%"=="." exit /b 0\r\n'
+      printf 'set "abs="\r\n'
+      printf 'if "%%e:~1,1%%"==":" if "%%e:~2,1%%"=="\\" set "abs=1"\r\n'
+      printf 'if "%%e:~1,1%%"==":" if "%%e:~2,1%%"=="/" set "abs=1"\r\n'
+      printf 'if "%%e:~0,2%%"=="\\\\" set "abs=1"\r\n'
+      printf 'if not defined abs exit /b 0\r\n'
+      printf "rem cmd's default PATHEXT order (.com;.exe;.bat;.cmd); first hit wins like PATH lookup.\r\n"
+      printf 'for %%%%f in (com exe bat cmd) do if not defined JAVA if exist "%%~1\\java.%%%%f" set "JAVA=%%~1\\java.%%%%f"\r\n'
+      printf 'exit /b 0\r\n'
+    } > "$DAEMON_BAT" 2>/dev/null; then
+      LAUNCHER_OK=1
+    fi
+  else
+    LAUNCHER_UNSPELLABLE=1
+  fi
+
+  # /sc onlogon needs an elevated token; /sc once + /run works unelevated. Try the good case,
+  # fall back to the one that works, and report which one actually happened.
+  TASK_STATE=failed
+  TASK_ELEV=""
+  if [[ $LAUNCHER_OK -eq 1 ]]; then
+    TASK_WIN_BAT=$(win_path "$DAEMON_BAT")
+    TASK_ELEV="schtasks /create /tn CorralDaemon /tr \"$TASK_WIN_BAT\" /sc onlogon /rl LIMITED /f"
+    if command -v schtasks >/dev/null 2>&1; then
+      task_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc onlogon /rl LIMITED /f 2>&1); task_rc=$?
+      if task_ok "$task_rc" "$task_out"; then
+        TASK_STATE=onlogon-created
+        run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
+        if task_ok "$run_rc" "$run_out"; then TASK_STATE=onlogon; fi
+      elif printf '%s' "$task_out" | grep -qi 'access is denied'; then
+        once_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc once /st 00:00 /rl LIMITED /f 2>&1); once_rc=$?
+        if task_ok "$once_rc" "$once_out"; then
+          TASK_STATE=once-norun
+          run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
+          if task_ok "$run_rc" "$run_out"; then TASK_STATE=once; fi
+        fi
+      fi
+    fi
+  fi
+fi
+
 if [[ $IS_WINDOWS -eq 1 ]]; then
   echo
   echo "==> Installed to $TARGET_HOME (platform: Windows, uname: $UNAME_S)"
   echo "Installed Windows shims: corral.bat, adb-wrapper.bat ($BIN_DIR) — run corral from cmd.exe/PowerShell (PATH note at the end)"
   echo "Installed gradle gate (~/.gradle/init.d/corral-gate.gradle.kts -> $CORRAL_SHIM)"
+  echo "Daemon:"
+  case "$TASK_STATE" in
+    onlogon)
+      echo "  Scheduled Task CorralDaemon created; auto-starts at logon and is running now."
+      ;;
+    onlogon-created)
+      echo "  Scheduled Task CorralDaemon created; auto-starts at logon (schtasks /run failed, so it is NOT running now)."
+      ;;
+    once)
+      echo "  Scheduled Task CorralDaemon created and running, but NOT auto-starting (the onlogon trigger needs elevation)."
+      echo "  Run this from an elevated prompt to auto-start at logon:"
+      echo "  $TASK_ELEV"
+      ;;
+    once-norun)
+      echo "  Scheduled Task CorralDaemon created but NOT running (schtasks /run failed), and NOT auto-starting (the onlogon trigger needs elevation)."
+      echo "  Run this from an elevated prompt to auto-start at logon:"
+      echo "  $TASK_ELEV"
+      ;;
+    *)
+      if [[ $LAUNCHER_OK -eq 1 ]]; then
+        echo "  Scheduled Task CorralDaemon was NOT created (schtasks failed) — the daemon was NOT started."
+      elif [[ $LAUNCHER_UNSPELLABLE -eq 1 ]]; then
+        echo "  corral-daemon.bat was NOT written (a path contains a \" or a %NAME% pair cmd.exe cannot spell),"
+        echo "  so the Scheduled Task was NOT created and the daemon was NOT started."
+      else
+        echo "  corral-daemon.bat could NOT be written to $DAEMON_BAT (the write failed),"
+        echo "  so the Scheduled Task was NOT created and the daemon was NOT started."
+      fi
+      if [[ -n "$TASK_ELEV" ]]; then
+        echo "  Create it from an elevated prompt, then re-run install.sh:"
+        echo "  $TASK_ELEV"
+      fi
+      ;;
+  esac
   echo "NOT done on Windows:"
   echo "  - no POSIX corral/adb shim (an extensionless 'adb' on the Windows PATH would shadow the real adb.exe)"
-  echo "  - no systemd unit and no systemctl call (this host has no systemd user session)"
+  echo "  - no systemd unit and no systemctl call (a per-user Scheduled Task runs the daemon instead)"
   echo "  - no corral-ui shim and no app-grid launcher (the bundle ships no corral-ui.bat)"
   if want_ui; then
     echo "    start the console instead: \"$JAVA_BIN\" -jar \"$CORRAL_HOME/corral-ui-all.jar\""
@@ -609,13 +749,9 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
   # says so instead of printing a command that silently sets a different value. PowerShell's paths
   # are single-quoted through ps_quote, so a `'` no longer ends the string (it produced "Unexpected
   # token") and `$`/`&`/`%` in a path stay literal.
-  DAEMON_FLAGS="-Xms24m -Xmx64m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=64m -XX:TieredStopAtLevel=1"
-  WIN_JAVA=$(win_path "$JAVA_BIN")
-  WIN_JAR=$(win_path "$CORRAL_HOME/corral-daemon-all.jar")
   CMD_NOTE=0
   if cmd_unspellable "$WIN_JAVA" || cmd_unspellable "$WIN_JAR"; then CMD_NOTE=1; fi
   if [[ -n "$ADB" ]]; then
-    WIN_ADB=$(win_path "$ADB")
     cmd_unspellable "$WIN_ADB" && CMD_NOTE=1
     echo "Start the daemon in the foreground (CORRAL_ADB is what lets it see devices — pick your shell):"
     if [[ $CMD_NOTE -eq 0 ]]; then

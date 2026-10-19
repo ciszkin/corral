@@ -22,7 +22,8 @@ usage() {
 Usage: install.sh [options]
 
   --java PATH     Java 17+ executable (auto-detect: JAVA_HOME, PATH, sdkman)
-  --adb PATH      real adb executable (auto-detect: ANDROID_HOME, ~/Android/Sdk, PATH)
+  --adb PATH      real adb executable (auto-detect: ANDROID_HOME, ~/Android/Sdk, PATH; on Windows
+                  also ~/AppData/Local/Android/Sdk, where %LOCALAPPDATA%\Android\Sdk lives)
   --jar PATH      corral-daemon-all.jar (default: ./corral-daemon/build/libs/corral-daemon-all.jar)
   --ui            install the corral-ui desktop app (~/bin/corral-ui, jar in ~/.corral, and a
                   "Corral" launcher in ~/.local/share/applications for the app grid/dock)
@@ -70,14 +71,91 @@ case "$UNAME_S" in
   MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1;;
 esac
 
+# adb's file name is the platform's: the Windows SDK ships `adb.exe`, the POSIX SDK `adb`.
+# `adb.exe` is honoured on Windows only. On POSIX `adb` is the name that matters, and it is also the
+# only one install_sdk_shim can wrap (it replaces `<sdk>/platform-tools/adb` and nothing else), so
+# accepting an `adb.exe` there would resolve an adb the gradle/AGP gate cannot cover.
+ADB_NAMES=(adb)
+if [[ $IS_WINDOWS -eq 1 ]]; then ADB_NAMES=(adb.exe adb); fi
+
+# Render an MSYS/Git-Bash path the way cmd.exe and PowerShell spell it, for the start commands the
+# Windows branch prints for a human to paste. cygpath is authoritative where it exists (every real
+# Git Bash has it); the fallback rewrites only a genuine `/<drive>/...` root and leaves anything else
+# alone, so a POSIX test sandbox is never turned into a fake drive path.
+win_path() { # win_path <path>
+  local p="$1" w
+  if command -v cygpath >/dev/null 2>&1 && w=$(cygpath -w "$p" 2>/dev/null) && [[ -n "$w" ]]; then
+    printf '%s\n' "$w"; return 0
+  fi
+  case "$p" in
+    /[A-Za-z]/*)
+      local drive; drive=$(printf '%s' "${p:1:1}" | tr 'a-z' 'A-Z')
+      printf '%s:\\%s\n' "$drive" "$(printf '%s' "${p:3}" | tr '/' '\\')";;
+    *) printf '%s\n' "$p";;
+  esac
+}
+
+# Render a value as a PowerShell single-quoted literal. Inside single quotes PowerShell takes
+# `&`, `%`, `$` and spaces literally, so doubling the quote is the whole escape — and it is
+# required: an unescaped `'` in a path ends the string (PowerShell: "Unexpected token"), which is
+# exactly the operator the printed line exists for.
+ps_quote() { # ps_quote <value>
+  local v="$1"
+  printf "'%s'" "${v//\'/\'\'}"
+}
+
+# cmd.exe cannot spell every path. Inside `set "K=V"` a `"` ends the quoted value, and a `%NAME%`
+# pair is expanded before cmd.exe looks at the quotes (a LONE `%` is left alone, so a directory
+# named `100%` is fine); there is no escape at the prompt — a caret is literal inside those quotes,
+# so `^&`/`^%` end up IN the path. Everything else, including spaces, `&`, `^`, `!` and `()` in a
+# space-`&`-`%` path, round-trips exactly through the quoted form. Callers use this to say "no
+# cmd.exe line" instead of printing one that silently sets a different value.
+cmd_unspellable() { # cmd_unspellable <value>
+  case "$1" in *'"'*|*%*%*) return 0;; esac
+  return 1
+}
+
+# --- what counts as OUR shim: one guard, shared by --uninstall and by a Windows install ----------
+# Remove a PATH shim ONLY when its content carries our marker. A hand-written ~/bin/adb or a
+# hand-edited corral.bat belongs to the operator, not to us (the exact collision F2 warned about),
+# and deleting it is data loss. Anything unrecognised is left on disk and named in the summary.
+# The markers already shipped in the shims before this change, so a pre-change install is still
+# removed; an unrecognised file is never treated as "ours anyway".
+# Each marker is a string the shipped shim really carries, and scripts/test_install.sh pins every
+# one against the shipped file: a shim edit that changed the string would otherwise stop the marker
+# matching in silence and leave a stale shim on the operator's PATH.
+#   ~/bin/adb         <- scripts/adb-wrapper (its own header line)
+#   ~/bin/corral      <- scripts/corral      (its CORRAL_JAR default into ~/.corral)
+#   ~/bin/corral-ui   <- scripts/corral-ui   (its CORRAL_UI_JAR default, same shape)
+#   ~/bin/corral.bat  <- scripts/corral.bat  (the CLI's main class)
+# The two launcher markers are deliberately NOT the bare main-class FQNs (`dev.corral.CorralCli`,
+# `dev.corral.ui.CorralUiKt`): an operator's own launcher plausibly runs `dev.corral.CorralCli`,
+# and now that this guard also runs on Windows — where it deletes during an INSTALL — a false
+# positive is data loss, not a stray file. `${X_JAR:-$HOME/.corral/...}` is a string only our shim
+# spells that way. corral.bat keeps the FQN: it is a Windows-only name and its shipped content has
+# no other distinctive string to key on.
+MARKER_ADB='corral adb wrapper'
+MARKER_CORRAL='CORRAL_JAR:-$HOME/.corral/corral-daemon-all.jar'
+MARKER_CORRAL_UI='CORRAL_UI_JAR:-$HOME/.corral/corral-ui-all.jar'
+MARKER_CORRAL_BAT='dev.corral.CorralCli'
+
+# Name only what was actually removed: entries are appended as they happen, so a summary can never
+# claim a file this install did not create (on Windows the POSIX shims and the unit do not exist; a
+# hard-coded list there is exactly the lie row 15 set out to remove).
+REMOVED=""
+KEPT_SHIMS=""
+note_removed() { REMOVED="$REMOVED$1, "; }
+remove_shim() { # remove_shim <path> <marker> <label>
+  [[ -e "$1" ]] || return 0
+  if grep -qF "$2" "$1" 2>/dev/null; then
+    rm -f "$1"; note_removed "$3"
+  else
+    KEPT_SHIMS="$KEPT_SHIMS $1"
+  fi
+}
+
 if [[ $UNINSTALL -eq 1 ]]; then
   echo "==> Uninstalling corral"
-  # Name only what was actually removed: entries are appended as they happen, so the summary can
-  # never claim a file this install did not create (on Windows the POSIX shims and the unit do not
-  # exist; a hard-coded list there is exactly the lie row 15 set out to remove from install).
-  REMOVED=""
-  note_removed() { REMOVED="$REMOVED$1, "; }
-
   if [[ $SANDBOX -eq 1 ]]; then
     echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
   elif [[ $IS_WINDOWS -eq 1 ]]; then
@@ -88,28 +166,20 @@ if [[ $UNINSTALL -eq 1 ]]; then
   if [[ -e "$UNIT_DIR/corral.service" ]]; then rm -f "$UNIT_DIR/corral.service"; note_removed "corral.service"; fi
   if [[ $SANDBOX -eq 0 && $IS_WINDOWS -eq 0 ]]; then systemctl --user daemon-reload 2>/dev/null || true; fi
 
-  # Remove a PATH shim ONLY when its content carries our marker. A hand-written ~/bin/adb or a
-  # hand-edited corral.bat belongs to the operator, not to us (the exact collision F2 warned about),
-  # and deleting it is data loss. Anything unrecognised is left on disk and named in the summary.
-  # The markers already shipped in the shims before this change, so a pre-change install is still
-  # removed; an unrecognised file is never treated as "ours anyway".
-  KEPT_SHIMS=""
-  remove_shim() { # remove_shim <path> <marker> <label>
-    [[ -e "$1" ]] || return 0
-    if grep -qF "$2" "$1" 2>/dev/null; then
-      rm -f "$1"; note_removed "$3"
-    else
-      KEPT_SHIMS="$KEPT_SHIMS $1"
-    fi
-  }
+  # remove_shim / note_removed / REMOVED / KEPT_SHIMS are defined above, next to the markers, so the
+  # Windows install path uses the very same guard (see MARKER_*).
+  # The .bat twins are what a Windows install writes, so they are checked only there. The POSIX
+  # names are checked on BOTH platforms: a box upgraded from a pre-f4f2270 install still carries
+  # the bash `corral`/`adb`/`corral-ui` the old installer put on its PATH (including the stray bash
+  # `adb` F2 was about), and nothing else would ever remove them. The marker guard is the safety
+  # property; the platform gate was only belt-and-braces, and it is what left them behind forever.
   if [[ $IS_WINDOWS -eq 1 ]]; then
-    remove_shim "$BIN_DIR/corral.bat" 'dev.corral.CorralCli' '~/bin/corral.bat'
-    remove_shim "$BIN_DIR/adb-wrapper.bat" 'corral adb wrapper' '~/bin/adb-wrapper.bat'
-  else
-    remove_shim "$BIN_DIR/adb" 'corral adb wrapper' '~/bin/adb'
-    remove_shim "$BIN_DIR/corral" 'dev.corral.CorralCli' '~/bin/corral'
-    remove_shim "$BIN_DIR/corral-ui" 'dev.corral.ui.CorralUiKt' '~/bin/corral-ui'
+    remove_shim "$BIN_DIR/corral.bat" "$MARKER_CORRAL_BAT" '~/bin/corral.bat'
+    remove_shim "$BIN_DIR/adb-wrapper.bat" "$MARKER_ADB" '~/bin/adb-wrapper.bat'
   fi
+  remove_shim "$BIN_DIR/adb" "$MARKER_ADB" '~/bin/adb'
+  remove_shim "$BIN_DIR/corral" "$MARKER_CORRAL" '~/bin/corral'
+  remove_shim "$BIN_DIR/corral-ui" "$MARKER_CORRAL_UI" '~/bin/corral-ui'
 
   if [[ -e "$TARGET_HOME/.local/share/applications/corral-ui.desktop" ]]; then
     rm -f "$TARGET_HOME/.local/share/applications/corral-ui.desktop"; note_removed "Corral launcher"
@@ -149,12 +219,7 @@ if [[ $UNINSTALL -eq 1 ]]; then
   if [[ -n "$KEPT_SHIMS" ]]; then
     echo "Left alone (not installed by corral; unrecognised shim content):$KEPT_SHIMS"
   fi
-  if [[ $IS_WINDOWS -eq 1 ]]; then
-    # Only claim to have left something alone when there is something there to leave.
-    if [[ -e "$BIN_DIR/adb" || -e "$BIN_DIR/corral" || -e "$BIN_DIR/corral-ui" ]]; then
-      echo "Windows: ~/bin/adb, ~/bin/corral and ~/bin/corral-ui are POSIX shims Corral never installs here — left alone."
-    fi
-  elif [[ "$REMOVED" == *"~/bin/adb,"* ]]; then
+  if [[ "$REMOVED" == *"~/bin/adb,"* ]]; then
     echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
   fi
   rmdir "$TARGET_HOME/.gradle/init.d" "$TARGET_HOME/.config/corral" 2>/dev/null || true
@@ -176,19 +241,51 @@ detect_java() {
   echo "$j"
 }
 
+# The first real adb under <sdk-root>/platform-tools, trying the platform's own name first (see
+# ADB_NAMES), or nothing. `adb.exe` is probed only on Windows.
+find_sdk_adb() { # find_sdk_adb <sdk-root>
+  local root="$1/platform-tools" n
+  for n in "${ADB_NAMES[@]}"; do
+    if [[ -x "$root/$n" ]]; then echo "$root/$n"; return 0; fi
+  done
+  return 1
+}
+
 detect_adb() {
+  local cand
   if [[ -n "$ADB_ARG" ]]; then echo "$ADB_ARG"; return 0; fi
   # --home is a sandbox: install_sdk_shim overwrites the adb it resolves, so an adb outside
   # TARGET_HOME must never be used. Only an SDK inside the root is acceptable (explicit --adb
   # above is the operator opting in to a specific path).
+  #
+  # The standard Windows SDK lives at %LOCALAPPDATA%\Android\Sdk. It is spelled TARGET_HOME-relative
+  # (`$TARGET_HOME/AppData/Local/Android/Sdk`) and deliberately never read from the LOCALAPPDATA
+  # variable: for a normal Windows install $HOME is %USERPROFILE%, so the two name the same
+  # directory and nothing is missed, while under --home (or any HOME override) LOCALAPPDATA names
+  # the OPERATOR's SDK — outside the install root, which is exactly the reach-out both branches
+  # below exist to refuse.
+  #
+  # That candidate is added ONLY when IS_WINDOWS=1. POSIX never looked there, and resolving an
+  # `adb` from an AppData path on POSIX both changes what the Linux installer does and lets
+  # install_sdk_shim wrap an adb the Linux gate was never about — on a host whose sandbox holds
+  # only that path, ungated HEAD returns 0 and shims it where the pre-change installer refused.
+  # scripts/test_install.sh now runs the POSIX byte-for-byte guard with an AppData-path SDK present,
+  # so a missing gate here fails a row instead of silently changing Linux behaviour.
+  local -a sdk_roots=("$TARGET_HOME/Android/Sdk")
+  if [[ $IS_WINDOWS -eq 1 ]]; then sdk_roots+=("$TARGET_HOME/AppData/Local/Android/Sdk"); fi
   if [[ -n "$HOME_ARG" ]]; then
-    if [[ -x "$TARGET_HOME/Android/Sdk/platform-tools/adb" ]]; then echo "$TARGET_HOME/Android/Sdk/platform-tools/adb"; return 0; fi
+    for cand in "${sdk_roots[@]}"; do
+      if cand=$(find_sdk_adb "$cand"); then echo "$cand"; return 0; fi
+    done
     return 1
   fi
-  if [[ -n "${ANDROID_HOME:-}" && -x "$ANDROID_HOME/platform-tools/adb" ]]; then echo "$ANDROID_HOME/platform-tools/adb"; return 0; fi
-  if [[ -n "${ANDROID_SDK_ROOT:-}" && -x "$ANDROID_SDK_ROOT/platform-tools/adb" ]]; then echo "$ANDROID_SDK_ROOT/platform-tools/adb"; return 0; fi
-  if [[ -x "$TARGET_HOME/Android/Sdk/platform-tools/adb" ]]; then echo "$TARGET_HOME/Android/Sdk/platform-tools/adb"; return 0; fi
-  if command -v adb >/dev/null 2>&1; then command -v adb; return 0; fi
+  for cand in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "${sdk_roots[@]}"; do
+    [[ -n "$cand" ]] || continue
+    if cand=$(find_sdk_adb "$cand"); then echo "$cand"; return 0; fi
+  done
+  for cand in "${ADB_NAMES[@]}"; do
+    if command -v "$cand" >/dev/null 2>&1; then command -v "$cand"; return 0; fi
+  done
   return 1
 }
 
@@ -257,11 +354,24 @@ if [[ -z "$JAVA_BIN" ]]; then echo "ERROR: could not detect a usable Java; pass 
 if ADB=$(detect_adb); then
   echo "Using adb: $ADB"
 elif [[ -n "$HOME_ARG" ]]; then
-  echo "ERROR: no adb at $TARGET_HOME/Android/Sdk/platform-tools/adb; refusing to shim one from outside." >&2
-  echo "       A --home install deliberately ignores \$ANDROID_HOME and \$ANDROID_SDK_ROOT even when they" >&2
-  echo "       point inside the root at a non-standard path, and ignores PATH — because" >&2
-  echo "       install_sdk_shim OVERWRITES the adb it resolves. Put an SDK at the path above, or pass" >&2
-  echo "       --adb PATH for one you accept being rewritten." >&2
+  # The refusal names exactly the candidates that were probed on THIS platform: the AppData SDK is
+  # a Windows-only candidate (see detect_adb), so a POSIX host is not told to look in a directory
+  # this installer never opens. The POSIX branch is the pre-change installer's text verbatim, so a
+  # POSIX refusal is byte-for-byte unchanged; the parity rows in scripts/test_install.sh pin that.
+  if [[ $IS_WINDOWS -eq 1 ]]; then
+    echo "ERROR: no adb under $TARGET_HOME (looked in $TARGET_HOME/Android/Sdk/platform-tools and" >&2
+    echo "       $TARGET_HOME/AppData/Local/Android/Sdk/platform-tools); refusing to shim one from outside." >&2
+    echo "       A --home install deliberately ignores \$ANDROID_HOME, \$ANDROID_SDK_ROOT and \$LOCALAPPDATA" >&2
+    echo "       even when they point at an SDK, and ignores PATH — because install_sdk_shim OVERWRITES" >&2
+    echo "       the adb it resolves. Put an SDK inside the root, or pass --adb PATH for one you accept" >&2
+    echo "       being rewritten." >&2
+  else
+    echo "ERROR: no adb at $TARGET_HOME/Android/Sdk/platform-tools/adb; refusing to shim one from outside." >&2
+    echo "       A --home install deliberately ignores \$ANDROID_HOME and \$ANDROID_SDK_ROOT even when they" >&2
+    echo "       point inside the root at a non-standard path, and ignores PATH — because" >&2
+    echo "       install_sdk_shim OVERWRITES the adb it resolves. Put an SDK at the path above, or pass" >&2
+    echo "       --adb PATH for one you accept being rewritten." >&2
+  fi
   exit 1
 else
   ADB=""
@@ -313,6 +423,23 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
   cp "$SCRIPT_DIR/adb-wrapper.bat" "$BIN_DIR/adb-wrapper.bat" \
     || { echo "ERROR: cannot install $BIN_DIR/adb-wrapper.bat." >&2; exit 1; }
   echo "Installed: corral.bat, adb-wrapper.bat ($BIN_DIR) — no POSIX corral/adb shim on Windows"
+  # F-NEW-1 on the INSTALL path: a box installed before the .bat path still carries the bash
+  # `adb`/`corral`/`corral-ui` the old installer put on its PATH, and until now only --uninstall
+  # ever looked at them — so an upgrade left them there, including the stray bash `adb` finding F2
+  # was about, still sitting in front of the real adb.exe. They are OURS (the marker decides,
+  # exactly as on uninstall, so a foreign file is never touched), so installing removes them.
+  # Silence about either outcome is the row-15 defect this file already fixed once: both are named.
+  remove_shim "$BIN_DIR/adb" "$MARKER_ADB" '~/bin/adb'
+  remove_shim "$BIN_DIR/corral" "$MARKER_CORRAL" '~/bin/corral'
+  remove_shim "$BIN_DIR/corral-ui" "$MARKER_CORRAL_UI" '~/bin/corral-ui'
+  if [[ -n "$REMOVED" ]]; then
+    echo "Removed legacy POSIX shims from an earlier corral install: ${REMOVED%, }"
+  fi
+  if [[ -n "$KEPT_SHIMS" ]]; then
+    echo "Left alone (not a corral shim; unrecognised content):$KEPT_SHIMS"
+    echo "WARNING: a bash shim left on the Windows PATH shadows/confuses the real adb.exe — an"
+    echo "         extensionless 'adb' especially. Remove or rename it yourself; corral will not."
+  fi
 else
   if ! cp "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb" || ! chmod +x "$BIN_DIR/adb"; then
     echo "ERROR: cannot install the executable adb wrapper at $BIN_DIR/adb." >&2
@@ -470,8 +597,42 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
     echo "    (corral-ui not installed; start corral-ui-all.jar with: \"$JAVA_BIN\" -jar <path-to-corral-ui-all.jar>)"
   fi
   echo
-  echo "Start the daemon in the foreground:"
-  echo "  \"$JAVA_BIN\" -Xms24m -Xmx64m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=64m -XX:TieredStopAtLevel=1 -jar \"$CORRAL_HOME/corral-daemon-all.jar\""
+  # On Linux the daemon gets CORRAL_ADB from the systemd unit's Environment=; Windows has no unit,
+  # and Java cannot exec a bare `adb`, so the start command itself has to carry it or the daemon
+  # comes up with devices:[]. One line per shell: cmd.exe needs `set "K=V"` and `&&`, PowerShell
+  # needs `$env:K='V'` and the `&` call operator — neither form is valid in the other shell, so both
+  # are printed rather than one ambiguous line.
+  # Quoting: cmd.exe's `set "K=V"` keeps a path with spaces, `&`, `^`, `!`, `()` and a LONE `%`
+  # intact — the outer quotes neutralize them (verified by running the printed line in a real
+  # cmd.exe). Only a `"` or a `%NAME%` pair cannot be spelled there at all, and cmd_unspellable
+  # says so instead of printing a command that silently sets a different value. PowerShell's paths
+  # are single-quoted through ps_quote, so a `'` no longer ends the string (it produced "Unexpected
+  # token") and `$`/`&`/`%` in a path stay literal.
+  DAEMON_FLAGS="-Xms24m -Xmx64m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=64m -XX:TieredStopAtLevel=1"
+  WIN_JAVA=$(win_path "$JAVA_BIN")
+  WIN_JAR=$(win_path "$CORRAL_HOME/corral-daemon-all.jar")
+  CMD_NOTE=0
+  if cmd_unspellable "$WIN_JAVA" || cmd_unspellable "$WIN_JAR"; then CMD_NOTE=1; fi
+  if [[ -n "$ADB" ]]; then
+    WIN_ADB=$(win_path "$ADB")
+    cmd_unspellable "$WIN_ADB" && CMD_NOTE=1
+    echo "Start the daemon in the foreground (CORRAL_ADB is what lets it see devices — pick your shell):"
+    if [[ $CMD_NOTE -eq 0 ]]; then
+      echo "  cmd.exe     set \"CORRAL_ADB=$WIN_ADB\" && \"$WIN_JAVA\" $DAEMON_FLAGS -jar \"$WIN_JAR\""
+    fi
+    echo "  PowerShell  \$env:CORRAL_ADB=$(ps_quote "$WIN_ADB"); & $(ps_quote "$WIN_JAVA") $DAEMON_FLAGS -jar $(ps_quote "$WIN_JAR")"
+  else
+    echo "Start the daemon in the foreground — no adb was found, so the command carries no CORRAL_ADB"
+    echo "  and the daemon will report no devices (install platform-tools, or re-run with --adb PATH):"
+    if [[ $CMD_NOTE -eq 0 ]]; then
+      echo "  cmd.exe     \"$WIN_JAVA\" $DAEMON_FLAGS -jar \"$WIN_JAR\""
+    fi
+    echo "  PowerShell  & $(ps_quote "$WIN_JAVA") $DAEMON_FLAGS -jar $(ps_quote "$WIN_JAR")"
+  fi
+  if [[ $CMD_NOTE -eq 1 ]]; then
+    echo "  cmd.exe     (no line above: a path contains a %NAME% pair or a \" that cmd.exe expands or"
+    echo "               strips and cannot be escaped at the prompt — use the PowerShell line)"
+  fi
   echo
   echo "Smoke-test from cmd.exe/PowerShell — add %USERPROFILE%\\bin to your PATH first (the PATH and"
   echo "  CORRAL_REAL_ADB exports this install wrote went to .bashrc/.zshrc only; cmd.exe/PowerShell never read them):"

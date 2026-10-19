@@ -367,8 +367,12 @@ shim_sandbox() { # shim_sandbox <home> [args...]
 # a missing adb before the closing message), default shim, and a PATH of only the tools install.sh needs
 # so the host's own /usr/bin/adb cannot leak in.
 CORETOOLS="$TMP/coretools"; mkdir -p "$CORETOOLS"
+# Wrapper scripts, NOT symlinks: an MSYS symlink to /usr/bin/<tool> makes the child resolve that
+# POSIX path as its own image and fail to find its runtime DLLs on a real Windows host ("error while
+# loading shared libraries: ?") — the tool never runs, so the row failed for a reason that has
+# nothing to do with install.sh. A one-line exec wrapper behaves identically on Linux and MSYS.
 for t in dirname sed head awk grep cp chmod mkdir cut sha256sum readlink mv rm cat; do
-  p=$(command -v "$t") && ln -sf "$p" "$CORETOOLS/$t"
+  p=$(command -v "$t") && printf '#!/bin/sh\nexec "%s" "$@"\n' "$p" > "$CORETOOLS/$t" && chmod +x "$CORETOOLS/$t"
 done
 BASH_BIN=$(command -v bash)
 TMPHOME10="$TMP/home10"; mkdir -p "$TMPHOME10/bin"; : > "$TMPHOME10/.bashrc"
@@ -523,6 +527,65 @@ else
   check "POSIX: installed files + contents match the pre-change installer" cmp -s "$TMP/posix-pre.files" "$TMP/posix-new.files"
 fi
 
+# ===== POSIX guard, second scenario: an SDK at the Windows location must not change POSIX (SF1) ==
+# The guard above always puts the SDK at the classic $HOME/Android/Sdk path AND passes --adb, so it
+# never exercises adb DETECTION — which is exactly the code this change touched. With an SDK (only)
+# under $HOME/AppData/Local/Android/Sdk, no --adb and no SDK on PATH, detection decides everything:
+# the change's parent (f4f2270) refuses (rc=1, nothing written), while HEAD without the IS_WINDOWS
+# gate resolves that adb, wraps it with install_sdk_shim and exits 0 — a Linux behaviour change no
+# row above would have caught. The reference is the parent commit, and the parity claim is the full
+# one (exit code, messages and installed file set): the POSIX refusal text is the parent's verbatim,
+# because only the Windows branch may name the Windows SDK location. The skip is LOUD, as above.
+if [ "$BUILD" != 1 ]; then
+  echo "skip: POSIX AppData-path guard needs the source tree + git history (a deployed bundle has neither)"
+elif ! git -C "$ROOT" cat-file -e f4f2270:scripts/install.sh 2>/dev/null; then
+  echo "skip: POSIX AppData-path guard — parent commit f4f2270 is not in this clone, so the Windows"
+  echo "      SDK location is UNGUARDED on POSIX here; CI must check out with fetch-depth: 0."
+else
+  for label in adpre adnew; do
+    mkdir -p "$TMP/appdata-$label-bundle"
+    cp "$SRC/adb-wrapper" "$SRC/corral" "$SRC/corral.service" "$SRC/corral-gate.gradle.kts" \
+       "$SRC/corral-rules" "$TMP/appdata-$label-bundle/"
+  done
+  git -C "$ROOT" show f4f2270:scripts/install.sh > "$TMP/appdata-adpre-bundle/install.sh"
+  cp "$SRC/install.sh" "$TMP/appdata-adnew-bundle/install.sh"
+
+  # The sandbox's ONLY adb sits at the AppData path, spelled the POSIX way (`adb`, because ADB_NAMES
+  # on POSIX is `adb` alone). One sandbox path, reused, so both runs name identical absolute paths.
+  AD_HOME="$TMP/appdata-home"
+  AD_ADB="$AD_HOME/AppData/Local/Android/Sdk/platform-tools/adb"
+  appdata_snapshot() { # appdata_snapshot <bundle-dir> <label>
+    rm -rf "$AD_HOME"
+    mkdir -p "$AD_HOME/AppData/Local/Android/Sdk/platform-tools" "$AD_HOME/bin"
+    printf '%s\n' '#!/bin/sh' 'echo "appdata-adb $@"' > "$AD_ADB"
+    chmod +x "$AD_ADB"
+    : > "$AD_HOME/.bashrc"
+    env HOME="$AD_HOME" PATH="$STUB:$PATH" bash "$1/install.sh" --java "$FAKE_JAVA" --jar "$JAR" \
+      --no-ui --home "$AD_HOME" > "$TMP/$2.log" 2>&1
+    echo "$?" > "$TMP/$2.rc"
+    ( cd "$AD_HOME" && find . -type f | sort | xargs sha256sum ) > "$TMP/$2.files"
+  }
+  appdata_snapshot "$TMP/appdata-adpre-bundle" ad-pre
+  appdata_snapshot "$TMP/appdata-adnew-bundle" ad-new
+  # Discriminating rows: each fails the moment the AppData candidate resolves on POSIX.
+  check "POSIX+AppData SDK: both refuse the out-of-tree adb — HEAD's exit code is the parent's (rc=1)" \
+    bash -c "[ \"\$(cat '$TMP/ad-pre.rc')\" = 1 ] && cmp -s '$TMP/ad-pre.rc' '$TMP/ad-new.rc'"
+  check "POSIX+AppData SDK: HEAD's refusal message is the parent's, byte-for-byte" \
+    cmp -s "$TMP/ad-pre.log" "$TMP/ad-new.log"
+  check "POSIX+AppData SDK: HEAD's file set + hashes are the parent's (nothing resolved, nothing shimmed)" \
+    cmp -s "$TMP/ad-pre.files" "$TMP/ad-new.files"
+  check "POSIX+AppData SDK: HEAD never gets as far as USING or shimming that adb" bash -c \
+    "! grep -q 'Using adb' '$TMP/ad-new.log' && ! grep -q 'Ensured SDK adb shim' '$TMP/ad-new.log'"
+  # Guard rows: true of both installers, and they define what "refused" has to mean — a refusal that
+  # stopped being a refusal fails here even though both installers would agree with each other.
+  check "POSIX+AppData SDK: the refusal is the adb one, and it offers --adb" bash -c \
+    "grep -q 'refusing to shim one from outside' '$TMP/ad-new.log' && grep -q -- '--adb' '$TMP/ad-new.log' && grep -q -- '--adb' '$TMP/ad-pre.log'"
+  check "POSIX+AppData SDK: the AppData adb is left as a real adb (no adb.real, no wrapper over it)" \
+    bash -c "[ ! -e '$AD_ADB.real' ] && grep -q 'appdata-adb' '$AD_ADB' && ! grep -q 'corral adb wrapper' '$AD_ADB'"
+  check "POSIX+AppData SDK: nothing was installed into the sandbox by the refused run" \
+    bash -c "[ ! -e '$AD_HOME/.corral' ] && [ ! -e '$AD_HOME/bin/adb' ] && [ ! -e '$AD_HOME/bin/corral' ]"
+fi
+
 # ===== uninstall provenance (POSIX): only remove shims whose content carries our marker =====
 # The row-14 defect class: uninstall must never delete a file Corral did not install. Overwrite our
 # own ~/bin/corral with a hand-written one and plant a user's ~/bin/adb; both must survive. UI on, so
@@ -573,8 +636,11 @@ check "win uninstall: the user's ~/bin/adb (POSIX name) survives" bash -c \
 check "win uninstall: the hand-edited corral.bat survives" bash -c \
   "[ -f '$TMPHOME_WU/bin/corral.bat' ] && grep -q 'user corral' '$TMPHOME_WU/bin/corral.bat'"
 check "win uninstall: our adb-wrapper.bat is removed" test ! -e "$TMPHOME_WU/bin/adb-wrapper.bat"
-check "win uninstall: summary names the removed .bat shim and says the POSIX names were left alone" bash -c \
-  "grep -qF '~/bin/adb-wrapper.bat' '$TMP/winup-uninstall.log' && grep -q 'never installs here' '$TMP/winup-uninstall.log'"
+# The operator's own ~/bin/adb is unrecognised, so the generic both-platform summary names it under
+# "Left alone"; there is no longer a Windows-specific line claiming the POSIX names are never
+# installed here (they are ours on an upgraded box, and uninstall now removes those — see below).
+check "win uninstall: summary names the removed .bat shim and the kept foreign ~/bin/adb" bash -c \
+  "grep -qF '~/bin/adb-wrapper.bat' '$TMP/winup-uninstall.log' && grep -q 'Left alone' '$TMP/winup-uninstall.log' && grep -qF '$TMPHOME_WU/bin/adb' '$TMP/winup-uninstall.log' && ! grep -q 'never installs here' '$TMP/winup-uninstall.log'"
 # The Windows summary must name what it removed and never list the POSIX shims as removed.
 check "win uninstall: the Removed: line names only the removed .bat shim" bash -c \
   "line=\$(grep '^Removed:' '$TMP/winup-uninstall.log'); printf '%s' \"\$line\" | grep -qF '~/bin/adb-wrapper.bat' && ! printf '%s' \"\$line\" | grep -qE '~/bin/(adb|corral),'"
@@ -587,6 +653,328 @@ check "win uninstall: our corral.bat + adb-wrapper.bat are removed" bash -c \
   "[ ! -e '$TMPHOME_W/bin/corral.bat' ] && [ ! -e '$TMPHOME_W/bin/adb-wrapper.bat' ]"
 check "win uninstall: summary names both .bat shims" bash -c \
   "grep -qF '~/bin/corral.bat' '$TMP/win-uninstall.log' && grep -qF '~/bin/adb-wrapper.bat' '$TMP/win-uninstall.log'"
+
+# ===== Windows: adb under the standard %LOCALAPPDATA%\Android\Sdk location (F-NEW-2) =====
+# Helpers: the installer prints one daemon start line per shell, so read the CORRAL_ADB out of the
+# printed line itself (same_file compares the value with the adb the installer resolved — it works
+# whichever way the path is spelled, POSIX or Windows). Parsing is done with shell builtins on
+# purpose: a regex argument containing a `"` is mangled by the MSYS runtime when it reaches git
+# bash's native grep/sed, so a quoted-string pattern silently never matches on a real Windows host.
+win_cmd_adb() { # win_cmd_adb <log>
+  local line v
+  while IFS= read -r line; do
+    case "$line" in
+      '  cmd.exe     set "CORRAL_ADB='*)
+        v=${line#*CORRAL_ADB=}; printf '%s\n' "${v%%\"*}"; return 0;;
+    esac
+  done < "$1"
+}
+win_ps_adb() { # win_ps_adb <log>
+  local line v
+  while IFS= read -r line; do
+    case "$line" in
+      '  PowerShell  '*"CORRAL_ADB='"*)
+        v=${line#*CORRAL_ADB=\'}; printf '%s\n' "${v%%\'*}"; return 0;;
+    esac
+  done < "$1"
+}
+has_both_shell_lines() { # has_both_shell_lines <log>
+  local line cmd=0 ps=0
+  while IFS= read -r line; do
+    case "$line" in '  cmd.exe     set "CORRAL_ADB='*) cmd=1;; esac
+    case "$line" in '  PowerShell  '*"CORRAL_ADB='"*) ps=1;; esac
+  done < "$1"
+  [ "$cmd" = 1 ] && [ "$ps" = 1 ]
+}
+same_file() { [ -n "$1" ] && [ -x "$1" ] && cmp -s "$1" "$2"; }
+same_value() { [ -n "$1" ] && [ "$1" = "$2" ]; }
+
+# A default Windows box keeps the SDK ONLY there, with ANDROID_HOME/ANDROID_SDK_ROOT unset and no
+# adb on PATH: before this change the installer warned "no real adb found" and left CORRAL_ADB unset,
+# so the daemon it told the operator to start could never see a device. No --adb and no --home here —
+# this is the detection path a real operator hits.
+WIN_APP_HOME="$TMP/home-win-appdata"; WIN_APP_SDK="$WIN_APP_HOME/AppData/Local/Android/Sdk"
+WIN_APP_ADB="$WIN_APP_SDK/platform-tools/adb.exe"
+mkdir -p "$WIN_APP_SDK/platform-tools" "$WIN_APP_HOME/bin"; : > "$WIN_APP_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "win-appdata-adb $@"' > "$WIN_APP_ADB"
+chmod +x "$WIN_APP_ADB"
+
+env HOME="$WIN_APP_HOME" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" \
+  --java "$FAKE_JAVA" --jar "$JAR" --no-ui >"$TMP/win-appdata.log" 2>&1; rcapp=$?
+dump_on_fail "$rcapp" "$TMP/win-appdata.log"
+check "win appdata: install exits 0" test "$rcapp" -eq 0
+check "win appdata: adb IS found at \$HOME/AppData/Local/Android/Sdk/platform-tools/adb.exe" \
+  grep -qF "Using adb: $WIN_APP_ADB" "$TMP/win-appdata.log"
+check "win appdata: the 'no real adb found' warning is ABSENT" \
+  bash -c "! grep -q 'no real adb found' '$TMP/win-appdata.log'"
+# the adb is threaded into the closing message the operator actually starts the daemon from
+check "win appdata: the daemon start instruction carries CORRAL_ADB" \
+  bash -c "grep -q 'CORRAL_ADB=' '$TMP/win-appdata.log'"
+check "win appdata: CORRAL_ADB names the adb the installer resolved (same file, executable)" \
+  same_file "$(win_cmd_adb "$TMP/win-appdata.log")" "$WIN_APP_ADB"
+check "win appdata: the daemon instruction is printed for cmd.exe and PowerShell" \
+  has_both_shell_lines "$TMP/win-appdata.log"
+check "win appdata: both printed forms carry the SAME CORRAL_ADB value" \
+  same_value "$(win_cmd_adb "$TMP/win-appdata.log")" "$(win_ps_adb "$TMP/win-appdata.log")"
+
+# ===== Windows: --home stays confined away from the operator's AppData SDK (F-NEW-2) =====
+# OP_SDK stands in for the operator's REAL %LOCALAPPDATA%\Android\Sdk. LOCALAPPDATA is pointed at it
+# and it is handed to both installs; the sandbox has none, so a --home install must refuse rather
+# than resolve (and, on POSIX, overwrite) an adb from outside the root.
+OP_SDK="$TMP/operator-appdata"
+mkdir -p "$OP_SDK/Android/Sdk/platform-tools"
+printf '%s\n' '#!/bin/sh' 'echo "operator-adb $@"' > "$OP_SDK/Android/Sdk/platform-tools/adb.exe"
+chmod +x "$OP_SDK/Android/Sdk/platform-tools/adb.exe"
+OP_SDK_SHA=$(sha256sum "$OP_SDK/Android/Sdk/platform-tools/adb.exe" | cut -d' ' -f1)
+OP_LOCALAPPDATA=$(cygpath -w "$OP_SDK" 2>/dev/null || printf '%s' "$OP_SDK")
+REALISH_HOME="$TMP/operator-home"; mkdir -p "$REALISH_HOME"; : > "$REALISH_HOME/.bashrc"
+
+WIN_CONF_HOME="$TMP/home-win-confined"; WIN_CONF_SDK="$WIN_CONF_HOME/AppData/Local/Android/Sdk"
+mkdir -p "$WIN_CONF_SDK/platform-tools" "$WIN_CONF_HOME/bin"; : > "$WIN_CONF_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "win-confined-adb $@"' > "$WIN_CONF_SDK/platform-tools/adb.exe"
+chmod +x "$WIN_CONF_SDK/platform-tools/adb.exe"
+env HOME="$REALISH_HOME" PATH="$WIN_STUB:$STUB:$PATH" LOCALAPPDATA="$OP_LOCALAPPDATA" \
+  bash "$SRC/install.sh" --java "$FAKE_JAVA" --jar "$JAR" --no-ui --home "$WIN_CONF_HOME" \
+  >"$TMP/win-confined.log" 2>&1; rccf=$?
+dump_on_fail "$rccf" "$TMP/win-confined.log"
+check "win --home: an in-root AppData SDK is used, not the operator's" \
+  grep -qF "Using adb: $WIN_CONF_SDK/platform-tools/adb.exe" "$TMP/win-confined.log"
+check "win --home: the daemon line's CORRAL_ADB is that in-root adb.exe" \
+  same_file "$(win_cmd_adb "$TMP/win-confined.log")" "$WIN_CONF_SDK/platform-tools/adb.exe"
+
+WIN_EMPTY_HOME="$TMP/home-win-empty"; mkdir -p "$WIN_EMPTY_HOME/bin"; : > "$WIN_EMPTY_HOME/.bashrc"
+env HOME="$REALISH_HOME" PATH="$WIN_STUB:$STUB:$PATH" LOCALAPPDATA="$OP_LOCALAPPDATA" \
+  bash "$SRC/install.sh" --java "$FAKE_JAVA" --jar "$JAR" --no-ui --home "$WIN_EMPTY_HOME" \
+  >"$TMP/win-confine-refuse.log" 2>&1; rcrf=$?
+check "win --home: refuses to reach the operator's AppData SDK (exit non-zero)" test "$rcrf" -ne 0
+# The POSIX analogue (:334-335) greps the refusal REASON. Assert it here too: without it any
+# unrelated early failure (a missing jar, a bad --java) would pass all three rows below.
+check "win --home: the refusal is the adb one and it offers --adb" bash -c \
+  "[ '$rcrf' -ne 0 ] && grep -q -- '--adb' '$TMP/win-confine-refuse.log' && grep -q 'refusing to shim one from outside' '$TMP/win-confine-refuse.log' && grep -q 'looked in' '$TMP/win-confine-refuse.log'"
+check "win --home: the outside SDK adb.exe is byte-for-byte untouched" \
+  test "$OP_SDK_SHA" = "$(sha256sum "$OP_SDK/Android/Sdk/platform-tools/adb.exe" | cut -d' ' -f1)"
+check "win --home: nothing at all was written into the empty sandbox" bash -c \
+  "[ ! -e '$WIN_EMPTY_HOME/.corral' ] && [ ! -e '$WIN_EMPTY_HOME/bin/adb' ] && [ ! -e '$WIN_EMPTY_HOME/bin/corral.bat' ] && [ ! -e '$WIN_EMPTY_HOME/AppData' ]"
+
+# ===== Windows uninstall of the legacy pre-.bat POSIX shims (F-NEW-1) =====
+# A box installed BEFORE the .bat path still carries the bash `corral`/`adb`/`corral-ui` the old
+# installer put on its PATH — the stray bash `adb` finding F2 was about. Uninstall used to gate those
+# three names on IS_WINDOWS, so it never looked at them and left them forever. The sandbox really is
+# an upgraded box: the POSIX installer writes the shims, then the uninstall runs as Windows.
+legacy_posix_install() { # legacy_posix_install <home> <sdk-adb>
+  env HOME="$1" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$2" \
+    --jar "$JAR" --home "$1" --ui
+}
+legacy_win_uninstall() { # legacy_win_uninstall <home>
+  env HOME="$1" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$1" --uninstall
+}
+
+WIN_LEG_HOME="$TMP/home-win-legacy"; WIN_LEG_SDK="$WIN_LEG_HOME/Android/Sdk/platform-tools"
+mkdir -p "$WIN_LEG_SDK" "$WIN_LEG_HOME/bin"; : > "$WIN_LEG_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "legacy-sdk-adb $@"' > "$WIN_LEG_SDK/adb"; chmod +x "$WIN_LEG_SDK/adb"
+legacy_posix_install "$WIN_LEG_HOME" "$WIN_LEG_SDK/adb" >"$TMP/win-legacy-posix.log" 2>&1; rclp=$?
+dump_on_fail "$rclp" "$TMP/win-legacy-posix.log"
+check "win legacy: the pre-change install really left bash adb/corral/corral-ui behind (markers)" bash -c \
+  "[ -x '$WIN_LEG_HOME/bin/adb' ] && [ -x '$WIN_LEG_HOME/bin/corral' ] && [ -x '$WIN_LEG_HOME/bin/corral-ui' ] && grep -q 'corral adb wrapper' '$WIN_LEG_HOME/bin/adb' && grep -q 'dev.corral.CorralCli' '$WIN_LEG_HOME/bin/corral'"
+legacy_win_uninstall "$WIN_LEG_HOME" >"$TMP/win-legacy-uninstall.log" 2>&1; rclu=$?
+dump_on_fail "$rclu" "$TMP/win-legacy-uninstall.log"
+check "win legacy: uninstall exits 0" test "$rclu" -eq 0
+check "win legacy: the legacy bash ~/bin/adb carrying our marker IS removed" test ! -e "$WIN_LEG_HOME/bin/adb"
+check "win legacy: the legacy bash ~/bin/corral carrying our marker IS removed" test ! -e "$WIN_LEG_HOME/bin/corral"
+check "win legacy: the legacy bash ~/bin/corral-ui carrying our marker IS removed" test ! -e "$WIN_LEG_HOME/bin/corral-ui"
+check "win legacy: the summary names the legacy shims under Removed:" bash -c \
+  "line=\$(grep '^Removed:' '$TMP/win-legacy-uninstall.log'); printf '%s' \"\$line\" | grep -qF '~/bin/adb,' && printf '%s' \"\$line\" | grep -qF '~/bin/corral,' && printf '%s' \"\$line\" | grep -qF '~/bin/corral-ui,'"
+check "win legacy: nothing is claimed to be 'never installs here' any more" \
+  bash -c "! grep -q 'never installs here' '$TMP/win-legacy-uninstall.log'"
+
+# The other half, and the P1 data-loss guard: an operator's OWN ~/bin/adb has no marker and must
+# survive a Windows uninstall byte-for-byte while our legacy ~/bin/corral next to it does not.
+WIN_FOR_HOME="$TMP/home-win-foreign"; WIN_FOR_SDK="$WIN_FOR_HOME/Android/Sdk/platform-tools"
+mkdir -p "$WIN_FOR_SDK" "$WIN_FOR_HOME/bin"; : > "$WIN_FOR_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "foreign-sdk-adb $@"' > "$WIN_FOR_SDK/adb"; chmod +x "$WIN_FOR_SDK/adb"
+legacy_posix_install "$WIN_FOR_HOME" "$WIN_FOR_SDK/adb" >"$TMP/win-foreign-posix.log" 2>&1; rcfp=$?
+dump_on_fail "$rcfp" "$TMP/win-foreign-posix.log"
+printf '%s\n' '#!/bin/sh' 'echo my-own-adb' > "$WIN_FOR_HOME/bin/adb"
+chmod +x "$WIN_FOR_HOME/bin/adb"
+FOREIGN_SHA=$(sha256sum "$WIN_FOR_HOME/bin/adb" | cut -d' ' -f1)
+legacy_win_uninstall "$WIN_FOR_HOME" >"$TMP/win-foreign-uninstall.log" 2>&1; rcfu=$?
+dump_on_fail "$rcfu" "$TMP/win-foreign-uninstall.log"
+check "win foreign: uninstall exits 0" test "$rcfu" -eq 0
+check "win foreign: the operator's own ~/bin/adb SURVIVES byte-for-byte" bash -c \
+  "[ -f '$WIN_FOR_HOME/bin/adb' ] && [ \"\$(sha256sum '$WIN_FOR_HOME/bin/adb' | cut -d' ' -f1)\" = '$FOREIGN_SHA' ] && grep -q 'my-own-adb' '$WIN_FOR_HOME/bin/adb'"
+check "win foreign: our legacy ~/bin/corral next to it is still removed" \
+  test ! -e "$WIN_FOR_HOME/bin/corral"
+check "win foreign: the kept file is named under 'Left alone', never under 'Removed:'" bash -c \
+  "grep -q 'Left alone' '$TMP/win-foreign-uninstall.log' && grep -qF '$WIN_FOR_HOME/bin/adb' '$TMP/win-foreign-uninstall.log' && ! grep '^Removed:' '$TMP/win-foreign-uninstall.log' | grep -qF '~/bin/adb,'"
+
+# ===== the shim markers really match the shipped shims (a guard that can fail) =====
+# remove_shim deletes a file ONLY when its content carries its marker. If an edit to a shipped shim
+# changes that string the marker stops matching in silence, and every legacy shim survives on both
+# --uninstall and the Windows install — the "F2 never fixed" failure mode. Pin every marker to the
+# file it is meant to recognise, so a shim edit has to update the marker on purpose.
+check "markers: ~/bin/adb marker is in scripts/adb-wrapper" \
+  grep -qF 'corral adb wrapper' "$SRC/adb-wrapper"
+check "markers: ~/bin/corral marker is in scripts/corral" \
+  grep -qF 'CORRAL_JAR:-$HOME/.corral/corral-daemon-all.jar' "$SRC/corral"
+check "markers: ~/bin/corral-ui marker is in scripts/corral-ui" \
+  grep -qF 'CORRAL_UI_JAR:-$HOME/.corral/corral-ui-all.jar' "$SRC/corral-ui"
+check "markers: ~/bin/corral.bat marker is in scripts/corral.bat" \
+  grep -qF 'dev.corral.CorralCli' "$SRC/corral.bat"
+
+# ===== Windows INSTALL on an upgraded box: our legacy POSIX shims go, a foreign file stays (SF2) ==
+# A box installed before the .bat path carries the bash adb/corral/corral-ui on its PATH. --uninstall
+# dealt with them; a plain upgrade did not, so the stray bash `adb` finding F2 was about stayed in
+# front of the real adb.exe for the life of the box. These sandboxes ARE such upgrades: the POSIX
+# installer writes the shims, then the Windows installer runs over them.
+WIN_UPG_HOME="$TMP/home-win-upgrade"; WIN_UPG_SDK="$WIN_UPG_HOME/Android/Sdk/platform-tools"
+mkdir -p "$WIN_UPG_SDK" "$WIN_UPG_HOME/bin"; : > "$WIN_UPG_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "upg-sdk-adb $@"' > "$WIN_UPG_SDK/adb"; chmod +x "$WIN_UPG_SDK/adb"
+legacy_posix_install "$WIN_UPG_HOME" "$WIN_UPG_SDK/adb" >"$TMP/win-upgrade-posix.log" 2>&1; rcup=$?
+dump_on_fail "$rcup" "$TMP/win-upgrade-posix.log"
+check "upgrade: the pre-change POSIX install left bash adb/corral/corral-ui behind (the hazard)" bash -c \
+  "[ -x '$WIN_UPG_HOME/bin/adb' ] && [ -x '$WIN_UPG_HOME/bin/corral' ] && [ -x '$WIN_UPG_HOME/bin/corral-ui' ]"
+env HOME="$WIN_UPG_HOME" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$WIN_UPG_SDK/adb" --jar "$JAR" --no-ui --home "$WIN_UPG_HOME" >"$TMP/win-upgrade-install.log" 2>&1; rcwi=$?
+dump_on_fail "$rcwi" "$TMP/win-upgrade-install.log"
+check "upgrade: the Windows install exits 0" test "$rcwi" -eq 0
+check "upgrade: the stale bash ~/bin/adb is GONE after the install (the F2 hazard)" \
+  test ! -e "$WIN_UPG_HOME/bin/adb"
+check "upgrade: the stale bash ~/bin/corral and ~/bin/corral-ui are gone too" bash -c \
+  "[ ! -e '$WIN_UPG_HOME/bin/corral' ] && [ ! -e '$WIN_UPG_HOME/bin/corral-ui' ]"
+check "upgrade: the install SAYS which legacy shims it removed" bash -c \
+  "grep -q 'Removed legacy POSIX shims from an earlier corral install' '$TMP/win-upgrade-install.log' && grep -qF '~/bin/adb,' '$TMP/win-upgrade-install.log' && grep -qF '~/bin/corral-ui' '$TMP/win-upgrade-install.log'"
+check "upgrade: the .bat shims are installed alongside" bash -c \
+  "[ -f '$WIN_UPG_HOME/bin/corral.bat' ] && [ -f '$WIN_UPG_HOME/bin/adb-wrapper.bat' ]"
+
+# The P1 data-loss half: an operator's OWN ~/bin/adb has no marker. It must survive the install
+# byte-for-byte while our legacy ~/bin/corral next to it is removed, and the output must say so.
+WIN_FORUP_HOME="$TMP/home-win-upgrade-foreign"; WIN_FORUP_SDK="$WIN_FORUP_HOME/Android/Sdk/platform-tools"
+mkdir -p "$WIN_FORUP_SDK" "$WIN_FORUP_HOME/bin"; : > "$WIN_FORUP_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "forup-sdk-adb $@"' > "$WIN_FORUP_SDK/adb"; chmod +x "$WIN_FORUP_SDK/adb"
+legacy_posix_install "$WIN_FORUP_HOME" "$WIN_FORUP_SDK/adb" >"$TMP/win-upgfor-posix.log" 2>&1; rcfp2=$?
+dump_on_fail "$rcfp2" "$TMP/win-upgfor-posix.log"
+printf '%s\n' '#!/bin/sh' 'echo my-own-adb' > "$WIN_FORUP_HOME/bin/adb"
+chmod +x "$WIN_FORUP_HOME/bin/adb"
+FORUP_SHA=$(sha256sum "$WIN_FORUP_HOME/bin/adb" | cut -d' ' -f1)
+env HOME="$WIN_FORUP_HOME" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$WIN_FORUP_SDK/adb" --jar "$JAR" --no-ui --home "$WIN_FORUP_HOME" >"$TMP/win-upgfor-install.log" 2>&1; rcwf=$?
+dump_on_fail "$rcwf" "$TMP/win-upgfor-install.log"
+check "upgrade+foreign: the Windows install exits 0" test "$rcwf" -eq 0
+check "upgrade+foreign: the operator's own ~/bin/adb SURVIVES the install byte-for-byte" bash -c \
+  "[ -f '$WIN_FORUP_HOME/bin/adb' ] && [ \"\$(sha256sum '$WIN_FORUP_HOME/bin/adb' | cut -d' ' -f1)\" = '$FORUP_SHA' ] && grep -q 'my-own-adb' '$WIN_FORUP_HOME/bin/adb'"
+check "upgrade+foreign: our legacy ~/bin/corral next to it is still removed" \
+  test ! -e "$WIN_FORUP_HOME/bin/corral"
+check "upgrade+foreign: the install names the kept file AND warns it is still on the PATH" bash -c \
+  "grep -q 'Left alone' '$TMP/win-upgfor-install.log' && grep -qF '$WIN_FORUP_HOME/bin/adb' '$TMP/win-upgfor-install.log' && grep -q 'WARNING' '$TMP/win-upgfor-install.log' && grep -q 'shadows/confuses the real adb.exe' '$TMP/win-upgfor-install.log'"
+check "upgrade+foreign: the removed list names our corral shims, never the foreign ~/bin/adb" bash -c \
+  "line=\$(grep 'Removed legacy POSIX shims' '$TMP/win-upgfor-install.log'); printf '%s' \"\$line\" | grep -qF '~/bin/corral,' && ! printf '%s' \"\$line\" | grep -qF '~/bin/adb,'"
+
+# The strengthened ~/bin/corral marker must still spare an operator's own launcher: this one runs
+# the very main class the old marker keyed on (the false positive the marker change exists to
+# avoid), so this row FAILS against the FQN-only marker.
+WIN_MARK_HOME="$TMP/home-win-marker"; WIN_MARK_SDK="$WIN_MARK_HOME/Android/Sdk/platform-tools"
+mkdir -p "$WIN_MARK_SDK" "$WIN_MARK_HOME/bin"; : > "$WIN_MARK_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "mark-sdk-adb $@"' > "$WIN_MARK_SDK/adb"; chmod +x "$WIN_MARK_SDK/adb"
+legacy_posix_install "$WIN_MARK_HOME" "$WIN_MARK_SDK/adb" >"$TMP/win-marker-posix.log" 2>&1; rcml=$?
+dump_on_fail "$rcml" "$TMP/win-marker-posix.log"
+printf '%s\n' '#!/bin/sh' 'exec java -cp "$HOME/.corral/corral-daemon-all.jar" dev.corral.CorralCli "$@"' \
+  > "$WIN_MARK_HOME/bin/corral"
+MARK_SHA=$(sha256sum "$WIN_MARK_HOME/bin/corral" | cut -d' ' -f1)
+env HOME="$WIN_MARK_HOME" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$WIN_MARK_SDK/adb" --jar "$JAR" --no-ui --home "$WIN_MARK_HOME" >"$TMP/win-marker-install.log" 2>&1
+check "marker: a hand-written ~/bin/corral naming dev.corral.CorralCli SURVIVES (the FQN-only marker deleted it)" bash -c \
+  "[ -f '$WIN_MARK_HOME/bin/corral' ] && [ \"\$(sha256sum '$WIN_MARK_HOME/bin/corral' | cut -d' ' -f1)\" = '$MARK_SHA' ]"
+check "marker: the install reports it under 'Left alone'" bash -c \
+  "grep -q 'Left alone' '$TMP/win-marker-install.log' && grep -qF '$WIN_MARK_HOME/bin/corral' '$TMP/win-marker-install.log'"
+
+# ===== the printed start commands survive a real path (spaces + `&` + `'`); NIT 7 =====
+# These two lines are the operator's only way to start the daemon with CORRAL_ADB on Windows, so
+# their quoting has to hold for a real SDK path. The sandbox below puts the SDK under a directory
+# whose name has a space, an `&` AND a `'`; the test then feeds the assignment from each printed
+# line to the REAL shells on this host (cmd.exe through its command-line parser, PowerShell through
+# -Command -) and requires the value that lands in the environment to be byte-exact. The SDK sits
+# at the CLASSIC path on purpose: the row then isolates the quoting from adb detection, so it probes
+# exactly the fix and not the Windows-location lookup the rows above already cover.
+WIN_ESC_HOME="$TMP/home win's&esc"; WIN_ESC_ADB="$WIN_ESC_HOME/Android/Sdk/platform-tools/adb.exe"
+mkdir -p "$WIN_ESC_HOME/Android/Sdk/platform-tools" "$WIN_ESC_HOME/bin"; : > "$WIN_ESC_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "esc-adb $@"' > "$WIN_ESC_ADB"; chmod +x "$WIN_ESC_ADB"
+env HOME="$TMPHOME" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --jar "$JAR" --no-ui --home "$WIN_ESC_HOME" >"$TMP/win-escape.log" 2>&1; rce=$?
+dump_on_fail "$rce" "$TMP/win-escape.log"
+check "escape: install with a space, an & and a ' in the SDK path exits 0" test "$rce" -eq 0
+check "escape: adb is resolved from that path" grep -qF "Using adb: $WIN_ESC_ADB" "$TMP/win-escape.log"
+
+# Read the assignment out of each printed line with shell builtins: a regex containing a `"` is
+# mangled on the way to grep on a real Windows host (see the note on win_cmd_adb above).
+win_cmd_assign() { # win_cmd_assign <log> -> the whole `set "CORRAL_ADB=..."` statement from the cmd.exe line
+  local line v
+  while IFS= read -r line; do
+    case "$line" in
+      '  cmd.exe     set "CORRAL_ADB='*)
+        v=${line#"  cmd.exe     "}      # strip the printed prompt label, keep the statement
+        printf '%s\n' "${v%% && *}"     # drop the ` && "java" ...` tail
+        return 0;;
+    esac
+  done < "$1"
+}
+win_ps_assign() { # win_ps_assign <log> -> the `$env:CORRAL_ADB=...` assignment the PowerShell line uses
+  local line v
+  while IFS= read -r line; do
+    case "$line" in
+      '  PowerShell  '*"CORRAL_ADB="*'; & '*)
+        v=${line#*CORRAL_ADB=}
+        printf '%s\n' "\$env:CORRAL_ADB=${v%%; & *}"
+        return 0;;
+    esac
+  done < "$1"
+}
+CMD_ASSIGN=$(win_cmd_assign "$TMP/win-escape.log")
+PS_ASSIGN=$(win_ps_assign "$TMP/win-escape.log")
+check "escape: a cmd.exe line is printed for that path" test -n "$CMD_ASSIGN"
+check "escape: a PowerShell line is printed for that path" test -n "$PS_ASSIGN"
+check "escape: the PowerShell paths are single-quoted, so a \$ in a path cannot expand" bash -c \
+  "grep -qF \"; & '\" '$TMP/win-escape.log' && grep -q \"\\-jar '\" '$TMP/win-escape.log'"
+
+# WIN_ESC_EXP is the same spelling the installer printed (win_path == cygpath -w here); on a host
+# without cygpath both sides stay POSIX.
+WIN_ESC_EXP=$(cygpath -w "$WIN_ESC_ADB" 2>/dev/null || printf '%s' "$WIN_ESC_ADB")
+if command -v cmd.exe >/dev/null 2>&1; then
+  cmd_env_value() { # cmd_env_value <set-statement> -> what a real cmd.exe stores, read back
+    printf '%s\r\nset CORRAL_ADB\r\n' "$1" | cmd.exe 2>/dev/null | tr -d '\r' | while IFS= read -r l; do
+      case "$l" in CORRAL_ADB=*) printf '%s\n' "${l#CORRAL_ADB=}";; esac
+    done
+  }
+  check "escape: a REAL cmd.exe stores the exact path (spaces, & and ' intact)" \
+    same_value "$(cmd_env_value "$CMD_ASSIGN")" "$WIN_ESC_EXP"
+else
+  echo "skip: the cmd.exe round-trip needs a real Windows host (no cmd.exe on PATH here)"
+fi
+if command -v powershell.exe >/dev/null 2>&1; then
+  ps_env_value() { # ps_env_value <assignment> -> what a real PowerShell stores, read back
+    printf '%s\n%s\n' "$1" '$env:CORRAL_ADB' | powershell.exe -NoProfile -Command - 2>/dev/null | tr -d '\r'
+  }
+  check "escape: a REAL PowerShell stores the exact path ('' round-trips, & and spaces intact)" \
+    same_value "$(ps_env_value "$PS_ASSIGN")" "$WIN_ESC_EXP"
+else
+  echo "skip: the PowerShell round-trip needs a real Windows host (no powershell.exe on PATH here)"
+fi
+
+# A path cmd.exe genuinely cannot spell (`%NAME%` is expanded before it looks at the quotes; there
+# is no escape) must be SAID, not printed as a command that silently sets a different value.
+WIN_UNS_HOME="$TMP/home win%TEMP%x"; WIN_UNS_ADB="$WIN_UNS_HOME/Android/Sdk/platform-tools/adb.exe"
+mkdir -p "$WIN_UNS_HOME/Android/Sdk/platform-tools" "$WIN_UNS_HOME/bin"; : > "$WIN_UNS_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "uns-adb $@"' > "$WIN_UNS_ADB"; chmod +x "$WIN_UNS_ADB"
+env HOME="$TMPHOME" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --jar "$JAR" --no-ui --home "$WIN_UNS_HOME" >"$TMP/win-unspellable.log" 2>&1; rcu2=$?
+dump_on_fail "$rcu2" "$TMP/win-unspellable.log"
+check "escape: a %NAME% path prints WHY there is no cmd.exe line instead of a broken one" bash -c \
+  "[ '$rcu2' -eq 0 ] && ! grep -q '^  cmd.exe     set' '$TMP/win-unspellable.log' && grep -q 'no line above' '$TMP/win-unspellable.log'"
+check "escape: the PowerShell line is still printed for that path" \
+  bash -c "grep -q '^  PowerShell  \$env:CORRAL_ADB=' '$TMP/win-unspellable.log'"
+
+# ===== usage() documents where adb is looked for (NIT 6) =====
+check "usage documents the Windows SDK location for --adb" bash -c \
+  "bash '$SRC/install.sh' --help | grep -q 'AppData/Local/Android/Sdk'"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

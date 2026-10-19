@@ -451,6 +451,71 @@ fi
 # verify cmd.exe/PowerShell behaviour.
 WIN_STUB="$TMP/winstub"; mkdir -p "$WIN_STUB"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$WIN_STUB/uname"
+# PowerShell stub for the daemon-stop path: it emulates the two commands install.sh runs. PS_TABLE
+# holds "<pid>|<process name> <command line>" per line; a query prints the pid of every java
+# process whose command line contains $CORRAL_DAEMON_JAR, and Stop-Process -Id removes those pids.
+# The emulation reads the FILTER off the query command itself (the java family and whether path
+# separators are normalised), so an installer that stops asking for either fails these rows.
+# PS_KILL_FAIL=1 leaves them alive (a stop that did not work); PS_QUERY_FAIL=1 fails every query;
+# PS_QUERY_FAIL_AT=<n> fails only the n-th query (a transient failure).
+cat > "$TMP/powershell-stub.sh" <<EOF
+#!/bin/sh
+TABLE=\${PS_TABLE:-$TMP/win-procs}
+PSLOG=\${PS_LOG:-$TMP/powershell.log}
+KILLED=\${PS_KILLED:-$TMP/powershell-killed}
+QCOUNT=\${PS_QUERY_COUNT:-$TMP/powershell-queries}
+printf '%s\n' "\$*" >> "\$PSLOG"
+cmd="\$*"
+case "\$cmd" in
+  *Stop-Process*)
+    ids=\${cmd#*Stop-Process -Id }; ids=\${ids%% *}
+    old=\$IFS; IFS=,
+    for id in \$ids; do
+      [ "\${PS_KILL_FAIL:-0}" = 1 ] && continue
+      if [ -f "\$TABLE" ]; then grep -v "^\$id|" "\$TABLE" > "\$TABLE.tmp" 2>/dev/null; mv "\$TABLE.tmp" "\$TABLE"; fi
+      printf '%s\n' "\$id" >> "\$KILLED"
+    done
+    IFS=\$old;;
+  *Get-CimInstance*)
+    [ "\${PS_QUERY_FAIL:-0}" = 1 ] && exit 1
+    qn=0
+    [ -f "\$QCOUNT" ] && qn=\$(cat "\$QCOUNT")
+    qn=\$((qn + 1))
+    printf '%s\n' "\$qn" > "\$QCOUNT"
+    [ "\${PS_QUERY_FAIL_AT:-0}" = "\$qn" ] && exit 1
+    [ -n "\${CORRAL_DAEMON_JAR:-}" ] || exit 0
+    [ -f "\$TABLE" ] || exit 0
+    names=java.exe
+    case "\$cmd" in *javaw*) names="java.exe javaw.exe";; esac
+    norm=0
+    case "\$cmd" in *Replace*) norm=1;; esac
+    want=\$CORRAL_DAEMON_JAR
+    [ "\$norm" = 1 ] && want=\$(printf '%s' "\$want" | tr '\134' '/')
+    while IFS='|' read -r pid rest; do
+      [ -n "\$rest" ] || continue
+      ok=0
+      for n in \$names; do [ "\${rest%% *}" = "\$n" ] && ok=1; done
+      [ "\$ok" = 1 ] || continue
+      cl=\$rest
+      [ "\$norm" = 1 ] && cl=\$(printf '%s' "\$cl" | tr '\134' '/')
+      case "\$cl" in *"\$want"*) printf '%s\n' "\$pid";; esac
+    done < "\$TABLE";;
+esac
+exit 0
+EOF
+chmod +x "$TMP/powershell-stub.sh"
+# rm stub: models a daemon still holding ~/.corral (Windows "Device or resource busy"). Every other
+# path is delegated to the real rm, so the rest of the uninstall behaves normally.
+REAL_RM=$(command -v rm)
+cat > "$TMP/rm-stub-holder.sh" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in *.corral) echo "rm: cannot remove '\$a': Device or resource busy" >&2; exit 1;; esac
+done
+exec "$REAL_RM" "\$@"
+EOF
+chmod +x "$TMP/rm-stub-holder.sh"
+mkdir -p "$TMP/rm-stub"; cp "$TMP/rm-stub-holder.sh" "$TMP/rm-stub/rm"
 # A successful schtasks stub: the existing Windows scenarios must exercise the Scheduled Task path
 # (its own /sc onlogon create, then /run). Individual task rows below use their own stubs to force
 # the refusal and error-line cases.
@@ -461,6 +526,7 @@ echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
 exit 0
 EOF
 chmod +x "$WIN_STUB/uname" "$WIN_STUB/schtasks"
+cp "$TMP/powershell-stub.sh" "$WIN_STUB/powershell.exe"; chmod +x "$WIN_STUB/powershell.exe"
 
 TMPHOME_W="$TMP/home-win"; SDK_W="$TMPHOME_W/Android/Sdk/platform-tools"
 mkdir -p "$SDK_W" "$TMPHOME_W/bin"; : > "$TMPHOME_W/.bashrc"
@@ -1006,6 +1072,7 @@ echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
 exit 0
 EOF
 chmod +x "$TASK_A_STUB/uname" "$TASK_A_STUB/schtasks"
+cp "$TMP/powershell-stub.sh" "$TASK_A_STUB/powershell.exe"; chmod +x "$TASK_A_STUB/powershell.exe"
 env HOME="$TASK_A_HOME" PATH="$TASK_A_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_A_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_A_HOME" >"$TMP/task-a.log" 2>&1; rcta=$?
 dump_on_fail "$rcta" "$TMP/task-a.log"
@@ -1050,6 +1117,58 @@ check "task fallback: the exact elevated command for auto-start is PRINTED" \
   grep -qF -- "$TASK_B_ELEV" "$TMP/task-b.log"
 check "task fallback: summary says NOT auto-starting" \
   grep -q 'NOT auto-starting' "$TMP/task-b.log"
+
+# (b2) the task already EXISTS and was created by an elevated token, so BOTH creates are refused
+#      with "Access is denied.". The summary must name that task, say the daemon was NOT started, and
+#      print the elevated remove/replace commands — the generic "(schtasks failed)" hides all three.
+TASK_I_HOME="$TMP/home-task-i"; TASK_I_SDK="$TASK_I_HOME/Android/Sdk/platform-tools"
+TASK_I_STUB="$TMP/taskstub-i"; TASK_I_LOG="$TMP/taskstub-i.log"
+mkdir -p "$TASK_I_SDK" "$TASK_I_HOME/bin" "$TASK_I_STUB"; : > "$TASK_I_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-i-adb $@"' > "$TASK_I_SDK/adb"; chmod +x "$TASK_I_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_I_STUB/uname"
+cat > "$TASK_I_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_I_LOG"
+case " \$* " in
+  *" /create "*) echo "ERROR: Access is denied." >&2; exit 5;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_I_STUB/uname" "$TASK_I_STUB/schtasks"
+env HOME="$TASK_I_HOME" PATH="$TASK_I_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_I_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_I_HOME" >"$TMP/task-i.log" 2>&1; rcti=$?
+dump_on_fail "$rcti" "$TMP/task-i.log"
+TASK_I_BAT="$TASK_I_HOME/bin/corral-daemon.bat"
+check "task access-denied: install exits 0 with both creates attempted and the existing task named" bash -c \
+  "[ '$rcti' -eq 0 ] && grep -qF -- '/sc onlogon' '$TASK_I_LOG' && grep -qF -- '/sc once' '$TASK_I_LOG' && grep -q 'Scheduled Task CorralDaemon ALREADY EXISTS' '$TMP/task-i.log' && grep -q 'could not modify it' '$TMP/task-i.log'"
+check "task access-denied: the summary says the daemon was NOT started, not the generic failure" bash -c \
+  "grep -q 'daemon was NOT started' '$TMP/task-i.log' && ! grep -q 'was NOT created (schtasks failed)' '$TMP/task-i.log'"
+check "task access-denied: the elevated remove and create commands are PRINTED" bash -c \
+  "grep -qF 'schtasks /delete /tn CorralDaemon /f' '$TMP/task-i.log' && grep -qF 'schtasks /create /tn CorralDaemon /tr \"$(winp "$TASK_I_BAT")\" /sc onlogon /rl LIMITED /f' '$TMP/task-i.log'"
+
+# (b3) a create failure that is NOT access-denied: the specific "task exists" advice must not appear;
+#      the generic wording stays, because nothing says an existing task could not be modified.
+TASK_J_HOME="$TMP/home-task-j"; TASK_J_SDK="$TASK_J_HOME/Android/Sdk/platform-tools"
+TASK_J_STUB="$TMP/taskstub-j"; TASK_J_LOG="$TMP/taskstub-j.log"
+mkdir -p "$TASK_J_SDK" "$TASK_J_HOME/bin" "$TASK_J_STUB"; : > "$TASK_J_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-j-adb $@"' > "$TASK_J_SDK/adb"; chmod +x "$TASK_J_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_J_STUB/uname"
+cat > "$TASK_J_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_J_LOG"
+case " \$* " in
+  *" /create "*) echo "ERROR: something else" >&2; exit 1;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_J_STUB/uname" "$TASK_J_STUB/schtasks"
+env HOME="$TASK_J_HOME" PATH="$TASK_J_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_J_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_J_HOME" >"$TMP/task-j.log" 2>&1; rctj=$?
+dump_on_fail "$rctj" "$TMP/task-j.log"
+check "task non-access failure: install exits 0 with the generic wording" bash -c \
+  "[ '$rctj' -eq 0 ] && grep -q 'Scheduled Task CorralDaemon was NOT created (schtasks failed)' '$TMP/task-j.log'"
+check "task non-access failure: the access-denied advice (existing task, delete) is NOT printed" bash -c \
+  "! grep -q 'ALREADY EXISTS' '$TMP/task-j.log' && ! grep -qF 'schtasks /delete /tn CorralDaemon /f' '$TMP/task-j.log'"
 
 # (c) schtasks exits 0 but prints an error: that is FAILURE (exit code AND output), and the
 #     summary must not claim a durable daemon.
@@ -1100,8 +1219,13 @@ check "task path: /create and /run are both attempted for that path" bash -c \
   "grep -qF -- '/create /tn CorralDaemon' '$TASK_D_LOG' && grep -qF -- '/run /tn CorralDaemon' '$TASK_D_LOG'"
 
 # (d) uninstall deletes the task and the launcher, and names both in the Removed: summary.
+# The daemon java survives /end on a real box; the stub table says ours is running so the new
+# verification-and-stop path is what produces the "(daemon stopped)" claim.
 TASK_A_BAT_BEFORE=0; [ -f "$TASK_A_BAT" ] && TASK_A_BAT_BEFORE=1
-env HOME="$TASK_A_HOME" PATH="$TASK_A_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_A_HOME" --uninstall \
+TASK_A_PROCS="$TMP/win-procs-a"
+printf '%s\n' "111|java.exe -jar $(winp "$TASK_A_HOME/.corral/corral-daemon-all.jar")" > "$TASK_A_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$TASK_A_HOME" PATH="$TASK_A_STUB:$STUB:$PATH" PS_TABLE="$TASK_A_PROCS" bash "$SRC/install.sh" --home "$TASK_A_HOME" --uninstall \
   >"$TMP/task-uninstall.log" 2>&1; rctu=$?
 dump_on_fail "$rctu" "$TMP/task-uninstall.log"
 check "task uninstall: exits 0" test "$rctu" -eq 0
@@ -1113,8 +1237,10 @@ check "task uninstall: ~/bin/corral-daemon.bat (written by the install) is remov
   "[ '$TASK_A_BAT_BEFORE' = 1 ] && [ ! -e '$TASK_A_BAT' ]"
 check "task uninstall: Removed: names the task and the .bat" bash -c \
   "line=\$(grep '^Removed:' '$TMP/task-uninstall.log'); printf '%s' \"\$line\" | grep -qF 'Scheduled Task CorralDaemon' && printf '%s' \"\$line\" | grep -qF '~/bin/corral-daemon.bat'"
-check "task uninstall: Removed: names the stopped daemon when /end succeeded" bash -c \
+check "task uninstall: Removed: names the stopped daemon when the process is verified gone" bash -c \
   "grep '^Removed:' '$TMP/task-uninstall.log' | grep -qF 'Scheduled Task CorralDaemon (daemon stopped)'"
+check "task uninstall: the daemon java is stopped by PID after /end, and the table is empty" bash -c \
+  "[ \"\$(cat '$TMP/powershell-killed')\" = 111 ] && [ ! -s '$TASK_A_PROCS' ]"
 
 # (e) a box that never had the task: schtasks /delete fails, uninstall still exits 0 and does not
 #     claim it removed a task. The log assertion is what makes these rows fail on the old installer,
@@ -1220,6 +1346,205 @@ check "task launcher: a failed write is not blamed on an unspellable path" bash 
   "! grep -q 'cannot spell' '$TMP/task-f.log'"
 check "task launcher: a failed write still says no task was created and no daemon started" bash -c \
   "grep -q 'Scheduled Task was NOT created and the daemon was NOT started' '$TMP/task-f.log'"
+
+# ===== Windows uninstall: only claim what was verified =====
+# The real-box defect: /end kills the task's cmd.exe, not the java.exe it started, so the daemon
+# keeps serving; rm -rf ~/.corral then fails on the held jar/DB ("Device or resource busy"), yet the
+# old summary said "daemon stopped" and listed ~/.corral as removed. These rows drive the
+# powershell stub's process table and the rm stub to pin what may be claimed.
+win_new_home() { # win_new_home <name> -> an installed Windows sandbox printed on stdout
+  local name="$1" h="$TMP/home-$1" sdk="$TMP/home-$1/Android/Sdk/platform-tools"
+  mkdir -p "$sdk" "$h/bin"; : > "$h/.bashrc"
+  printf '%s\n' '#!/bin/sh' "echo '$name-adb \$@'" > "$sdk/adb"; chmod +x "$sdk/adb"
+  env HOME="$h" PATH="$WIN_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+    --adb "$sdk/adb" --jar "$JAR" --no-ui --home "$h" >"$TMP/$name-install.log" 2>&1
+  printf '%s\n' "$h"
+}
+win_proc_line() { # win_proc_line <pid> <home> -> a process-table line for the daemon jar
+  printf '%s|java.exe -jar %s\n' "$1" "$(winp "$2/.corral/corral-daemon-all.jar")"
+}
+
+# (a) the kill is attempted but the daemon survives (and still holds ~/.corral): the summary must
+#     NOT say "daemon stopped" and must NOT list ~/.corral as removed; it must say what is true.
+KILL_HOME=$(win_new_home kill-fail)
+KILL_PROCS="$TMP/win-procs-killfail"; win_proc_line 111 "$KILL_HOME" > "$KILL_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$KILL_HOME" PATH="$TMP/rm-stub:$WIN_STUB:$STUB:$PATH" PS_TABLE="$KILL_PROCS" PS_KILL_FAIL=1 \
+  bash "$SRC/install.sh" --home "$KILL_HOME" --uninstall >"$TMP/killfail-uninstall.log" 2>&1; rckf=$?
+dump_on_fail "$rckf" "$TMP/killfail-uninstall.log"
+check "uninstall kill-fail: exits 0" test "$rckf" -eq 0
+check "uninstall kill-fail: a stop was ATTEMPTED for the daemon pid" bash -c \
+  "grep -q 'Stop-Process -Id 111' '$TMP/powershell.log'"
+check "uninstall kill-fail: the summary does NOT claim the daemon stopped" bash -c \
+  "! grep '^Removed:' '$TMP/killfail-uninstall.log' | grep -q 'daemon stopped'"
+check "uninstall kill-fail: the summary says the daemon could NOT be stopped, with its PID" bash -c \
+  "grep -q 'daemon process could NOT be stopped (still running: PID 111)' '$TMP/killfail-uninstall.log'"
+check "uninstall kill-fail: ~/.corral is NOT listed as removed and its loss is reported" bash -c \
+  "! grep '^Removed:' '$TMP/killfail-uninstall.log' | grep -qF '~/.corral' && grep -q '~/.corral could NOT be removed' '$TMP/killfail-uninstall.log' && grep -q 'Device or resource busy' '$TMP/killfail-uninstall.log' && [ -e '$KILL_HOME/.corral/corral-daemon-all.jar' ]"
+check "uninstall kill-fail: the task itself is still named as removed" bash -c \
+  "grep '^Removed:' '$TMP/killfail-uninstall.log' | grep -qF 'Scheduled Task CorralDaemon'"
+
+# (b) the daemon is verified gone and ~/.corral is really gone: both claims are made.
+OK_HOME=$(win_new_home stop-ok)
+OK_PROCS="$TMP/win-procs-stopok"; win_proc_line 222 "$OK_HOME" > "$OK_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$OK_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$OK_PROCS" \
+  bash "$SRC/install.sh" --home "$OK_HOME" --uninstall >"$TMP/stopok-uninstall.log" 2>&1; rcso=$?
+dump_on_fail "$rcso" "$TMP/stopok-uninstall.log"
+check "uninstall stop-ok: exits 0" test "$rcso" -eq 0
+check "uninstall stop-ok: the daemon java is stopped and gone (verified, not assumed)" bash -c \
+  "[ \"\$(cat '$TMP/powershell-killed')\" = 222 ] && [ ! -s '$OK_PROCS' ]"
+check "uninstall stop-ok: the summary claims the daemon stopped AND ~/.corral removed" bash -c \
+  "line=\$(grep '^Removed:' '$TMP/stopok-uninstall.log'); printf '%s' \"\$line\" | grep -qF 'Scheduled Task CorralDaemon (daemon stopped)' && printf '%s' \"\$line\" | grep -qF '~/.corral'"
+check "uninstall stop-ok: ~/.corral really is gone" test ! -e "$OK_HOME/.corral"
+
+# (c) the daemon is gone but ~/.corral survives (e.g. another holder): the summary must not list it
+#     as removed and must name what is left and the rm failure.
+RM_HOME=$(win_new_home rm-fail)
+RM_PROCS="$TMP/win-procs-rmfail"; win_proc_line 333 "$RM_HOME" > "$RM_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$RM_HOME" PATH="$TMP/rm-stub:$WIN_STUB:$STUB:$PATH" PS_TABLE="$RM_PROCS" \
+  bash "$SRC/install.sh" --home "$RM_HOME" --uninstall >"$TMP/rmfail-uninstall.log" 2>&1; rcrf=$?
+dump_on_fail "$rcrf" "$TMP/rmfail-uninstall.log"
+check "uninstall rm-fail: exits 0" test "$rcrf" -eq 0
+check "uninstall rm-fail: ~/.corral is NOT listed as removed" bash -c \
+  "! grep '^Removed:' '$TMP/rmfail-uninstall.log' | grep -qF '~/.corral'"
+check "uninstall rm-fail: the summary names what survived and why" bash -c \
+  "grep -q '~/.corral could NOT be removed (still holds: corral-daemon-all.jar' '$TMP/rmfail-uninstall.log' && grep -q 'Device or resource busy' '$TMP/rmfail-uninstall.log' && [ -e '$RM_HOME/.corral/corral-daemon-all.jar' ]"
+check "uninstall rm-fail: the verified daemon stop is still claimed" bash -c \
+  "grep '^Removed:' '$TMP/rmfail-uninstall.log' | grep -qF 'Scheduled Task CorralDaemon (daemon stopped)'"
+
+# (d) no daemon process was running: nothing is killed, nothing false is claimed, exit 0.
+NONE_HOME=$(win_new_home no-daemon)
+NONE_PROCS="$TMP/win-procs-none"; : > "$NONE_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$NONE_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$NONE_PROCS" \
+  bash "$SRC/install.sh" --home "$NONE_HOME" --uninstall >"$TMP/nodaemon-uninstall.log" 2>&1; rcnone=$?
+dump_on_fail "$rcnone" "$TMP/nodaemon-uninstall.log"
+check "uninstall no-daemon: exits 0" test "$rcnone" -eq 0
+check "uninstall no-daemon: no process is killed and no stop is claimed" bash -c \
+  "[ ! -s '$TMP/powershell-killed' ] && ! grep -q 'Stop-Process' '$TMP/powershell.log' && ! grep '^Removed:' '$TMP/nodaemon-uninstall.log' | grep -q 'daemon stopped'"
+check "uninstall no-daemon: the summary says nothing was running and names the task/.bat removed" bash -c \
+  "line=\$(grep '^Removed:' '$TMP/nodaemon-uninstall.log'); printf '%s' \"\$line\" | grep -qF 'Scheduled Task CorralDaemon (no daemon process was running)' && printf '%s' \"\$line\" | grep -qF '~/bin/corral-daemon.bat' && printf '%s' \"\$line\" | grep -qF '~/.corral'"
+
+# (e) targeting: an unrelated java (an IDE) and a corral-ui java must NOT be stopped; only the
+#     process whose command line carries OUR daemon jar name is, and the match is by that name.
+TGT_HOME=$(win_new_home targeted)
+TGT_PROCS="$TMP/win-procs-targeted"
+{
+  win_proc_line 444 "$TGT_HOME"
+  printf '%s\n' '555|java.exe -jar C:\\Program Files\\JetBrains\\idea_rt.jar'
+  printf '%s\n' '666|java.exe -jar '"$(winp "$TGT_HOME/.corral/corral-ui-all.jar")"
+} > "$TGT_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$TGT_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$TGT_PROCS" \
+  bash "$SRC/install.sh" --home "$TGT_HOME" --uninstall >"$TMP/targeted-uninstall.log" 2>&1; rctg2=$?
+dump_on_fail "$rctg2" "$TMP/targeted-uninstall.log"
+check "uninstall targeted: only our daemon pid is stopped; the IDE and corral-ui javas survive" bash -c \
+  "[ \"\$(cat '$TMP/powershell-killed')\" = 444 ] && grep -q '^555|' '$TGT_PROCS' && grep -q '^666|' '$TGT_PROCS' && ! grep -q '^444|' '$TGT_PROCS'"
+check "uninstall targeted: the query matched on the daemon jar name, never by port or all java" bash -c \
+  "grep -q 'Get-CimInstance Win32_Process' '$TMP/powershell.log' && grep -q 'CORRAL_DAEMON_JAR' '$TMP/powershell.log' && ! grep -qi 'Get-Process -Name java' '$TMP/powershell.log' && ! grep -q '8798' '$TMP/powershell.log'"
+
+# (f) the query itself fails: an empty answer is NOT evidence that nothing was running, so neither
+#     false claim may appear; the summary says it could not verify.
+Q_HOME=$(win_new_home query-fail)
+Q_PROCS="$TMP/win-procs-qfail"; win_proc_line 777 "$Q_HOME" > "$Q_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$Q_HOME" PATH="$TMP/rm-stub:$WIN_STUB:$STUB:$PATH" PS_TABLE="$Q_PROCS" PS_QUERY_FAIL=1 \
+  bash "$SRC/install.sh" --home "$Q_HOME" --uninstall >"$TMP/qfail-uninstall.log" 2>&1; rcq=$?
+dump_on_fail "$rcq" "$TMP/qfail-uninstall.log"
+check "uninstall query-fail: exits 0" test "$rcq" -eq 0
+check "uninstall query-fail: neither 'daemon stopped' nor 'no daemon process was running' is claimed" bash -c \
+  "! grep -q 'daemon stopped' '$TMP/qfail-uninstall.log' && ! grep -q 'no daemon process was running' '$TMP/qfail-uninstall.log'"
+check "uninstall query-fail: the summary says the stop could not be verified" bash -c \
+  "grep -q 'could not verify whether the corral daemon process is still running' '$TMP/qfail-uninstall.log' && [ -e '$Q_HOME/.corral/corral-daemon-all.jar' ]"
+
+# (g) the daemon's command line spells the jar path with FORWARD slashes (an MSYS `java -jar
+#     C:/...` start) while the installer passes the win_path spelling with backslashes. A
+#     separator-blind match misses it and the summary then claims "no daemon process was running"
+#     while the daemon is alive — the false claim this whole path exists to remove. cygpath is
+#     stubbed so the installer really does receive a backslash-spelled jar path on POSIX.
+FW_STUB="$TMP/fwstub"; mkdir -p "$FW_STUB"
+cp "$WIN_STUB/uname" "$WIN_STUB/schtasks" "$WIN_STUB/powershell.exe" "$FW_STUB/"
+cat > "$FW_STUB/cygpath" <<'EOF'
+#!/bin/sh
+p=${2#/}
+printf 'C:\\%s\n' "$(printf '%s' "$p" | tr '/' '\\')"
+EOF
+chmod +x "$FW_STUB/cygpath"
+FW_HOME=$(win_new_home fw-slash)
+FW_POSIX_JAR="$FW_HOME/.corral/corral-daemon-all.jar"
+FW_WIN_JAR="C:$(printf '%s' "$FW_POSIX_JAR" | tr '/' '\\')"
+FW_FWD_JAR=${FW_WIN_JAR//\\//}
+FW_PROCS="$TMP/win-procs-fwslash"
+printf '%s\n' "888|java.exe -jar $FW_FWD_JAR" > "$FW_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$FW_HOME" PATH="$FW_STUB:$STUB:$PATH" PS_TABLE="$FW_PROCS" \
+  bash "$SRC/install.sh" --home "$FW_HOME" --uninstall >"$TMP/fw-uninstall.log" 2>&1; rcfw=$?
+dump_on_fail "$rcfw" "$TMP/fw-uninstall.log"
+check "uninstall forward-slash jar path: the daemon is matched and stopped" bash -c \
+  "[ '$rcfw' -eq 0 ] && [ \"\$(cat '$TMP/powershell-killed')\" = 888 ] && [ ! -s '$FW_PROCS' ]"
+check "uninstall forward-slash jar path: the summary never says no daemon process was running" bash -c \
+  "grep '^Removed:' '$TMP/fw-uninstall.log' | grep -qF '(daemon stopped)' && ! grep -q 'no daemon process was running' '$TMP/fw-uninstall.log'"
+
+# (h) the daemon runs as javaw.exe (corral-daemon.bat honours CORRAL_JAVA). A filter on java.exe
+#     alone cannot see it, and the summary would again claim nothing was running.
+JAVAW_HOME=$(win_new_home javaw)
+JAVAW_PROCS="$TMP/win-procs-javaw"
+printf '%s\n' "999|javaw.exe -jar $(winp "$JAVAW_HOME/.corral/corral-daemon-all.jar")" > "$JAVAW_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$JAVAW_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$JAVAW_PROCS" \
+  bash "$SRC/install.sh" --home "$JAVAW_HOME" --uninstall >"$TMP/javaw-uninstall.log" 2>&1; rcjw=$?
+dump_on_fail "$rcjw" "$TMP/javaw-uninstall.log"
+check "uninstall javaw: a javaw.exe daemon is matched and stopped" bash -c \
+  "[ '$rcjw' -eq 0 ] && [ \"\$(cat '$TMP/powershell-killed')\" = 999 ] && [ ! -s '$JAVAW_PROCS' ]"
+check "uninstall javaw: the summary never says no daemon process was running" bash -c \
+  "grep '^Removed:' '$TMP/javaw-uninstall.log' | grep -qF '(daemon stopped)' && ! grep -q 'no daemon process was running' '$TMP/javaw-uninstall.log'"
+
+# (h2) the daemon runs from a jar COPIED to another directory: its command line carries a path this
+#      install never wrote. Matching the installed PATH misses it and the summary then claims no
+#      daemon was running while one is alive (found on a real Windows box); the FILE NAME match
+#      finds and stops it.
+CP_HOME=$(win_new_home copied-jar)
+CP_PROCS="$TMP/win-procs-copied"; printf '%s\n' "4242|java.exe -jar $(winp "$TMP/copied/corral-daemon-all.jar")" > "$CP_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$CP_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$CP_PROCS" \
+  bash "$SRC/install.sh" --home "$CP_HOME" --uninstall >"$TMP/copied-uninstall.log" 2>&1; rccp=$?
+dump_on_fail "$rccp" "$TMP/copied-uninstall.log"
+check "uninstall copied jar: the daemon started from a copied jar is matched and stopped" bash -c \
+  "[ '$rccp' -eq 0 ] && [ \"\$(cat '$TMP/powershell-killed')\" = 4242 ] && [ ! -s '$CP_PROCS' ]"
+check "uninstall copied jar: the summary never says no daemon process was running" bash -c \
+  "grep '^Removed:' '$TMP/copied-uninstall.log' | grep -qF '(daemon stopped)' && ! grep -q 'no daemon process was running' '$TMP/copied-uninstall.log'"
+
+# (i) a re-query fails transiently right after the kill, then a later poll succeeds and shows the
+#     daemon gone. The flag must be CLEARED by that success, or the summary keeps saying "could not
+#     verify" after it has observed the answer.
+TR_HOME=$(win_new_home transient)
+TR_PROCS="$TMP/win-procs-transient"; win_proc_line 1234 "$TR_HOME" > "$TR_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"; : > "$TMP/powershell-queries"
+env HOME="$TR_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$TR_PROCS" PS_QUERY_FAIL_AT=2 \
+  bash "$SRC/install.sh" --home "$TR_HOME" --uninstall >"$TMP/transient-uninstall.log" 2>&1; rctr=$?
+dump_on_fail "$rctr" "$TMP/transient-uninstall.log"
+check "uninstall transient query failure: the daemon is still stopped" bash -c \
+  "[ '$rctr' -eq 0 ] && [ \"\$(cat '$TMP/powershell-killed')\" = 1234 ] && [ ! -s '$TR_PROCS' ]"
+check "uninstall transient query failure: a later successful poll reports the daemon stopped, not 'could not verify'" bash -c \
+  "grep '^Removed:' '$TMP/transient-uninstall.log' | grep -qF 'Scheduled Task CorralDaemon (daemon stopped)' && ! grep -q 'could not verify' '$TMP/transient-uninstall.log'"
+
+# (j) no PowerShell at all: the daemon cannot be identified, so neither "daemon stopped" nor "no
+#     daemon process was running" may appear, and the uninstall still succeeds. The restricted PATH
+#     holds only the tools install.sh needs (no powershell.exe/powershell/pwsh anywhere on it).
+NOP_HOME=$(win_new_home no-powershell)
+NOP_STUB="$TMP/nopsstub"; mkdir -p "$NOP_STUB"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$NOP_STUB/uname"
+chmod +x "$NOP_STUB/uname"
+env HOME="$NOP_HOME" PATH="$NOP_STUB:$CORETOOLS" "$BASH_BIN" \
+  "$SRC/install.sh" --home "$NOP_HOME" --uninstall >"$TMP/nops-uninstall.log" 2>&1; rcnp=$?
+dump_on_fail "$rcnp" "$TMP/nops-uninstall.log"
+check "uninstall no-powershell: exits 0" test "$rcnp" -eq 0
+check "uninstall no-powershell: claims neither 'daemon stopped' nor 'no daemon process was running'" bash -c \
+  "! grep -q 'daemon stopped' '$TMP/nops-uninstall.log' && ! grep -q 'no daemon process was running' '$TMP/nops-uninstall.log'"
+check "uninstall no-powershell: says the daemon process could not be identified" bash -c \
+  "grep -q 'PowerShell was not found, so the corral daemon process could not be identified' '$TMP/nops-uninstall.log'"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

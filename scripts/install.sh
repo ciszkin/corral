@@ -174,19 +174,80 @@ if [[ $UNINSTALL -eq 1 ]]; then
     echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
   elif [[ $IS_WINDOWS -eq 1 ]]; then
     echo "Windows: skipping systemctl (no systemd user session here)"
-    # Stop the running task BEFORE deleting it: deleting a task does not stop its process, and the
-    # daemon would otherwise keep port 8798 and a deleted ~/.corral. A task that is not running fails
-    # the /end; that is not an error worth failing on, and the summary must not claim a stop then.
-    # A box that never had the task fails this delete; that is not an error worth failing on either.
+    # /end stops the task's cmd.exe wrapper, NOT the java.exe it launched: the daemon survives it
+    # and keeps the API port and ~/.corral. PowerShell (wmic is gone from Windows 11) finds OUR java
+    # by the daemon jar name in its command line — never by port (configurable, and another process
+    # may own it) and never all java.exe — and a stop is CLAIMED only after a re-query shows no
+    # matching process remains. No match is success: there was nothing to stop.
+    POWERSHELL=""
+    for ps in powershell.exe powershell pwsh.exe pwsh; do
+      if command -v "$ps" >/dev/null 2>&1; then POWERSHELL="$ps"; break; fi
+    done
+    # PIDs go to DAEMON_PIDS; DAEMON_QUERY_FAILED records that the query itself failed, which is
+    # NOT the same as "nothing matched" and must never be claimed as a stop or a no-op.
+    DAEMON_QUERY_FAILED=0
+    # Match the jar FILE NAME, not the install path: a daemon started from a jar COPIED to another
+    # directory carries a different path, and a path match then left it running while the summary
+    # said "no daemon process was running". A java(w).exe whose command line merely CONTAINS the
+    # name is stopped; this deliberately OVER-matches and errs toward stopping our own daemon.
+    DAEMON_JAR_NAME='corral-daemon-all.jar'
+    daemon_pids() {
+      if DAEMON_PIDS=$(CORRAL_DAEMON_JAR="$DAEMON_JAR_NAME" "$POWERSHELL" -NoProfile -NonInteractive -Command \
+        "\$jar = \$env:CORRAL_DAEMON_JAR.Replace('\','/'); Get-CimInstance Win32_Process | Where-Object { \$_.Name -match '^javaw?\.exe\$' -and \$_.CommandLine -and \$_.CommandLine.Replace('\','/').IndexOf(\$jar, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { \$_.ProcessId }" \
+        2>/dev/null); then
+        DAEMON_QUERY_FAILED=0
+      else
+        DAEMON_QUERY_FAILED=1; DAEMON_PIDS=""
+      fi
+      DAEMON_PIDS=$(printf '%s\n' "$DAEMON_PIDS" | tr -d '\r')
+    }
+    daemon_before=""
+    daemon_left=""
+    if [[ -n "$POWERSHELL" ]]; then daemon_pids; daemon_before=$DAEMON_PIDS; daemon_left=$daemon_before; fi
+
+    # Stop the running task BEFORE deleting it: deleting a task does not stop its process.
+    # A task that is not running fails the /end and a box that never had the task fails the delete;
+    # neither is worth failing on. The process stop runs regardless, because a previous uninstall
+    # may have deleted the task and left the java child running — exactly what blocks ~/.corral.
     if command -v schtasks >/dev/null 2>&1; then
-      end_out=$(schtasks_run /end /tn CorralDaemon 2>&1); end_rc=$?
+      schtasks_run /end /tn CorralDaemon >/dev/null 2>&1 || true
       del_out=$(schtasks_run /delete /tn CorralDaemon /f 2>&1); del_rc=$?
-      if task_ok "$del_rc" "$del_out"; then
-        if task_ok "$end_rc" "$end_out"; then
-          note_removed "Scheduled Task CorralDaemon (daemon stopped)"
-        else
-          note_removed "Scheduled Task CorralDaemon"
-        fi
+    else
+      del_rc=1; del_out=""
+    fi
+
+    if [[ -n "$POWERSHELL" ]]; then
+      daemon_ids=""
+      for p in $daemon_before; do daemon_ids="${daemon_ids:+$daemon_ids,}$p"; done
+      if [[ -n "$daemon_ids" ]]; then
+        "$POWERSHELL" -NoProfile -NonInteractive -Command \
+          "Stop-Process -Id $daemon_ids -Force -ErrorAction SilentlyContinue" 2>/dev/null
+        # Stop-Process is not guaranteed synchronous; poll briefly before deciding what to claim.
+        for _ in 1 2 3 4 5; do
+          daemon_pids; daemon_left=$DAEMON_PIDS
+          [[ $DAEMON_QUERY_FAILED -eq 0 && -z "$daemon_left" ]] && break
+          sleep 0.2 2>/dev/null || true
+        done
+      fi
+      if [[ $DAEMON_QUERY_FAILED -eq 1 ]]; then
+        echo "WARNING: could not verify whether the corral daemon process is still running"
+        echo "         (the PowerShell process query failed), so no stop is claimed."
+      elif [[ -n "$daemon_left" ]]; then
+        echo "WARNING: the corral daemon process could NOT be stopped (still running: PID $(echo $daemon_left));"
+        echo "         it may still serve the API and keep ~/.corral from being removed."
+      fi
+    else
+      echo "WARNING: PowerShell was not found, so the corral daemon process could not be identified;"
+      echo "         if java.exe is still running the daemon jar it keeps ~/.corral from being removed."
+    fi
+
+    if task_ok "$del_rc" "$del_out"; then
+      if [[ -z "$POWERSHELL" || $DAEMON_QUERY_FAILED -eq 1 || -n "$daemon_left" ]]; then
+        note_removed "Scheduled Task CorralDaemon"
+      elif [[ -n "$daemon_before" ]]; then
+        note_removed "Scheduled Task CorralDaemon (daemon stopped)"
+      else
+        note_removed "Scheduled Task CorralDaemon (no daemon process was running)"
       fi
     fi
   else
@@ -227,7 +288,18 @@ if [[ $UNINSTALL -eq 1 ]]; then
            "$TARGET_HOME/.config/corral/daemon.env" "$TARGET_HOME/.config/corral/ui.conf"; do
     if [[ -e "$f" ]]; then rm -f "$f"; note_removed "~/${f#"$TARGET_HOME"/}"; fi
   done
-  if [[ -e "$CORRAL_HOME" ]]; then rm -rf "$CORRAL_HOME"; note_removed "~/.corral"; fi
+  if [[ -e "$CORRAL_HOME" ]]; then
+    # rm -rf fails on Windows while the daemon still holds the jar/DB. Only claim the removal when
+    # the directory is really gone; otherwise name what survived and why (rm's own message).
+    rm_err=$(rm -rf "$CORRAL_HOME" 2>&1)
+    if [[ -e "$CORRAL_HOME" ]]; then
+      left=$(ls -A "$CORRAL_HOME" 2>/dev/null | tr '\n' ' ')
+      echo "WARNING: ~/.corral could NOT be removed${left:+ (still holds: ${left% })}"
+      if [[ -n "$rm_err" ]]; then echo "         $rm_err"; fi
+    else
+      note_removed "~/.corral"
+    fi
+  fi
 
   # restore the SDK adb if it was shimmed (adb.real -> adb). Under --home only the sandbox's own
   # SDK is ours to restore; an ambient SDK belongs to the real install and must not be touched.
@@ -667,6 +739,7 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
   # /sc onlogon needs an elevated token; /sc once + /run works unelevated. Try the good case,
   # fall back to the one that works, and report which one actually happened.
   TASK_STATE=failed
+  TASK_DENIED=0
   TASK_ELEV=""
   if [[ $LAUNCHER_OK -eq 1 ]]; then
     TASK_WIN_BAT=$(win_path "$DAEMON_BAT")
@@ -678,6 +751,7 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
         run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
         if task_ok "$run_rc" "$run_out"; then TASK_STATE=onlogon; fi
       elif printf '%s' "$task_out" | grep -qi 'access is denied'; then
+        TASK_DENIED=1
         once_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc once /st 00:00 /rl LIMITED /f 2>&1); once_rc=$?
         if task_ok "$once_rc" "$once_out"; then
           TASK_STATE=once-norun
@@ -713,7 +787,13 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
       echo "  $TASK_ELEV"
       ;;
     *)
-      if [[ $LAUNCHER_OK -eq 1 ]]; then
+      if [[ $TASK_DENIED -eq 1 ]]; then
+        echo "  A Scheduled Task CorralDaemon ALREADY EXISTS and this session could not modify it (schtasks: Access is denied)."
+        echo "  The daemon was NOT started; the existing task was left untouched."
+        echo "  From an elevated prompt, remove or replace it, then re-run install.sh:"
+        echo "  schtasks /delete /tn CorralDaemon /f"
+        echo "  $TASK_ELEV"
+      elif [[ $LAUNCHER_OK -eq 1 ]]; then
         echo "  Scheduled Task CorralDaemon was NOT created (schtasks failed) — the daemon was NOT started."
       elif [[ $LAUNCHER_UNSPELLABLE -eq 1 ]]; then
         echo "  corral-daemon.bat was NOT written (a path contains a \" or a %NAME% pair cmd.exe cannot spell),"
@@ -722,7 +802,7 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
         echo "  corral-daemon.bat could NOT be written to $DAEMON_BAT (the write failed),"
         echo "  so the Scheduled Task was NOT created and the daemon was NOT started."
       fi
-      if [[ -n "$TASK_ELEV" ]]; then
+      if [[ $TASK_DENIED -eq 0 && -n "$TASK_ELEV" ]]; then
         echo "  Create it from an elevated prompt, then re-run install.sh:"
         echo "  $TASK_ELEV"
       fi

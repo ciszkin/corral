@@ -132,12 +132,13 @@ cmd_unspellable() { # cmd_unspellable <value>
 # `dev.corral.ui.CorralUiKt`): an operator's own launcher plausibly runs `dev.corral.CorralCli`,
 # and now that this guard also runs on Windows — where it deletes during an INSTALL — a false
 # positive is data loss, not a stray file. `${X_JAR:-$HOME/.corral/...}` is a string only our shim
-# spells that way. corral.bat keeps the FQN: it is a Windows-only name and its shipped content has
-# no other distinctive string to key on.
+# spells that way. corral.bat keys on its own header comment for the same reason: an earlier version
+# claimed it had no other distinctive string and kept the FQN, which deleted an operator's own
+# launcher on --uninstall.
 MARKER_ADB='corral adb wrapper'
 MARKER_CORRAL='CORRAL_JAR:-$HOME/.corral/corral-daemon-all.jar'
 MARKER_CORRAL_UI='CORRAL_UI_JAR:-$HOME/.corral/corral-ui-all.jar'
-MARKER_CORRAL_BAT='dev.corral.CorralCli'
+MARKER_CORRAL_BAT='rem corral CLI shim'
 
 # Name only what was actually removed: entries are appended as they happen, so a summary can never
 # claim a file this install did not create (on Windows the POSIX shims and the unit do not exist; a

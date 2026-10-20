@@ -1059,6 +1059,20 @@ check "usage documents the Windows SDK location for --adb" bash -c \
 # survives a logout, so these rows pin the install's commands, claims and fallback, not the OS.
 winp() { cygpath -w "$1" 2>/dev/null || printf '%s' "$1"; }
 
+# Write a realistic `schtasks /query /tn CorralDaemon /fo LIST /v` dump (CRLF, space-padded
+# values) for a schtasks stub to cat. Values captured from a medium-integrity token on the box.
+win_query_dump() { # <file> <status> <last-run-time> <task-to-run> <schedule-type>
+  {
+    printf 'Folder: \\\n'
+    printf 'HostName:                             WIN-G86E4BG8RLB\n'
+    printf 'TaskName:                             \\CorralDaemon\n'
+    printf 'Status:                               %s\n' "$2"
+    printf 'Last Run Time:                        %s\n' "$3"
+    printf 'Task To Run:                          %s\n' "$4"
+    printf 'Schedule Type:                        %s\n' "$5"
+  } | sed 's/$/\r/' > "$1"
+}
+
 # (a) happy path: onlogon works, task created, launcher carries CORRAL_ADB.
 TASK_A_HOME="$TMP/home-task-a"; TASK_A_SDK="$TASK_A_HOME/Android/Sdk/platform-tools"
 TASK_A_STUB="$TMP/taskstub-a"; TASK_A_LOG="$TMP/taskstub-a.log"
@@ -1118,19 +1132,23 @@ check "task fallback: the exact elevated command for auto-start is PRINTED" \
 check "task fallback: summary says NOT auto-starting" \
   grep -q 'NOT auto-starting' "$TMP/task-b.log"
 
-# (b2) the task already EXISTS and was created by an elevated token, so BOTH creates are refused
-#      with "Access is denied.". The summary must name that task, say the daemon was NOT started, and
-#      print the elevated remove/replace commands — the generic "(schtasks failed)" hides all three.
+# (b2) the task already exists and was created by an elevated token, so BOTH creates are refused
+#      with "Access is denied.". The refusal proves only that this session cannot write: the task
+#      must be READ BACK before the summary claims it exists, and its Status decides whether a
+#      daemon may already be running. The stub answers /query in the real /fo LIST /v shape
+#      (captured from a medium-integrity token on the Windows box; CRLF, padded values).
 TASK_I_HOME="$TMP/home-task-i"; TASK_I_SDK="$TASK_I_HOME/Android/Sdk/platform-tools"
-TASK_I_STUB="$TMP/taskstub-i"; TASK_I_LOG="$TMP/taskstub-i.log"
+TASK_I_STUB="$TMP/taskstub-i"; TASK_I_LOG="$TMP/taskstub-i.log"; TASK_I_Q="$TMP/task-i-query.out"
 mkdir -p "$TASK_I_SDK" "$TASK_I_HOME/bin" "$TASK_I_STUB"; : > "$TASK_I_HOME/.bashrc"
 printf '%s\n' '#!/bin/sh' 'echo "task-i-adb $@"' > "$TASK_I_SDK/adb"; chmod +x "$TASK_I_SDK/adb"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_I_STUB/uname"
+win_query_dump "$TASK_I_Q" Running '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'One Time Only'
 cat > "$TASK_I_STUB/schtasks" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$TASK_I_LOG"
 case " \$* " in
   *" /create "*) echo "ERROR: Access is denied." >&2; exit 5;;
+  *" /query "*) cat "$TASK_I_Q"; exit 0;;
   *) exit 0;;
 esac
 EOF
@@ -1139,12 +1157,138 @@ env HOME="$TASK_I_HOME" PATH="$TASK_I_STUB:$STUB:$PATH" bash "$SRC/install.sh" -
   --adb "$TASK_I_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_I_HOME" >"$TMP/task-i.log" 2>&1; rcti=$?
 dump_on_fail "$rcti" "$TMP/task-i.log"
 TASK_I_BAT="$TASK_I_HOME/bin/corral-daemon.bat"
-check "task access-denied: install exits 0 with both creates attempted and the existing task named" bash -c \
-  "[ '$rcti' -eq 0 ] && grep -qF -- '/sc onlogon' '$TASK_I_LOG' && grep -qF -- '/sc once' '$TASK_I_LOG' && grep -q 'Scheduled Task CorralDaemon ALREADY EXISTS' '$TMP/task-i.log' && grep -q 'could not modify it' '$TMP/task-i.log'"
-check "task access-denied: the summary says the daemon was NOT started, not the generic failure" bash -c \
-  "grep -q 'daemon was NOT started' '$TMP/task-i.log' && ! grep -q 'was NOT created (schtasks failed)' '$TMP/task-i.log'"
+check "task access-denied: install exits 0 with both creates attempted" bash -c \
+  "[ '$rcti' -eq 0 ] && grep -qF -- '/sc onlogon' '$TASK_I_LOG' && grep -qF -- '/sc once' '$TASK_I_LOG'"
+check "task access-denied: the task is READ BACK after both refusals (before and after)" bash -c \
+  "[ \"\$(grep -cF -- '/query /tn CorralDaemon /fo LIST /v' '$TASK_I_LOG')\" -ge 2 ]"
+check "task access-denied: the summary claims existence only from the read, with the real Status" bash -c \
+  "grep -q 'A Scheduled Task CorralDaemon EXISTS (confirmed by schtasks /query; Status: Running)' '$TMP/task-i.log'"
+check "task access-denied: the old unverified 'ALREADY EXISTS' / 'daemon was NOT started' wording is gone" bash -c \
+  "! grep -q 'ALREADY EXISTS' '$TMP/task-i.log' && ! grep -q 'The daemon was NOT started' '$TMP/task-i.log' && ! grep -q 'was NOT created (schtasks failed)' '$TMP/task-i.log'"
+check "task access-denied: it says what it did not do, and that a daemon may already be running" bash -c \
+  "grep -q 'both /create attempts were refused (schtasks: Access is denied)' '$TMP/task-i.log' && grep -q 'Status Running means a daemon may already be serving from it; this run did not start it' '$TMP/task-i.log'"
+check "task access-denied: 'left untouched' is a compared before/after claim" \
+  grep -q 'The task was left untouched: Task To Run, Schedule Type, Status and Last Run Time are the same before and after' "$TMP/task-i.log"
 check "task access-denied: the elevated remove and create commands are PRINTED" bash -c \
   "grep -qF 'schtasks /delete /tn CorralDaemon /f' '$TMP/task-i.log' && grep -qF 'schtasks /create /tn CorralDaemon /tr \"$(winp "$TASK_I_BAT")\" /sc onlogon /rl LIMITED /f' '$TMP/task-i.log'"
+
+# (b2b) both creates refused AND the task cannot be read back: the summary must not invent an
+#       existing task. It names the refusal and the failed read, and asks the operator to look.
+TASK_L_HOME="$TMP/home-task-l"; TASK_L_SDK="$TASK_L_HOME/Android/Sdk/platform-tools"
+TASK_L_STUB="$TMP/taskstub-l"; TASK_L_LOG="$TMP/taskstub-l.log"
+mkdir -p "$TASK_L_SDK" "$TASK_L_HOME/bin" "$TASK_L_STUB"; : > "$TASK_L_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-l-adb $@"' > "$TASK_L_SDK/adb"; chmod +x "$TASK_L_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_L_STUB/uname"
+cat > "$TASK_L_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_L_LOG"
+case " \$* " in
+  *" /create "*) echo "ERROR: Access is denied." >&2; exit 5;;
+  *" /query "*) echo "ERROR: The system cannot find the file specified." >&2; exit 1;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_L_STUB/uname" "$TASK_L_STUB/schtasks"
+env HOME="$TASK_L_HOME" PATH="$TASK_L_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_L_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_L_HOME" >"$TMP/task-l.log" 2>&1; rctl=$?
+dump_on_fail "$rctl" "$TMP/task-l.log"
+check "task access-denied+unreadable: /query is attempted and the install still exits 0" bash -c \
+  "[ '$rctl' -eq 0 ] && grep -qF -- '/query /tn CorralDaemon /fo LIST /v' '$TASK_L_LOG'"
+check "task access-denied+unreadable: no task IS claimed, and the failed read is named" bash -c \
+  "grep -q 'could not be read back' '$TMP/task-l.log' && grep -q 'cannot say whether CorralDaemon exists' '$TMP/task-l.log' && ! grep -q 'EXISTS' '$TMP/task-l.log'"
+check "task access-denied+unreadable: the delete command (which needs a known task) is NOT printed" bash -c \
+  "! grep -qF 'schtasks /delete /tn CorralDaemon /f' '$TMP/task-l.log'"
+
+# (b2c) the task's fields CHANGE between the two reads (its owner re-registered it mid-run): the
+#       summary must say it cannot claim the task was untouched, and must not print the untouched
+#       sentence. The second read is Ready rather than Running — the "not Running" sentence.
+TASK_M_HOME="$TMP/home-task-m"; TASK_M_SDK="$TASK_M_HOME/Android/Sdk/platform-tools"
+TASK_M_STUB="$TMP/taskstub-m"; TASK_M_LOG="$TMP/taskstub-m.log"
+TASK_M_Q1="$TMP/task-m-query-1.out"; TASK_M_Q2="$TMP/task-m-query-2.out"; TASK_M_N="$TMP/task-m-query-count"
+mkdir -p "$TASK_M_SDK" "$TASK_M_HOME/bin" "$TASK_M_STUB"; : > "$TASK_M_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-m-adb $@"' > "$TASK_M_SDK/adb"; chmod +x "$TASK_M_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_M_STUB/uname"
+win_query_dump "$TASK_M_Q1" Running '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'One Time Only'
+win_query_dump "$TASK_M_Q2" Ready   '10/20/2026 1:05:11 PM' 'cmd /c exit 0' 'At logon time'
+cat > "$TASK_M_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_M_LOG"
+n=\$(cat "$TASK_M_N" 2>/dev/null || echo 0); n=\$((n+1)); printf '%s\n' "\$n" > "$TASK_M_N"
+case " \$* " in
+  *" /create "*) echo "ERROR: Access is denied." >&2; exit 5;;
+  *" /query "*) if [ "\$n" -eq 1 ]; then cat "$TASK_M_Q1"; else cat "$TASK_M_Q2"; fi; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_M_STUB/uname" "$TASK_M_STUB/schtasks"
+env HOME="$TASK_M_HOME" PATH="$TASK_M_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_M_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_M_HOME" >"$TMP/task-m.log" 2>&1; rctm=$?
+dump_on_fail "$rctm" "$TMP/task-m.log"
+check "task changed: the summary WARNS, and never claims the task was left untouched" bash -c \
+  "[ '$rctm' -eq 0 ] && grep -q 'WARNING: its Task To Run / Schedule Type / Status / Last Run Time changed between the two reads' '$TMP/task-m.log' && ! grep -q 'The task was left untouched' '$TMP/task-m.log'"
+check "task changed: the AFTER read's non-Running Status gets the 'not Running' sentence" bash -c \
+  "grep -q 'EXISTS (confirmed by schtasks /query; Status: Ready)' '$TMP/task-m.log' && grep -q 'The task is not Running now, and this run did not start it' '$TMP/task-m.log' && ! grep -q 'Status Running means' '$TMP/task-m.log'"
+
+# (b2d) the BEFORE read fails but the AFTER read succeeds: existence is claimable, "left untouched"
+#       is not. The two claims come from different reads and must not be conflated.
+TASK_N_HOME="$TMP/home-task-n"; TASK_N_SDK="$TASK_N_HOME/Android/Sdk/platform-tools"
+TASK_N_STUB="$TMP/taskstub-n"; TASK_N_LOG="$TMP/taskstub-n.log"
+TASK_N_Q="$TMP/task-n-query.out"; TASK_N_N="$TMP/task-n-query-count"
+mkdir -p "$TASK_N_SDK" "$TASK_N_HOME/bin" "$TASK_N_STUB"; : > "$TASK_N_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-n-adb $@"' > "$TASK_N_SDK/adb"; chmod +x "$TASK_N_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_N_STUB/uname"
+win_query_dump "$TASK_N_Q" Ready '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'One Time Only'
+cat > "$TASK_N_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_N_LOG"
+n=\$(cat "$TASK_N_N" 2>/dev/null || echo 0); n=\$((n+1)); printf '%s\n' "\$n" > "$TASK_N_N"
+case " \$* " in
+  *" /create "*) echo "ERROR: Access is denied." >&2; exit 5;;
+  *" /query "*)
+    if [ "\$n" -eq 1 ]; then echo "ERROR: The system cannot find the file specified." >&2; exit 1; fi
+    cat "$TASK_N_Q"; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_N_STUB/uname" "$TASK_N_STUB/schtasks"
+env HOME="$TASK_N_HOME" PATH="$TASK_N_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_N_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_N_HOME" >"$TMP/task-n.log" 2>&1; rctn=$?
+dump_on_fail "$rctn" "$TMP/task-n.log"
+check "task unreadable-before: existence is still claimed from the successful AFTER read" bash -c \
+  "[ '$rctn' -eq 0 ] && grep -q 'EXISTS (confirmed by schtasks /query; Status: Ready)' '$TMP/task-n.log'"
+check "task unreadable-before: without a before read it does NOT claim the task was left untouched" bash -c \
+  "grep -q 'The task could not be read before the attempt, so this run does not claim it was left untouched' '$TMP/task-n.log' && ! grep -q 'The task was left untouched' '$TMP/task-n.log'"
+
+# (b2e) the onlogon create is refused but the /sc once fallback fails for a DIFFERENT reason: "both
+#       attempts were refused with Access is denied" would be a claim about output nobody looked
+#       at. The wording must say which refusal was seen and that the fallback failed otherwise.
+TASK_O_HOME="$TMP/home-task-o"; TASK_O_SDK="$TASK_O_HOME/Android/Sdk/platform-tools"
+TASK_O_STUB="$TMP/taskstub-o"; TASK_O_LOG="$TMP/taskstub-o.log"; TASK_O_Q="$TMP/task-o-query.out"
+mkdir -p "$TASK_O_SDK" "$TASK_O_HOME/bin" "$TASK_O_STUB"; : > "$TASK_O_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-o-adb $@"' > "$TASK_O_SDK/adb"; chmod +x "$TASK_O_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_O_STUB/uname"
+win_query_dump "$TASK_O_Q" Ready '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'One Time Only'
+cat > "$TASK_O_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_O_LOG"
+case " \$* " in
+  *" /create "*)
+    case " \$* " in
+      *" /sc onlogon "*) echo "ERROR: Access is denied." >&2; exit 5;;
+      *) echo "ERROR: The parameter is incorrect." >&2; exit 1;;
+    esac;;
+  *" /query "*) cat "$TASK_O_Q"; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_O_STUB/uname" "$TASK_O_STUB/schtasks"
+env HOME="$TASK_O_HOME" PATH="$TASK_O_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_O_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_O_HOME" >"$TMP/task-o.log" 2>&1; rcto=$?
+dump_on_fail "$rcto" "$TMP/task-o.log"
+check "task one refusal: a fallback failure that is NOT a denial is not reported as one" bash -c \
+  "[ '$rcto' -eq 0 ] && grep -q 'the /sc once fallback failed too, without an access-denied refusal' '$TMP/task-o.log' && ! grep -q 'both /create attempts were refused' '$TMP/task-o.log'"
+check "task one refusal: the refusal that WAS observed is still named" bash -c \
+  "grep -q 'the /sc onlogon create was refused (schtasks: Access is denied)' '$TMP/task-o.log' && grep -q 'The task was left untouched' '$TMP/task-o.log'"
 
 # (b3) a create failure that is NOT access-denied: the specific "task exists" advice must not appear;
 #      the generic wording stays, because nothing says an existing task could not be modified.
@@ -1326,6 +1470,35 @@ env HOME="$POSIX_T_HOME" PATH="$POSIX_T_STUB:$STUB:$PATH" bash "$SRC/install.sh"
 dump_on_fail "$rcpt" "$TMP/posix-task.log"
 check "task: a POSIX install creates no task, no daemon .bat, and never calls schtasks" bash -c \
   "[ '$rcpt' -eq 0 ] && [ ! -e '$POSIX_T_HOME/bin/corral-daemon.bat' ] && [ ! -s '$POSIX_T_LOG' ]"
+
+# (f1) a Windows --home run is a SANDBOX too: it must not create, replace or delete the Scheduled
+#      Task, and must not print the elevated commands. On a box whose CorralDaemon was registered by
+#      a non-elevated token the task is user-owned, so the old unconditional /create SUCCEEDED and
+#      repointed the LIVE task at the sandbox launcher. HOME and --home differ here on purpose:
+#      that difference is what sets SANDBOX=1.
+TASK_K_HOME="$TMP/home-task-k"; TASK_K_SB="$TMP/home-task-k-sandbox"
+TASK_K_SDK="$TASK_K_SB/Android/Sdk/platform-tools"
+TASK_K_STUB="$TMP/taskstub-k"; TASK_K_LOG="$TMP/taskstub-k.log"
+mkdir -p "$TASK_K_SDK" "$TASK_K_SB/bin" "$TASK_K_HOME" "$TASK_K_STUB"; : > "$TASK_K_SB/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-k-adb $@"' > "$TASK_K_SDK/adb"; chmod +x "$TASK_K_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_K_STUB/uname"
+cat > "$TASK_K_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_K_LOG"
+echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
+exit 0
+EOF
+chmod +x "$TASK_K_STUB/uname" "$TASK_K_STUB/schtasks"
+: > "$TASK_K_LOG"
+env HOME="$TASK_K_HOME" PATH="$TASK_K_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_K_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_K_SB" >"$TMP/task-k.log" 2>&1; rctk=$?
+dump_on_fail "$rctk" "$TMP/task-k.log"
+check "task sandbox: a Windows --home install exits 0 and never calls schtasks" bash -c \
+  "[ '$rctk' -eq 0 ] && [ ! -s '$TASK_K_LOG' ]"
+check "task sandbox: it says no task was created/replaced/deleted and no daemon was started" bash -c \
+  "grep -q 'sandbox: no Scheduled Task CorralDaemon was created, replaced or deleted' '$TMP/task-k.log' && grep -q 'This installer started no daemon either' '$TMP/task-k.log'"
+check "task sandbox: the elevated schtasks advice is NOT printed (it would name the sandbox launcher)" bash -c \
+  "! grep -qF 'schtasks /create' '$TMP/task-k.log' && ! grep -qF 'schtasks /delete' '$TMP/task-k.log' && ! grep -q 'auto-starts at logon' '$TMP/task-k.log'"
 
 # (f2) the launcher write itself fails (ENOSPC here via /dev/full): the summary must name the WRITE
 #      failure, not blame an unspellable path, and must still say no task/no daemon.

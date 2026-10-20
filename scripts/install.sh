@@ -116,10 +116,18 @@ cmd_unspellable() { # cmd_unspellable <value>
 }
 
 # schtasks can exit 0 and still print an error line, so success needs BOTH a zero exit and clean
-# output. Used for create, end and delete; a delete of a task that does not exist is not an error.
+# output. Used for create, end, query and delete; a delete of a task that does not exist is not an error.
 task_ok() { # task_ok <exit-code> <output>
   [ "$1" -eq 0 ] || return 1
   ! printf '%s' "$2" | grep -qiE '^(error|failed)([[:space:]:]|$)|access is denied'
+}
+
+# The fields a refused create could have changed, and the only evidence that one did not. schtasks
+# pads each value with spaces and ends lines with CRLF; `Schedule:` also exists, so match the exact
+# names. Compared as one block, before versus after the create attempts.
+task_fingerprint() { # task_fingerprint <schtasks /query /fo LIST /v output>
+  printf '%s\n' "$1" | tr -d '\r' \
+    | grep -E '^(Status|Task To Run|Schedule Type|Last Run Time):' | sed 's/[[:space:]]*$//'
 }
 
 # Git Bash rewrites native-program arguments that start with `/` (e.g. /create) into paths. These
@@ -740,23 +748,55 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
   # fall back to the one that works, and report which one actually happened.
   TASK_STATE=failed
   TASK_DENIED=0
+  TASK_BOTH_DENIED=0
   TASK_ELEV=""
+  TASK_READ=0
+  TASK_STATUS=""
+  TASK_UNTOUCHED=2   # 1 = verified unchanged, 0 = verified changed, 2 = no before-read to compare
   if [[ $LAUNCHER_OK -eq 1 ]]; then
     TASK_WIN_BAT=$(win_path "$DAEMON_BAT")
     TASK_ELEV="schtasks /create /tn CorralDaemon /tr \"$TASK_WIN_BAT\" /sc onlogon /rl LIMITED /f"
-    if command -v schtasks >/dev/null 2>&1; then
-      task_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc onlogon /rl LIMITED /f 2>&1); task_rc=$?
-      if task_ok "$task_rc" "$task_out"; then
-        TASK_STATE=onlogon-created
+  fi
+  # --home is a sandbox, and the POSIX branch skips systemctl for one; on Windows it must not
+  # create, replace or delete the Scheduled Task either. This is not cosmetic: a task registered by
+  # a non-elevated token is user-owned (the user SID keeps an inherited Full allow), so the create
+  # SUCCEEDS there and silently repoints the live CorralDaemon at this sandbox's launcher.
+  if [[ $SANDBOX -eq 1 ]]; then
+    TASK_STATE=sandbox
+  elif [[ $LAUNCHER_OK -eq 1 ]] && command -v schtasks >/dev/null 2>&1; then
+    # "the existing task was left untouched" is a claim that needs a before and an after, not an
+    # inference from the refusal; a medium-integrity token CAN read the task (verified on a real
+    # box), so snapshot the fields a refused create could have changed.
+    task_before=$(schtasks_run /query /tn CorralDaemon /fo LIST /v 2>&1); before_rc=$?
+    if task_ok "$before_rc" "$task_before"; then task_before=$(task_fingerprint "$task_before"); else task_before=""; fi
+    task_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc onlogon /rl LIMITED /f 2>&1); task_rc=$?
+    if task_ok "$task_rc" "$task_out"; then
+      TASK_STATE=onlogon-created
+      run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
+      if task_ok "$run_rc" "$run_out"; then TASK_STATE=onlogon; fi
+    elif printf '%s' "$task_out" | grep -qi 'access is denied'; then
+      TASK_DENIED=1
+      once_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc once /st 00:00 /rl LIMITED /f 2>&1); once_rc=$?
+      if task_ok "$once_rc" "$once_out"; then
+        TASK_STATE=once-norun
         run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
-        if task_ok "$run_rc" "$run_out"; then TASK_STATE=onlogon; fi
-      elif printf '%s' "$task_out" | grep -qi 'access is denied'; then
-        TASK_DENIED=1
-        once_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc once /st 00:00 /rl LIMITED /f 2>&1); once_rc=$?
-        if task_ok "$once_rc" "$once_out"; then
-          TASK_STATE=once-norun
-          run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
-          if task_ok "$run_rc" "$run_out"; then TASK_STATE=once; fi
+        if task_ok "$run_rc" "$run_out"; then TASK_STATE=once; fi
+      elif printf '%s' "$once_out" | grep -qi 'access is denied'; then
+        # Say "both were refused" only when the fallback's own output says so too.
+        TASK_BOTH_DENIED=1
+      fi
+      if [[ $TASK_STATE == failed ]]; then
+        # Both creates failed. Read the task back before saying anything about it: a refusal
+        # proves this session could not write, never that a task exists.
+        task_after=$(schtasks_run /query /tn CorralDaemon /fo LIST /v 2>&1); after_rc=$?
+        if task_ok "$after_rc" "$task_after"; then
+          TASK_READ=1
+          TASK_STATUS=$(printf '%s\n' "$task_after" | tr -d '\r' \
+            | sed -n 's/^Status:[[:space:]]*//p' | head -1 | sed 's/[[:space:]]*$//')
+          task_after=$(task_fingerprint "$task_after")
+          if [[ -n "$task_before" ]]; then
+            if [[ "$task_after" == "$task_before" ]]; then TASK_UNTOUCHED=1; else TASK_UNTOUCHED=0; fi
+          fi
         fi
       fi
     fi
@@ -786,13 +826,42 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
       echo "  Run this from an elevated prompt to auto-start at logon:"
       echo "  $TASK_ELEV"
       ;;
+    sandbox)
+      echo "  sandbox: no Scheduled Task CorralDaemon was created, replaced or deleted (--home $TARGET_HOME != \$HOME)."
+      echo "  This installer started no daemon either."
+      ;;
     *)
       if [[ $TASK_DENIED -eq 1 ]]; then
-        echo "  A Scheduled Task CorralDaemon ALREADY EXISTS and this session could not modify it (schtasks: Access is denied)."
-        echo "  The daemon was NOT started; the existing task was left untouched."
-        echo "  From an elevated prompt, remove or replace it, then re-run install.sh:"
-        echo "  schtasks /delete /tn CorralDaemon /f"
-        echo "  $TASK_ELEV"
+        if [[ $TASK_READ -eq 1 ]]; then
+          echo "  A Scheduled Task CorralDaemon EXISTS (confirmed by schtasks /query; Status: ${TASK_STATUS:-unknown})."
+          if [[ $TASK_BOTH_DENIED -eq 1 ]]; then
+            echo "  This installer could not modify it: both /create attempts were refused (schtasks: Access is denied),"
+            echo "  so it created no task and started no daemon."
+          else
+            echo "  This installer could not modify it: the /sc onlogon create was refused (schtasks: Access is denied) and"
+            echo "  the /sc once fallback failed too, without an access-denied refusal. It started no daemon either way."
+          fi
+          case "$TASK_UNTOUCHED" in
+            1) echo "  The task was left untouched: Task To Run, Schedule Type, Status and Last Run Time are the same before and after.";;
+            0) echo "  WARNING: its Task To Run / Schedule Type / Status / Last Run Time changed between the two reads, so this run cannot claim it left the task untouched.";;
+            *) echo "  The task could not be read before the attempt, so this run does not claim it was left untouched.";;
+          esac
+          if [[ "$TASK_STATUS" == "Running" ]]; then
+            echo "  Status Running means a daemon may already be serving from it; this run did not start it."
+          else
+            echo "  The task is not Running now, and this run did not start it."
+          fi
+          echo "  From an elevated prompt, remove or replace it, then re-run install.sh:"
+          echo "  schtasks /delete /tn CorralDaemon /f"
+          echo "  $TASK_ELEV"
+        else
+          echo "  This session's schtasks /create was refused (Access is denied) and the task could not be read back"
+          echo "  (schtasks /query failed too), so this installer cannot say whether CorralDaemon exists."
+          echo "  It created no task and started no daemon."
+          echo "  From an elevated prompt, check for it, then create or replace it and re-run install.sh:"
+          echo "  schtasks /query /tn CorralDaemon /fo LIST /v"
+          echo "  $TASK_ELEV"
+        fi
       elif [[ $LAUNCHER_OK -eq 1 ]]; then
         echo "  Scheduled Task CorralDaemon was NOT created (schtasks failed) — the daemon was NOT started."
       elif [[ $LAUNCHER_UNSPELLABLE -eq 1 ]]; then

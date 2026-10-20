@@ -47,9 +47,19 @@ class ApiTest {
                Device("dev2", "device", model = "SM-S918B", osVersion = "13"))
     }
 
-    @AfterTest fun cleanConfigFixtures() {
+    /** Both ends: a stale file left by an earlier run must not decide what a config test writes. */
+    @BeforeTest @AfterTest fun cleanConfigFixtures() {
         Files.deleteIfExists(RulesFile.defaultPath())
         Files.deleteIfExists(DaemonConfig.defaultPath())
+    }
+
+    /** L1 hermeticity: the config files the suite writes stay in the sandbox, never the developer's ~/.config. */
+    @Test fun configFilesStayInsideTheTestHomeSandbox() {
+        val home = Path.of(System.getProperty("user.home")).toAbsolutePath()
+        assertTrue(home.endsWith(Path.of("build", "test-home")),
+            "tests must run with user.home at build/test-home, was $home")
+        for (path in listOf(RulesFile.defaultPath(), DaemonConfig.defaultPath()))
+            assertTrue(path.toAbsolutePath().startsWith(home), "$path escapes the test-home sandbox $home")
     }
 
     private fun ApplicationTestBuilder.corral(

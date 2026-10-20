@@ -127,7 +127,10 @@ the same device.
   back (rather than exiting) on an unusable `daemon.env` value. `GET /api/doctor` mirrors
   `corral doctor`'s three layers (`daemon` / `sdk-shim` / `rules`) and is read-only; the `rules`
   layer reports `warn` when a hand-edited `readonly` holds a non-host-only command or the identity
-  lists differ from the defaults.
+  lists differ from the defaults. An empty pool stays `ok`, but the `daemon` layer (and `corral
+  doctor`) then adds a hint that an `adb reconnect` can leave the adb server's device list empty
+  until the server is restarted, with the `adb kill-server && adb start-server` recovery — so zero
+  devices no longer reads as only "nothing is plugged in".
 - **Desktop UI** — `corral-ui [--url http://127.0.0.1:port]` (else `CORRAL_URL`, then the stored
   pref, default `http://127.0.0.1:8798`; the daemon is loopback-only, so `--url` picks a
   non-default local port unless the operator deliberately rebinds it) opens a Compose operator

@@ -99,6 +99,14 @@ import kotlinx.serialization.json.decodeFromJsonElement
 
 @Serializable data class DoctorResponse(val adb: String, val layers: List<DoctorLayer>)
 
+/**
+ * The empty-pool hint: a possibility plus the recovery, never a diagnosis — the daemon cannot tell
+ * `adb reconnect` from an unplugged device, both leave the same empty list.
+ */
+internal const val EMPTY_POOL_HINT =
+    "an adb reconnect can leave the adb server's device list empty until the server is restarted; " +
+        "if devices are plugged in, run: adb kill-server && adb start-server"
+
 class AppEnv(
     /**
      * The served pool. Callers pass inventory already filtered by [Emulators.liveDevices] once; never
@@ -281,9 +289,11 @@ fun Application.corralModule(env: AppEnv) {
                 reasons.isNotEmpty() -> DoctorLayer("rules", "warn", "$rulesPath ${reasons.joinToString("; ")}")
                 else -> DoctorLayer("rules", "ok", "$rulesPath (${rules.readonly.size} readonly)")
             }
-            val wedged = wedgedAvds(env.devices(), env.emulators)
+            val devices = env.devices()
+            val wedged = wedgedAvds(devices, env.emulators)
             call.respond(DoctorResponse(adbPath, listOfNotNull(
-                DoctorLayer("daemon", "ok", "serving ${env.devices().size} device(s)"),
+                DoctorLayer("daemon", "ok",
+                    "serving ${devices.size} device(s)" + if (devices.isEmpty()) " - $EMPTY_POOL_HINT" else ""),
                 DoctorLayer("sdk-shim", shimStatus, shimDetail),
                 rulesLayer,
                 wedged.takeIf { it.isNotEmpty() }?.let { w ->

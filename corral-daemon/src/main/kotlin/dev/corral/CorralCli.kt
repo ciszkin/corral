@@ -48,6 +48,10 @@ internal fun emulatorProblems(doctor: DoctorResponse?): List<String> =
         .filter { it.layer == "emulators" && it.status == "fail" }
         .map { it.detail }
 
+/** The empty-pool hint, only for a reachable daemon that lists no device — never for an unreachable one. */
+internal fun emptyPoolHint(devices: List<Device>?): String? =
+    EMPTY_POOL_HINT.takeIf { devices != null && devices.isEmpty() }
+
 /** The doctor's one update line. Switches on the explicit state — never says "current" when unknown. */
 internal fun updateLine(info: UpdateInfo?): String = when (info?.state) {
     null -> "update: unknown (could not read /api/update)"
@@ -502,6 +506,8 @@ object CorralCli {
                 } catch (_: Exception) { null }
                 if (pool != null) println("daemon: ok ($url, ${pool.size} device(s))")
                 else { println("daemon: FAIL - unreachable at $url (is it running? systemctl --user status corral)"); problems++ }
+                // an empty pool is not a failure, but silence reads as "nothing is plugged in"
+                emptyPoolHint(pool)?.let { println("devices: hint - $it") }
                 // a wedged emulator is stuck, not booting: name it and its remedy (Windows smoke H2).
                 // Read the daemon's own doctor layer, not the pool: a wedge before adb lists the AVD
                 // has no pool serial to flag, so /api/doctor is the only place that knows about it.

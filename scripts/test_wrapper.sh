@@ -308,6 +308,30 @@ check "corral doctor reports daemon status" bash -c '
   corral doctor 2>&1 | grep -q "daemon: ok"
 '
 
+# an empty pool must not read as "nothing is plugged in": doctor prints the adb-reconnect
+# possibility and its recovery, and still exits 0 (nothing is failing)
+check "corral doctor prints the empty-pool hint and exits 0" bash -c '
+  : > "$TMP/empty-devices"
+  # a daemon left on 8801 by another session would answer below; take the next free port
+  port=8801
+  while curl -sf --max-time 1 "http://127.0.0.1:$port/api/devices" >/dev/null 2>&1; do port=$((port+1)); done
+  setsid env CORRAL_FAKE_DEVICES="$TMP/empty-devices" CORRAL_DB="$TMP/corral3.db" CORRAL_PORT=$port \
+    java -Dcorral.test.tag=doctor-empty -jar "$CORRAL_JAR" </dev/null >"$TMP/daemon3.log" 2>&1 &
+  d3=$!
+  up=0
+  for i in $(seq 1 30); do
+    curl -sf "http://127.0.0.1:$port/api/devices" >/dev/null 2>&1 && { up=1; break; }; sleep 0.2
+  done
+  [ $up -eq 1 ] || { kill $d3 2>/dev/null; cat "$TMP/daemon3.log" >&2; exit 1; }
+  # pin the SDK probe too, or the exit code reflects the host SDK state, not the pool
+  out=$(CORRAL_URL="http://127.0.0.1:$port" CORRAL_ADB="$TMP/fake-adb" corral doctor 2>&1); rc=$?
+  kill $d3 2>/dev/null
+  echo "$out" | grep -q "^devices: hint - .*adb kill-server && adb start-server" \
+    || { echo "no empty-pool hint in: $out" >&2; exit 1; }
+  [ $rc -eq 0 ] || { echo "doctor exited $rc on an empty pool: $out" >&2; exit 1; }
+  exit 0
+'
+
 # a daemon whose configured adb no longer exists must FAIL doctor rather than silently pass
 # this shell's own SDK tree (a fallback chain used to mask the stale daemon config)
 check "doctor fails on the daemon's stale adb, not the shell's tree" bash -c '

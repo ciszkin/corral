@@ -6,6 +6,7 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class CorralCliExecTest {
@@ -162,6 +163,14 @@ class CorralCliExecTest {
         // The caller falls back to the bare name when the resolver finds nothing, launching it directly.
         val argv = commandArgv(listOf("adb", "devices"), windows = true, resolve = { null })
         assertEquals(listOf("adb", "devices"), argv)
+    }
+
+    // --- doctor: the empty-pool hint reaches the CLI only for a reachable, genuinely empty pool ---
+
+    @Test fun emptyPoolHintOnlyForAnEmptyReachablePool() {
+        assertNull(emptyPoolHint(null))
+        assertNull(emptyPoolHint(listOf(Device("dev1", "device"))))
+        assertEquals(EMPTY_POOL_HINT, emptyPoolHint(emptyList()))
     }
 
     // --- the lease is handed back however the wrapped command ends ---

@@ -1111,7 +1111,19 @@ class ApiTest {
             assertEquals("ok", body.layers.first { it.layer == "sdk-shim" }.status)
             assertEquals("ok", body.layers.first { it.layer == "rules" }.status)
             assertEquals(realAdb.toString(), body.adb)
+            assertEquals("serving 2 device(s)", body.layers.first { it.layer == "daemon" }.detail,
+                "a populated pool must not carry the empty-pool hint")
         }
+    }
+
+    /** An empty pool must name the known cause as a possibility and the recovery — never a diagnosis. */
+    @Test fun doctorHintsAtTheAdbServerWhenThePoolIsEmpty() = withApi(emptyList()) { c ->
+        val daemon = Json.decodeFromString<DoctorResponse>(c.get("/api/doctor").bodyAsText())
+            .layers.first { it.layer == "daemon" }
+        assertEquals("ok", daemon.status, "an empty pool is not a failure: ${daemon.detail}")
+        assertTrue(daemon.detail.contains("serving 0 device(s)"), daemon.detail)
+        assertTrue(daemon.detail.contains("an adb reconnect can leave"), "cause must be a possibility: ${daemon.detail}")
+        assertTrue(daemon.detail.contains("adb kill-server && adb start-server"), "must give the recovery: ${daemon.detail}")
     }
 
     @Test fun doctorReportsRulesFailAndShimSkipped() {

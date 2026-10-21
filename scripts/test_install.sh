@@ -56,6 +56,9 @@ chmod +x "$FAKE_ADB" "$FAKE_JAVA" "$STUB/systemctl" "$STUB/uname"
 # Sandbox the child env: HOME is both exported and passed via --home (belt and braces).
 export HOME="$TMPHOME"
 unset ANDROID_HOME ANDROID_SDK_ROOT JAVA_HOME
+# A CORRAL_REAL_ADB in the caller's environment would make the installed wrapper exec the host's real
+# adb instead of the sandbox's fake, so every wrapper row here would silently test the wrong binary.
+unset CORRAL_REAL_ADB
 export PATH="$STUB:$PATH"
 
 install_run() {
@@ -129,6 +132,106 @@ check "9.6 user rules edit survives re-run" grep -q 'sandbox sentinel edit' "$RU
 check "9.9 daemon.env edit survives re-run" grep -q 'sandbox daemon.env sentinel edit' "$DAEMON_ENV"
 check "9.3 artifacts intact after re-run" bash -c \
   "[ -f '$UNIT' ] && [ -x '$TMPHOME/bin/adb' ] && grep -q 'corral adb wrapper' '$TMPHOME/bin/adb' && [ -f '$SDK/adb.real' ]"
+
+# ===== review 43 §2: the shims are replaced by rename, never rewritten under a running call =====
+# bash reads a script as it runs and resumes at the SAME byte offset after each top-level command, so
+# `cp` onto an installed shim makes a call parked in its gate `curl` resume in the NEW file at the OLD
+# offset: a garbled line, and often rc=0 with adb never run. Measured on the pre-change installer
+# (6bc9a83): `~/bin/adb: line 121: les}: command not found`, rc=0, no adb output. The static guards
+# pin the mechanism; the live probe below reproduces the hazard and fails against a `cp`-in-place
+# installer.
+shim_cp=$(grep -nE 'cp[[:space:]]+"\$SCRIPT_DIR/(adb-wrapper|corral)"' "$SRC/install.sh" || true)
+check "shims: no in-place cp of the wrapper or the corral shim (review 43 §2)" test -z "$shim_cp"
+check "shims: ~/bin/adb, ~/bin/corral and the SDK adb all go through replace_file" \
+  test "$(grep -cE 'replace_file "\$SCRIPT_DIR/(adb-wrapper|corral)"' "$SRC/install.sh")" -eq 3
+check "shims: every shim replace sets mode 755 on the temp file before the rename" \
+  test "$(grep -cE 'replace_file "\$SCRIPT_DIR/(adb-wrapper|corral)"[^|]*" 755' "$SRC/install.sh")" -eq 3
+check "shims: the installed SDK adb shim is executable" test -x "$SDK/adb"
+
+# The live probe, on its own sandbox: install, then a call parks inside its gate `curl` while a
+# re-install from a "next release" bundle adds 60 comment lines to the wrapper (any real edit shifts
+# the offsets the same way). A rename leaves that call on the old inode and it completes normally.
+FL="$TMP/home-inflight"; SDK_FL="$FL/Android/Sdk/platform-tools"; FL_STUB="$TMP/flstub"
+mkdir -p "$SDK_FL" "$FL/bin" "$FL_STUB"; : > "$FL/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "inflight-adb $@"' > "$SDK_FL/adb"; chmod +x "$SDK_FL/adb"
+env HOME="$FL" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$SDK_FL/adb" \
+  --jar "$JAR" --no-ui --home "$FL" >"$TMP/inflight-install.log" 2>&1; rcf=$?
+dump_on_fail "$rcf" "$TMP/inflight-install.log"
+check "shims: the probe sandbox installs" test "$rcf" -eq 0
+
+FL_BUNDLE="$TMP/inflight-bundle"; mkdir -p "$FL_BUNDLE"
+cp "$SRC/install.sh" "$SRC/corral" "$SRC/corral.service" "$SRC/corral-gate.gradle.kts" \
+   "$SRC/corral-rules" "$FL_BUNDLE/"
+{ head -1 "$SRC/adb-wrapper"; for i in $(seq 1 60); do echo "# next release marker $i"; done; \
+  tail -n +2 "$SRC/adb-wrapper"; } > "$FL_BUNDLE/adb-wrapper"
+chmod +x "$FL_BUNDLE/adb-wrapper"
+check "shims: the next-release wrapper is a valid, shifted copy" \
+  bash -c "[ \"\$(wc -c < '$FL_BUNDLE/adb-wrapper')\" -gt \"\$(wc -c < '$SRC/adb-wrapper')\" ] && bash -n '$FL_BUNDLE/adb-wrapper'"
+
+# The gate answer stays pending until the probe lets it through: `$TMP/inflight-parked` is touched by
+# the stub the moment the wrapper is inside its lease check, and the re-install runs while it waits.
+cat > "$FL_STUB/curl" <<EOF
+#!/bin/sh
+: > "$TMP/inflight-parked"
+while [ ! -e "$TMP/inflight-allow" ]; do sleep 0.05; done
+printf '{"allowed":true}\n'
+EOF
+chmod +x "$FL_STUB/curl"
+
+env HOME="$FL" CORRAL_OWNER=inflight PATH="$FL_STUB:$STUB:$PATH" \
+  "$FL/bin/adb" -s fakeA shell echo hi >"$TMP/inflight-call.log" 2>&1 &
+call_pid=$!
+for _ in $(seq 1 200); do [ -e "$TMP/inflight-parked" ] && break; sleep 0.05; done
+parked=0; [ -e "$TMP/inflight-parked" ] && parked=1
+check "shims: the adb call reached its gate check (probe is genuinely in flight)" test "$parked" -eq 1
+env HOME="$FL" PATH="$STUB:$PATH" bash "$FL_BUNDLE/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_FL/adb" --jar "$JAR" --no-ui --home "$FL" >"$TMP/inflight-reinstall.log" 2>&1; rcr=$?
+check "shims: the re-install that replaces the wrapper mid-call exits 0" test "$rcr" -eq 0
+: > "$TMP/inflight-allow"     # let the parked gate check answer
+wait "$call_pid"; call_rc=$?
+echo "--- in-flight call output (review 43 §2 probe) ---"
+cat "$TMP/inflight-call.log"
+echo "rc=$call_rc"
+check "shims: the in-flight call does not resume in the new file (no garbled line)" \
+  bash -c "! grep -qE 'command not found|syntax error|unexpected' '$TMP/inflight-call.log'"
+check "shims: the in-flight call still ran the real adb" \
+  grep -qx 'inflight-adb -s fakeA shell echo hi' "$TMP/inflight-call.log"
+check "shims: the in-flight call exits 0 for the right reason (adb ran)" test "$call_rc" -eq 0
+check "shims: ~/bin/adb now holds the new wrapper, executable, no temp file left" bash -c \
+  "grep -q 'next release marker 60' '$FL/bin/adb' && [ -x '$FL/bin/adb' ] && ! ls '$FL/bin' | grep -q '\.new\.'"
+check "shims: the SDK adb shim was replaced the same way" bash -c \
+  "grep -q 'next release marker 60' '$SDK_FL/adb' && [ -x '$SDK_FL/adb' ] && ! ls '$SDK_FL' | grep -q '\.new\.'"
+
+# ===== review 43 §2: a failed replace after the adb stash gives the real adb back =====
+# The stash-then-shim order means a failure between the two would leave the SDK with NO adb at all.
+# Fault-inject exactly that: the temp-file rename is refused (a full disk, or the class of failure the
+# replace is there to survive), while the stash to adb.real and the restore from it both go through.
+# The install must refuse, put the real adb back byte for byte, leave no temp file, and say so.
+SF_STUB="$TMP/shimfailstub"; mkdir -p "$SF_STUB"
+REAL_MV2=$(command -v mv)
+printf '%s\n' '#!/bin/sh' \
+  'for a in "$@"; do case "$a" in */platform-tools/adb.new.*) echo "mv: cannot move $a: No space left on device" >&2; exit 1;; esac; done' \
+  "exec $REAL_MV2 \"\$@\"" > "$SF_STUB/mv"
+chmod +x "$SF_STUB/mv"
+SF_HOME="$TMP/home-shimfail"; SDK_SF="$SF_HOME/Android/Sdk/platform-tools"
+mkdir -p "$SDK_SF" "$SF_HOME/bin"; : > "$SF_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "shimfail-real-adb $@"' > "$SDK_SF/adb"; chmod +x "$SDK_SF/adb"
+SF_SHA=$(sha256sum "$SDK_SF/adb" | cut -d' ' -f1)
+env HOME="$SF_HOME" PATH="$SF_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_SF/adb" --jar "$JAR" --no-ui --home "$SF_HOME" >"$TMP/shimfail.log" 2>&1; rcsf=$?
+check "SDK shim replace fails: the install refuses (non-zero)" test "$rcsf" -ne 0
+check "SDK shim replace fails: says the shim was not installed and the real adb was restored" bash -c \
+  "grep -q 'failed to install the SDK adb shim at $SDK_SF/adb; restored the real adb' '$TMP/shimfail.log'"
+check "SDK shim replace fails: the real adb is back, byte for byte, and executable" bash -c \
+  "[ \"\$(sha256sum '$SDK_SF/adb' | cut -d' ' -f1)\" = '$SF_SHA' ] && [ -x '$SDK_SF/adb' ]"
+check "SDK shim replace fails: adb.real was consumed by the restore (no second copy left)" \
+  test ! -e "$SDK_SF/adb.real"
+check "SDK shim replace fails: no temp file is left in the SDK dir" bash -c \
+  "! ls '$SDK_SF' | grep -q '\.new\.'"
+check "SDK shim replace fails: no install summary claims success" bash -c \
+  "! grep -q '==> Installed' '$TMP/shimfail.log'"
+check "SDK shim replace fails: it says absolute-path adb calls are not gated" \
+  grep -q 'NOT lease-gated' "$TMP/shimfail.log"
 
 # 9.7/9.8 uninstall
 uninstall_run >"$TMP/uninstall.log" 2>&1; rcu=$?
@@ -659,7 +762,15 @@ else
   posix_snapshot "$TMP/posix-pre-bundle" posix-pre
   posix_snapshot "$TMP/posix-new-bundle" posix-new
   check "POSIX: exit code matches the pre-change installer" cmp -s "$TMP/posix-pre.rc" "$TMP/posix-new.rc"
-  check "POSIX: every message matches the pre-change installer (byte-for-byte)" cmp -s "$TMP/posix-pre.log" "$TMP/posix-new.log"
+  # One message is deliberately rewritten by this change: the closing checklist hint now also names
+  # the bundle's own copy (review 43 §3), which a bundle-only reader needs. Everything else stays
+  # byte-pinned, including the whole install summary around it. This deletes that line from BOTH
+  # sides, so the line itself is pinned by its own assertion in the docs block below — nothing about
+  # it may be left unpinned.
+  sed '/^Cutover checklist (/d' "$TMP/posix-pre.log" > "$TMP/posix-pre.log.cmp"
+  sed '/^Cutover checklist (/d' "$TMP/posix-new.log" > "$TMP/posix-new.log.cmp"
+  check "POSIX: every message matches the pre-change installer (byte-for-byte, minus the rewritten checklist hint)" \
+    cmp -s "$TMP/posix-pre.log.cmp" "$TMP/posix-new.log.cmp"
   check "POSIX: installed files + contents match the pre-change installer" cmp -s "$TMP/posix-pre.files" "$TMP/posix-new.files"
 fi
 
@@ -1778,6 +1889,33 @@ check "uninstall no-powershell: claims neither 'daemon stopped' nor 'no daemon p
   "! grep -q 'daemon stopped' '$TMP/nops-uninstall.log' && ! grep -q 'no daemon process was running' '$TMP/nops-uninstall.log'"
 check "uninstall no-powershell: says the daemon process could not be identified" bash -c \
   "grep -q 'PowerShell was not found, so the corral daemon process could not be identified' '$TMP/nops-uninstall.log'"
+
+# ===== review 43 §3: the README's cutover links must resolve where the README is =====
+# README.md is shipped verbatim in the bundle, so its [CUTOVER.md](CUTOVER.md#updates) link has to
+# resolve in the extracted bundle AND in a checkout — with that exact case (the bundle used to ship
+# `cutover.md`, which is a 404 on Linux and on GitHub) — and the anchor has to name a real section.
+# This block runs in both modes: the bundle's own README beside the bundle's CUTOVER.md, or the
+# repo README beside the repo's CUTOVER.md.
+DOCDIR="$ROOT"; [ -f "$SRC/README.md" ] && DOCDIR="$SRC"
+check "docs: the README's cutover doc is a file named exactly as linked" test -f "$DOCDIR/CUTOVER.md"
+# The listing, not the path: on a case-insensitive filesystem (macOS) `cutover.md` IS `CUTOVER.md`,
+# so `test ! -e` fails there — the one platform where a name mismatch is invisible. An exact-name
+# listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.
+check "docs: no lowercase cutover.md shipped beside it (exact-name listing, so a case-insensitive host cannot fool it)" \
+  bash -c "[ -z \"\$(ls '$DOCDIR' | grep -x cutover.md)\" ]"
+# The closing hint is the only pointer a bundle-only reader gets to the checklist, and the POSIX guard
+# above deletes it from both logs before comparing — so pin it here, explicitly: it must be emitted,
+# and it must name the source doc AND the copy a bundle-only reader actually has.
+check "docs: the installer's closing hint names the source doc and the bundle's copy" grep -qxF \
+  "Cutover checklist (in the corral source repo, scripts/cutover.md; in the bundle, CUTOVER.md beside this installer): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi," \
+  "$TMP/install1.log"
+doc_anchors=$(grep -E '^#+ ' "$DOCDIR/CUTOVER.md" | tr 'A-Z' 'a-z' \
+  | sed -E 's/^#+ //; s/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
+doc_frags=$(grep -oE '\]\(CUTOVER\.md#[a-z0-9-]+\)' "$DOCDIR/README.md" | sed -E 's/^\]\(CUTOVER\.md#//; s/\)$//')
+check "docs: the README links to at least one cutover section" test -n "$doc_frags"
+for frag in $doc_frags; do
+  check "docs: README's CUTOVER.md#$frag names a real section" grep -qxF "$frag" <<<"$doc_anchors"
+done
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 exit "$fail"

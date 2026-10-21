@@ -422,11 +422,18 @@ resolve_ui_jar() {
 # A temp file in the target's own directory plus a rename is atomic: the running JVM keeps the old
 # inode, the next start gets the new one. On Windows the rename itself fails while a JVM holds the
 # jar open, and the caller must say the replacement did NOT happen rather than claim success.
-replace_file() { # replace_file <src> <dst> <label>
-  local src="$1" dst="$2" label="$3" tmp="$2.new.$$"
+replace_file() { # replace_file <src> <dst> <label> [mode]
+  # The optional mode is set on the TEMP file, before the rename: the shims are executables, and a
+  # rename carries the mode over, so `mv -f` alone would install a non-executable wrapper.
+  local src="$1" dst="$2" label="$3" mode="${4:-}" tmp="$2.new.$$"
   if ! cp "$src" "$tmp"; then
     rm -f "$tmp"
     echo "ERROR: cannot copy $src to $tmp; $label was NOT replaced." >&2
+    return 1
+  fi
+  if [ -n "$mode" ] && ! chmod "$mode" "$tmp"; then
+    rm -f "$tmp"
+    echo "ERROR: cannot set mode $mode on $tmp; $label was NOT replaced." >&2
     return 1
   fi
   if ! mv -f "$tmp" "$dst"; then
@@ -456,18 +463,24 @@ install_sdk_shim() {
     fi
     echo "Stashed real adb as $ADB.real (or replaced a stale one)"
   fi
-  # cp/chmod are unchecked by set -u; on an incomplete bundle, a read-only SDK dir or a full disk they
-  # can fail AFTER the real adb was moved to adb.real, which would leave the SDK with no adb at all.
-  # Treat any failure as fatal and put the real adb back rather than keep a false "active" claim.
-  if ! cp "$SCRIPT_DIR/adb-wrapper" "$adb_path" || ! chmod +x "$adb_path" \
+  # Both copies go through replace_file, never a `cp` in place: bash reads a script as it runs and
+  # resumes at the same byte offset after each top-level command, so rewriting the wrapper under a
+  # call that is inside its gate `curl` makes the rest of that call come from the NEW file at the OLD
+  # offset — a garbled line, or a different line, and often a silent success without adb ever running
+  # (review pass 43 §2). A temp file plus a rename leaves the running call on the old inode. The 755
+  # is set on the temp file because the rename carries the mode: the shim must stay executable.
+  # On any failure: the temp file is gone, the old file is still in place, and the caller restores
+  # the real adb rather than leave the SDK with no adb at all.
+  if ! replace_file "$SCRIPT_DIR/adb-wrapper" "$adb_path" "the SDK adb shim" 755 \
      || ! grep -q 'corral adb wrapper' "$adb_path" 2>/dev/null; then
     if [ -e "$adb_path.real" ]; then
       mv -f "$adb_path.real" "$adb_path"
       echo "ERROR: failed to install the SDK adb shim at $adb_path; restored the real adb from $adb_path.real." >&2
     else
       # No adb.real: the stash mv never ran, so whatever is here now is either a valid wrapper left by a
-      # previous install (keep it) or a partial file from our failed cp (remove only that). Never a real
-      # adb — a real adb would have been stashed to adb.real above.
+      # previous install (keep it) or — impossible after replace_file, which leaves the old file whole —
+      # something that is not our wrapper (remove only that). Never a real adb: a real adb would have
+      # been stashed to adb.real above.
       grep -q 'corral adb wrapper' "$adb_path" 2>/dev/null || rm -f "$adb_path"
       echo "ERROR: failed to install the SDK adb shim at $adb_path; no adb.real was present to restore." >&2
     fi
@@ -583,11 +596,14 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
     echo "         extensionless 'adb' especially. Remove or rename it yourself; corral will not."
   fi
 else
-  if ! cp "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb" || ! chmod +x "$BIN_DIR/adb"; then
-    echo "ERROR: cannot install the executable adb wrapper at $BIN_DIR/adb." >&2
-    exit 1
-  fi
-  cp "$SCRIPT_DIR/corral"      "$BIN_DIR/corral"; chmod +x "$BIN_DIR/corral"
+  # Same atomic replace as the jars and the SDK shim: a PATH-resolved adb call in flight while the
+  # wrapper is being replaced keeps reading the old inode (review pass 43 §2), and both copies are
+  # checked — the corral shim used to be installed unchecked, so a failed copy still reached the
+  # success summary below.
+  replace_file "$SCRIPT_DIR/adb-wrapper" "$BIN_DIR/adb" "the adb wrapper" 755 \
+    || { echo "ERROR: cannot install the executable adb wrapper at $BIN_DIR/adb." >&2; exit 1; }
+  replace_file "$SCRIPT_DIR/corral" "$BIN_DIR/corral" "the corral shim" 755 \
+    || { echo "ERROR: cannot install the corral shim at $BIN_DIR/corral." >&2; exit 1; }
 fi
 
 if want_ui && [[ $IS_WINDOWS -eq 1 ]]; then
@@ -995,6 +1011,6 @@ else
   echo "  Install Android platform-tools, or pass --adb PATH to the real adb, then re-run to gate them."
 fi
 echo
-echo "Cutover checklist (in the corral source repo, scripts/cutover.md): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi,"
+echo "Cutover checklist (in the corral source repo, scripts/cutover.md; in the bundle, CUTOVER.md beside this installer): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi,"
 echo "then verify a gradle installDebug allow/deny, retire the adb-lease hook, keep old scripts backed up a week."
 fi

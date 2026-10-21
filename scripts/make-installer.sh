@@ -18,7 +18,8 @@ UI_BUNDLE_JAR="$BUNDLE/corral-ui-all.jar"
 
 # scripts/ files that are NOT shipped in the bundle:
 #   make-installer.sh  the mirroring tool itself (source-tree only)
-#   cutover.md         docs, mirrored by hand when the docs change
+#   cutover.md         the long internal checklist, untracked in git: it stays a source-tree doc, and
+#                      the bundle ships the tracked repo-root CUTOVER.md instead (see below)
 EXCLUDE="make-installer.sh cutover.md"
 
 CHECK=0
@@ -90,6 +91,27 @@ done
 # no docs of its own, so this carries the emulator API, boot gate and lease semantics.
 [ -f "$REPO_ROOT/README.md" ] || { echo "ERROR: missing $REPO_ROOT/README.md" >&2; exit 1; }
 mirror "$REPO_ROOT/README.md" "README.md"
+
+# The shipped cutover document is the TRACKED repo-root CUTOVER.md. scripts/cutover.md (the long
+# internal checklist) is NOT in git, so a bundle built from it is empty in CI and in the release
+# workflow — and the README's [CUTOVER.md](CUTOVER.md#updates) link then goes nowhere again. It ships
+# under the name and the case the README links to, so the link resolves in an extracted bundle.
+[ -f "$REPO_ROOT/CUTOVER.md" ] || { echo "ERROR: missing $REPO_ROOT/CUTOVER.md" >&2; exit 1; }
+
+# Older bundles carried the checklist as a lowercase `cutover.md` (hand-mirrored, and stale). Remove
+# it before mirroring: two cutover documents confuse a bundle-only reader, and on a case-insensitive
+# filesystem the lowercase name would capture the mirror below. --check reports it as drift.
+if ls "$BUNDLE" 2>/dev/null | grep -qx 'cutover.md'; then
+  if [ "$CHECK" = 1 ]; then
+    printf 'cutover.md -> STALE (a lowercase copy ships beside CUTOVER.md)\n'
+    drift=1
+  else
+    rm -f "$BUNDLE/cutover.md" || { echo "ERROR: cannot remove $BUNDLE/cutover.md" >&2; exit 1; }
+    printf 'cutover.md -> removed\n'
+  fi
+fi
+
+mirror "$REPO_ROOT/CUTOVER.md" "CUTOVER.md"
 
 if [ "$CHECK" = 0 ]; then
   mirror "$BUILD_JAR" "corral-daemon-all.jar"

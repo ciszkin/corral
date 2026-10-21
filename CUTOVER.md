@@ -199,14 +199,8 @@ and the identity ancestor lists) live in the same editable file,
 `~/.config/corral/rules` (override `CORRAL_RULES`). A missing rules file fails
 closed, and the daemon restores the built-in default from the jar.
 
-The update check has a live kill-switch:
-
-```sh
-CORRAL_UPDATE_CHECK=off         # in daemon.env, or the environment
-```
-
-Flipping it takes effect without a restart: the daemon re-reads it every check
-cycle and stops making the outbound call.
+The update check is on by default; see [Updates](#updates) for its kill-switch
+(`CORRAL_UPDATE_CHECK`).
 
 ## `corral doctor`
 
@@ -227,8 +221,17 @@ after any SDK or environment change.
 The daemon checks for updates once a day. The check is a single
 unauthenticated `GET` to
 `https://api.github.com/repos/<owner>/<repo>/releases/latest` (default
-`ciszkin/corral`, overridable with `CORRAL_REPO`). It sends no token and no
-credentials, and it is behind the `CORRAL_UPDATE_CHECK` kill-switch above.
+`ciszkin/corral`; `CORRAL_REPO` points both the check and the apply at another
+repository — an environment variable only, not a config knob, which is what a
+fork wants). It sends no token and no credentials.
+
+The check is **on by default**: an unmodified daemon calls `api.github.com`
+once a day. `CORRAL_UPDATE_CHECK=off` in `daemon.env` or the environment turns
+it off, and the daemon re-reads it every cycle, so no restart is needed. The
+daemon's `GET /api/update` is a read — current version, latest version,
+whether an update is available, whether the check is enabled; it starts
+nothing.
+
 `corral update` reports what the last check found; it downloads nothing.
 
 Applying an update is always explicit:
@@ -238,13 +241,26 @@ corral update --apply
 ```
 
 Without `--apply`, nothing is downloaded and nothing is run. Applying
-downloads the release `.zip` and its `.sha256`, verifies the checksum, and only
-then extracts the bundle and runs its `install.sh`. A checksum mismatch, a
-missing checksum, or an unreadable one stops the apply before any file is
-extracted. The checksum detects a corrupted or truncated download and
-guarantees that no unverified bytes are executed; it does not authenticate the
-publisher, because the archive and its checksum come from the same origin. See
+downloads the release `corral-<version>.zip` and its `.zip.sha256` from the
+same release, verifies the SHA-256, and only then extracts the bundle and runs
+its `install.sh`, which restarts the daemon. A checksum mismatch, a missing
+checksum, or an unreadable one stops the apply before any file is extracted.
+
+**What the checksum proves.** The `.sha256` comes from the same release as the
+zip, so it proves the download was not corrupted or truncated — **not** that
+the publisher is genuine. Anyone who can publish a release on that repository
+(a leaked token, a compromised account) runs `install.sh`, i.e. arbitrary code
+as you, on every host that applies it. A detached signature checked against a
+key pinned in the jar (minisign, cosign, GPG) would separate "the download is
+intact" from "the publisher is genuine"; none is shipped. See
 [SECURITY.md](SECURITY.md) for the trust boundary.
+
+Replacing the jars is atomic: `install.sh` writes each jar to a temporary file
+beside it and renames it into place, so a daemon (or console) that is running
+keeps the old file and the next start picks up the new one. On Windows a
+running JVM holds its jar open, so the install refuses and says the jar was
+not replaced and that the old daemon is still running — stop it (end the
+`CorralDaemon` task and the `java.exe` running the jar) and re-run.
 
 ## Uninstall
 

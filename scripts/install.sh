@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# corral install.sh — install corral-daemon, the adb wrapper and the corral CLI
-# on a Linux host. User-scoped (no root). Idempotent; safe to re-run.
+# corral install.sh — install corral-daemon, the adb wrapper, the corral CLI, the gradle gate and
+# (optionally) the corral-ui console — on Linux (systemd user unit) and on Windows from Git
+# Bash/MSYS (per-user Scheduled Task, .bat shims). User-scoped (no root). Idempotent; safe to re-run.
 # Usage: scripts/install.sh [--java PATH] [--adb PATH] [--jar PATH] [--ui|--no-ui] [--home DIR] [--uninstall]
 set -u
 
@@ -415,6 +416,26 @@ resolve_ui_jar() {
   echo "$REPO_ROOT/corral-ui/build/libs/corral-ui-all.jar"
 }
 
+# Replace a file WITHOUT rewriting it in place. `cp` onto an existing file truncates and rewrites the
+# same inode, so a running JVM reading that jar lazily reads new bytes at old offsets and stays alive
+# but unable to load a class — a live zombie the service manager never restarts (review pass 42 §1).
+# A temp file in the target's own directory plus a rename is atomic: the running JVM keeps the old
+# inode, the next start gets the new one. On Windows the rename itself fails while a JVM holds the
+# jar open, and the caller must say the replacement did NOT happen rather than claim success.
+replace_file() { # replace_file <src> <dst> <label>
+  local src="$1" dst="$2" label="$3" tmp="$2.new.$$"
+  if ! cp "$src" "$tmp"; then
+    rm -f "$tmp"
+    echo "ERROR: cannot copy $src to $tmp; $label was NOT replaced." >&2
+    return 1
+  fi
+  if ! mv -f "$tmp" "$dst"; then
+    rm -f "$tmp"
+    echo "ERROR: cannot rename $tmp over $dst; $label was NOT replaced (the file still there is the old one)." >&2
+    return 1
+  fi
+}
+
 # Gate EVERY adb call, including absolute-path ones from gradle/AGP/IDE, by replacing the
 # SDK's platform-tools/adb with the wrapper (real binary kept as adb.real next to it).
 # Updates $ADB to the real binary so the daemon and the ~/bin wrapper use it directly.
@@ -524,7 +545,18 @@ fi
 echo "==> Installing to $TARGET_HOME"
 mkdir -p "$CORRAL_HOME" "$BIN_DIR"
 if [[ $IS_WINDOWS -eq 0 ]]; then mkdir -p "$UNIT_DIR"; fi
-cp "$JAR" "$CORRAL_HOME/corral-daemon-all.jar"
+if ! replace_file "$JAR" "$CORRAL_HOME/corral-daemon-all.jar" "corral-daemon-all.jar"; then
+  if [[ $IS_WINDOWS -eq 1 ]]; then
+    # The Windows limit: a running JVM keeps its jar open, so no rename lands. Ending the task first
+    # instead can leave the box with NO daemon (the Scheduled Task create is refused for an
+    # unelevated token), so this refuses loudly and names what is still running. Review pass 42 §1.
+    echo "       A running JVM on Windows keeps its jar open. The daemon is still running the OLD jar" >&2
+    echo "       and still serving the previous version; nothing was replaced. Stop it and re-run:" >&2
+    echo "       schtasks /end /tn CorralDaemon, then stop the java.exe whose command line runs" >&2
+    echo "       corral-daemon-all.jar (Task Manager, or Stop-Process on its PID)." >&2
+  fi
+  exit 1
+fi
 if [[ $IS_WINDOWS -eq 1 ]]; then
   # The bundle ships .bat twins; on Windows they replace the POSIX shims. An extensionless POSIX
   # `adb` on the Windows PATH would shadow/confuse the real adb.exe, so it is never installed here.
@@ -561,10 +593,15 @@ fi
 if want_ui && [[ $IS_WINDOWS -eq 1 ]]; then
   # The bundle has no corral-ui.bat, so there is no working Windows UI shim or launcher to install.
   # Copy the jar so it can be started with java -jar, and say plainly what is missing.
-  cp "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" || { echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2; exit 1; }
+  replace_file "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" "corral-ui-all.jar" || {
+    echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2
+    echo "       On Windows a running console holds its jar open; quit Corral and re-run." >&2
+    exit 1
+  }
   echo "Installed: corral-ui jar ($CORRAL_HOME/corral-ui-all.jar) — no corral-ui shim or app-grid launcher on Windows"
 elif want_ui; then
-  cp "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" || { echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2; exit 1; }
+  replace_file "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" "corral-ui-all.jar" \
+    || { echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2; exit 1; }
   install -m 755 "$SCRIPT_DIR/corral-ui" "$BIN_DIR/corral-ui" || { echo "ERROR: cannot install $BIN_DIR/corral-ui" >&2; exit 1; }
   echo "Installed: corral-ui (~/bin/corral-ui, jar in ~/.corral)"
   # Launcher for the app grid/dock. Exec uses the detected java + fat jar (not the shim) so a

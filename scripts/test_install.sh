@@ -105,10 +105,26 @@ check "9.9 unit carries optional EnvironmentFile line" grep -q '^EnvironmentFile
 check "9.9 daemon.env created on install" test -f "$DAEMON_ENV"
 printf '\n# sandbox daemon.env sentinel edit\n' >> "$DAEMON_ENV"
 
+# ===== review 42 §1: the jars are replaced by rename, never rewritten in place =====
+# `cp` onto a live jar rewrites the same inode, so a running JVM reads new bytes at old offsets and
+# turns into a live zombie. Pin the mechanism in the shipped installer (a future edit that puts a
+# plain `cp "$JAR"` back fails here even if behaviour happened to pass) and pin it on disk: a re-run
+# must give the installed jar a NEW inode and still the source's bytes.
+jar_cp=$(grep -nE 'cp[[:space:]]+"\$(JAR|UI_JAR)"' "$SRC/install.sh" || true)
+check "jars: no in-place cp onto a live jar in install.sh (review 42 §1)" test -z "$jar_cp"
+replace_sites=$(grep -c 'replace_file "\$JAR"\|replace_file "\$UI_JAR"' "$SRC/install.sh")
+check "jars: all three jar install sites go through replace_file" test "$replace_sites" -eq 3
+
 # ===== 9.3 idempotence: second install =====
+jar_inode_before=$(ls -i "$TMPHOME/.corral/corral-daemon-all.jar" | cut -d' ' -f1)
 install_run >"$TMP/install2.log" 2>&1; rc2=$?
 dump_on_fail "$rc2" "$TMP/install2.log"
 check "9.3 re-run install exits 0" test "$rc2" -eq 0
+check "9.3 re-run replaces the jar by rename (new inode, review 42 §1)" test \
+  "$jar_inode_before" != "$(ls -i "$TMPHOME/.corral/corral-daemon-all.jar" | cut -d' ' -f1)"
+check "9.3 the replaced jar is the source jar" cmp -s "$JAR" "$TMPHOME/.corral/corral-daemon-all.jar"
+check "9.3 no replacement temp file is left behind" bash -c \
+  "! ls '$TMPHOME/.corral' | grep -q '\.new\.'"
 check "9.6 user rules edit survives re-run" grep -q 'sandbox sentinel edit' "$RULES"
 check "9.9 daemon.env edit survives re-run" grep -q 'sandbox daemon.env sentinel edit' "$DAEMON_ENV"
 check "9.3 artifacts intact after re-run" bash -c \
@@ -561,6 +577,50 @@ check "win: output says the POSIX shim, systemd unit and UI launcher were NOT do
 check "win: never claims a shim/unit that does not exist" bash -c \
   "! grep -qi 'shim is active' '$TMP/win-install.log' && ! grep -q 'Installed: corral-ui (~/bin/corral-ui' '$TMP/win-install.log'"
 check "win: gate points at the .bat shim" grep -qF "$TMPHOME_W/bin/corral.bat" "$TMPHOME_W/.gradle/init.d/corral-gate.gradle.kts"
+# the install above already replaced the jar with a working rename: it must be the real file, and
+# nothing temp is left beside it
+check "win: daemon jar installed" cmp -s "$JAR" "$TMPHOME_W/.corral/corral-daemon-all.jar"
+check "win: no jar temp file left behind" bash -c "! ls '$TMPHOME_W/.corral' | grep -q '\.new\.'"
+
+# ===== Windows + a running daemon (review 42 §1): the jar cannot be replaced, so the install must
+# fail loudly instead of reporting success. A running JVM holds its jar open on Windows and the
+# rename is refused; the `mv` stub below refuses ONLY the daemon jar, exactly as the OS does, so the
+# assertion is that the installer refuses in turn — exits non-zero, says the OLD jar is still there
+# and still serving, names the stop command, leaves the previous jar byte-identical, and prints no
+# install summary (which is where the pre-change installer lied: an unchecked cp kept the old jar
+# and the summary claimed the install succeeded).
+LOCK_STUB="$TMP/lockstub"; mkdir -p "$LOCK_STUB"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$LOCK_STUB/uname"
+REAL_MV=$(command -v mv)
+cat > "$LOCK_STUB/mv" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in */corral-daemon-all.jar)
+    echo "mv: cannot move '\$a': Device or resource busy" >&2; exit 1;;
+  esac
+done
+exec "$REAL_MV" "\$@"
+EOF
+chmod +x "$LOCK_STUB/uname" "$LOCK_STUB/mv"
+LOCK_HOME="$TMP/home-lock"; SDK_LOCK="$LOCK_HOME/Android/Sdk/platform-tools"
+mkdir -p "$SDK_LOCK" "$LOCK_HOME/bin" "$LOCK_HOME/.corral"; : > "$LOCK_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "lock-sdk-adb $@"' > "$SDK_LOCK/adb"; chmod +x "$SDK_LOCK/adb"
+printf 'old daemon jar\n' > "$LOCK_HOME/.corral/corral-daemon-all.jar"
+lock_inode=$(ls -i "$LOCK_HOME/.corral/corral-daemon-all.jar" | cut -d' ' -f1)
+lock_sha=$(sha256sum "$LOCK_HOME/.corral/corral-daemon-all.jar" | cut -d' ' -f1)
+env HOME="$LOCK_HOME" PATH="$LOCK_STUB:$STUB:$PATH" \
+  bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$SDK_LOCK/adb" --jar "$JAR" --no-ui --home "$LOCK_HOME" \
+  >"$TMP/lock-install.log" 2>&1; rcl=$?
+check "locked jar: install refuses (non-zero), it does not report success" test "$rcl" -ne 0
+check "locked jar: says the jar was NOT replaced" grep -q 'corral-daemon-all.jar was NOT replaced' "$TMP/lock-install.log"
+check "locked jar: says the old daemon is still running the old jar and serving it" bash -c \
+  "grep -q 'still running the OLD jar' '$TMP/lock-install.log' && grep -q 'still serving the previous version' '$TMP/lock-install.log'"
+check "locked jar: names the command that unblocks a re-run" grep -q 'schtasks /end /tn CorralDaemon' "$TMP/lock-install.log"
+check "locked jar: the previous jar is untouched (same inode, same bytes)" bash -c \
+  "[ \"\$(ls -i '$LOCK_HOME/.corral/corral-daemon-all.jar' | cut -d' ' -f1)\" = '$lock_inode' ] && [ \"\$(sha256sum '$LOCK_HOME/.corral/corral-daemon-all.jar' | cut -d' ' -f1)\" = '$lock_sha' ]"
+check "locked jar: the temp file is cleaned up" bash -c "! ls '$LOCK_HOME/.corral' | grep -q '\.new\.'"
+check "locked jar: no install summary is printed" bash -c \
+  "! grep -q '==> Installed' '$TMP/lock-install.log' && ! grep -q 'Installed Windows shims' '$TMP/lock-install.log'"
 
 # ===== POSIX byte-for-byte guard: the Linux path must not change =====
 # Compare the current installer against the pre-change installer (the commit this row branched from,

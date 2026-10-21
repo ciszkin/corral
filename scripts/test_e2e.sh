@@ -713,7 +713,105 @@ emulator_error_cleanup() {
   free_all
 }
 
-# --- p41 §3 / p35: a direct-launched emulator dies with its daemon (the Main shutdown hook).
+# --- review 42 §1 (re-review I-1): the upgrade replaces the jar through ONE shipped helper,
+# `replace_file` — a temp file beside the target plus a rename, never an in-place `cp` onto the
+# same inode. This row proves the contrast on a live daemon, using the payload a release actually
+# ships: a RE-ZIPPED jar (same entries, moved, so the bytes at the old offsets differ). An in-place
+# `cp` of that payload leaves the reviewer's zombie (process alive, endpoints dead,
+# NoClassDefFoundError); the same payload handed to the installer's own helper leaves the daemon
+# answering. The helper is extracted from install.sh and called here, so this row fails if
+# install.sh ever goes back to an in-place `cp`. ---
+jar_payload_modified() { # jar_payload_modified <src jar> <out jar> -> same entries, re-zipped backwards
+  local src="$1" out="$2" d
+  d=$(mktemp -d "$TMP/jarzip.XXXXXX") || return 1
+  ( cd "$d" && unzip -qq "$src" \
+    && unzip -Z1 "$src" | grep -v '/$' | tac | zip -q -X -@ "$out" ) \
+    || { rm -rf "$d"; return 1; }
+  rm -rf "$d"
+  unzip -tq "$out" >/dev/null   # valid jar: only the offsets moved, nothing is corrupt
+}
+
+jar_daemon_up() { # jar_daemon_up <dir> <port> <db> <log> -> sets JARPID once /api/devices answers
+  local dir="$1" port="$2" db="$3" log="$4"
+  setsid env -u INVOCATION_ID CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$db" \
+    CORRAL_RULES="$TMP/corral-rules" CORRAL_PORT="$port" \
+    java -Dcorral.test.tag=$$ -Duser.home="$TMP/home" -jar "$dir/corral-daemon-all.jar" </dev/null >"$log" 2>&1 &
+  JARPID=$!
+  wait_daemon "$port" "$log" || { kill -9 "$JARPID" 2>/dev/null; return 1; }
+}
+
+jar_http() { curl -s -o /dev/null --max-time 5 -w '%{http_code}' "http://127.0.0.1:$1/api/$2"; }
+
+jar_replace_live() {
+  local installer="$SELF/install.sh" helper port4=$((PORT + 3)) port5=$((PORT + 4)) p ep code
+  local ino_before ino_after dir
+
+  helper=$(sed -n '/^replace_file()/,/^}/p' "$installer")
+  if [ -z "$helper" ]; then
+    echo "# jar replace: $installer ships no replace_file helper — it replaces the jar in place"
+    return 1
+  fi
+  grep -q 'replace_file "\$JAR" "\$CORRAL_HOME/corral-daemon-all.jar"' "$installer" \
+    || { echo "# jar replace: install.sh does not route the daemon jar through replace_file"; return 1; }
+  eval "$helper"
+
+  mkdir -p "$TMP/jar"
+  jar_payload_modified "$JAR" "$TMP/jar/new.jar" \
+    || { echo "# jar replace: cannot build the re-zipped payload"; return 1; }
+
+  # (a) the symptom the fix removes: an in-place `cp` of the payload, exactly what install.sh did
+  dir="$TMP/jar/inplace"; mkdir -p "$dir"; cp "$JAR" "$dir/corral-daemon-all.jar"
+  jar_daemon_up "$dir" "$port4" "$TMP/jar/inplace.db" "$TMP/jar/inplace.log" || return 1
+  p=$JARPID
+  cp "$TMP/jar/new.jar" "$dir/corral-daemon-all.jar"
+  # /api/devices is warmed by wait_daemon *before* the corruption, so its classes are usually
+  # already loaded and it can legitimately keep answering 200 — that says nothing about the
+  # payload. The three routes nothing called before the corruption cannot come from memory.
+  for ep in doctor config queue; do
+    code=$(jar_http "$port4" "$ep")
+    if [ "$code" = 200 ]; then
+      echo "# jar replace: after an in-place cp of the re-zipped jar /api/$ep still answered 200 (devices=$(jar_http "$port4" devices), process alive:$(kill -0 "$p" 2>/dev/null && echo yes || echo no)) — the daemon is not broken, so the contrast proves nothing: either the payload does not reach the old offsets or the daemon already had that route in memory"
+      kill -9 "$p" 2>/dev/null; return 1
+    fi
+  done
+  kill -0 "$p" 2>/dev/null \
+    || { echo "# jar replace: the in-place cp killed the daemon outright (the §1 symptom is alive-but-dead)"; kill -9 "$p" 2>/dev/null; return 1; }
+  grep -q NoClassDefFoundError "$TMP/jar/inplace.log" \
+    || { echo "# jar replace: the in-place cp left the daemon alive with no NoClassDefFoundError — a different symptom than review 42 §1"; kill -9 "$p" 2>/dev/null; return 1; }
+  kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null
+
+  # (b) the fix: the same payload through the installer's own helper
+  dir="$TMP/jar/rename"; mkdir -p "$dir"; cp "$JAR" "$dir/corral-daemon-all.jar"
+  jar_daemon_up "$dir" "$port5" "$TMP/jar/rename.db" "$TMP/jar/rename.log" || return 1
+  p=$JARPID
+  ino_before=$(ls -i "$dir/corral-daemon-all.jar" | cut -d' ' -f1)
+  replace_file "$TMP/jar/new.jar" "$dir/corral-daemon-all.jar" "corral-daemon-all.jar" \
+    || { echo "# jar replace: the shipped replace_file failed"; kill -9 "$p" 2>/dev/null; return 1; }
+  ino_after=$(ls -i "$dir/corral-daemon-all.jar" | cut -d' ' -f1)
+  if [ "$ino_before" = "$ino_after" ]; then
+    echo "# jar replace: the target kept its inode — that is an in-place rewrite, not a rename"
+    kill -9 "$p" 2>/dev/null; return 1
+  fi
+  cmp -s "$TMP/jar/new.jar" "$dir/corral-daemon-all.jar" \
+    || { echo "# jar replace: the installed jar is not the payload"; kill -9 "$p" 2>/dev/null; return 1; }
+  for ep in devices doctor config queue; do
+    code=$(jar_http "$port5" "$ep")
+    if [ "$code" != 200 ]; then
+      echo "# jar replace: /api/$ep answered $code after the rename (daemon pid $p alive:$(kill -0 "$p" 2>/dev/null && echo yes || echo no))"
+      kill -9 "$p" 2>/dev/null; return 1
+    fi
+  done
+  if grep -q NoClassDefFoundError "$TMP/jar/rename.log"; then
+    echo "# jar replace: the rename still left NoClassDefFoundError in the daemon log"
+    kill -9 "$p" 2>/dev/null; return 1
+  fi
+  if ls "$dir" | grep -q '\.new\.'; then
+    echo "# jar replace: a temp file was left behind"; kill -9 "$p" 2>/dev/null; return 1
+  fi
+  kill -9 "$p" 2>/dev/null; wait "$p" 2>/dev/null
+  return 0
+}
+
 # A dedicated daemon on a spare port, so the suite's own daemon is never disturbed. ---
 emulator_shutdown_hook() {
   local port3=$((PORT + 2)) p3 i ep U3
@@ -849,6 +947,12 @@ check "a clean stop leaves no error in GET /api/emulators" check_emulator_clean_
 check "a non-zero exit surfaces its error; a clean self-exit shows none; restart clears it" check_emulator_error_status
 check "an offline orphan is reconciled from its log for get/start/stop" check_emulator_offline_reconcile
 check "a direct-launched emulator dies with its daemon (shutdown hook)" check_emulator_shutdown_hook
+# Slow: two extra daemon starts plus 30MB jar re-zips; CI runs it with SLOW=1.
+if [ "${SLOW:-0}" = 1 ] && command -v zip >/dev/null 2>&1 && command -v unzip >/dev/null 2>&1; then
+  check "install's replace_file keeps a running daemon answering where an in-place cp kills it (review 42 §1)" jar_replace_live
+else
+  skip "install's replace_file vs an in-place cp under a live daemon (review 42 §1)"
+fi
 
 # --- M7 Plan A: config/doctor API. Run last: the round-trip row writes CORRAL_SCREENSHOTS=open
 # into the pinned env file, and the final precedence row restarts the daemon on PORT+1. ---

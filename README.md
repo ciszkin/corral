@@ -84,6 +84,18 @@ the same device.
   `avd [list|start A|stop A [--force]]` — all logic in the jar behind 3-line
   launcher shims, so it works for humans and agents alike.
   Selector: `--serial S --model M --os V(min) --type usb|wifi|emulator --avd A`.
+- **Updates** — the daemon checks the release feed once a day, **on by default**
+  (every daemon calls `api.github.com`; `CORRAL_UPDATE_CHECK=off` stops it, and
+  `CORRAL_REPO` points both the check and the apply at another repository —
+  env only). `corral update` reports what the check found, `corral update
+  --apply` downloads the release zip and its `.sha256`, verifies the digest and
+  only then runs the bundle's `install.sh`, and `GET /api/update` is the same
+  state as a read. The digest comes from the same release as the zip, so it
+  proves the download was intact — **not** that the publisher is genuine:
+  anyone who can publish a release there runs `install.sh`, i.e. arbitrary code
+  as you, on every host that applies it. Jars are replaced by rename, so a
+  running daemon or console is not corrupted. See
+  [CUTOVER.md](CUTOVER.md#updates).
 - **MCP server** — the same lease API is exposed over streamable HTTP at `/mcp` as eight tools
   (`list_devices`, `queue`, `claim`, `free`, `renew`, `screenshot`, `start_emulator`,
   `stop_emulator`), with one identity per MCP session:

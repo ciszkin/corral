@@ -54,6 +54,11 @@ chmod +x "$FAKE_ADB" "$FAKE_JAVA" "$STUB/systemctl" "$STUB/uname"
 : > "$TMPHOME/.bashrc"
 
 # Sandbox the child env: HOME is both exported and passed via --home (belt and braces).
+# The host's own shells are resolved BEFORE $STUB shadows them (it carries a powershell.exe now, see
+# ps_stub). Only the deliberate, read-only quoting round-trips below use them, and only with
+# HOST_SHELL_TESTS=1: by default this suite never creates a real powershell.exe (F1).
+REAL_POWERSHELL=$(command -v powershell.exe 2>/dev/null || true)
+REAL_CMD=$(command -v cmd.exe 2>/dev/null || true)
 export HOME="$TMPHOME"
 unset ANDROID_HOME ANDROID_SDK_ROOT JAVA_HOME
 # A CORRAL_REAL_ADB in the caller's environment would make the installed wrapper exec the host's real
@@ -571,30 +576,76 @@ fi
 WIN_STUB="$TMP/winstub"; mkdir -p "$WIN_STUB"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$WIN_STUB/uname"
 # PowerShell stub for the daemon-stop path: it emulates the two commands install.sh runs. PS_TABLE
-# holds "<pid>|<process name> <command line>" per line; a query prints the pid of every java
-# process whose command line contains $CORRAL_DAEMON_JAR, and Stop-Process -Id removes those pids.
-# The emulation reads the FILTER off the query command itself (the java family and whether path
-# separators are normalised), so an installer that stops asking for either fails these rows.
+# holds "<pid>|<process name> <command line>" per line. A query prints "in <pid>" when the process's
+# JAR ARGUMENT (its -jar operand, else the token naming the daemon jar) is under $CORRAL_INSTALL_ROOT
+# or the install's $CORRAL_DAEMON_HOME, "out <pid>" when that path is absolute and under neither, and
+# "rel <pid>" when it is not absolute — the same three-way decision install.sh makes. Stop-Process -Id
+# removes the pids given. The emulation reads the FILTER off the query command itself (the java
+# family, whether path separators are normalised, and the root), so an installer that stops asking
+# for any of them fails these rows.
 # PS_KILL_FAIL=1 leaves them alive (a stop that did not work); PS_QUERY_FAIL=1 fails every query;
 # PS_QUERY_FAIL_AT=<n> fails only the n-th query (a transient failure).
+#
+# THE GUARD (row 30, F1): this stub REFUSES to stop a pid that is not in the table, that arrives with
+# no CORRAL_INSTALL_ROOT at all, or whose JAR (not whose command line) is not under that root — and
+# records the refusal in $PS_ESCAPES with the reason. install.sh passes the root to the STOP as well
+# as to the query, so the guard runs on a REAL installer uninstall, not only in the self-test below;
+# the suite asserts $PS_ESCAPES stays empty, so even if install.sh regressed to a bare file-name
+# match, or dropped the root from the stop, the suite fails instead of terminating a daemon.
 cat > "$TMP/powershell-stub.sh" <<EOF
 #!/bin/sh
 TABLE=\${PS_TABLE:-$TMP/win-procs}
 PSLOG=\${PS_LOG:-$TMP/powershell.log}
 KILLED=\${PS_KILLED:-$TMP/powershell-killed}
 QCOUNT=\${PS_QUERY_COUNT:-$TMP/powershell-queries}
+ESCAPES=\${PS_ESCAPES:-$TMP/powershell-escapes}
+JARNAME=\${CORRAL_DAEMON_JAR:-corral-daemon-all.jar}
 printf '%s\n' "\$*" >> "\$PSLOG"
 cmd="\$*"
+norm() { printf '%s' "\$1" | tr '\134' '/' | tr 'A-Z' 'a-z'; }
+# The jar a process actually RUNS: its -jar operand, else the token naming the daemon jar. Empty
+# when the command line merely mentions the jar somewhere else (a -D value, a classpath entry whose
+# token does not end in the name). This is the same rule install.sh's query applies, so a row that
+# plants the root in a non-jar token must be tagged "out", not "in".
+jarof() { # jarof <command line> <jar name>
+  _c="\$1"; _j=""
+  case "\$_c" in
+    *" -jar "*)
+      _r="\${_c#* -jar }"; _j="\${_r%% *}";;
+    *)
+      for _t in \$_c; do
+        case "\$_t" in *"/\$2") _j="\$_t"; break;; esac
+      done;;
+  esac
+  _j="\${_j#\\"}"
+  _j="\${_j%\\"}"
+  printf '%s' "\$_j"
+}
 case "\$cmd" in
   *Stop-Process*)
     ids=\${cmd#*Stop-Process -Id }; ids=\${ids%% *}
-    old=\$IFS; IFS=,
-    for id in \$ids; do
+    printf 'stop root=%s\n' "\${CORRAL_INSTALL_ROOT:-<unset>}" >> "\$PSLOG"
+    r=\$(norm "\${CORRAL_INSTALL_ROOT:-}"); r=\${r%/}
+    for id in \$(printf '%s' "\$ids" | tr ',' ' '); do
+      line=\$(grep "^\$id|" "\$TABLE" 2>/dev/null)
+      if [ -z "\$line" ]; then
+        printf 'refused pid %s: it is not in the suite sandbox table\n' "\$id" >> "\$ESCAPES"
+        continue
+      fi
+      if [ -z "\$r" ]; then
+        printf 'refused pid %s: the stop carried no CORRAL_INSTALL_ROOT, so no root could bound it\n' "\$id" >> "\$ESCAPES"
+        continue
+      fi
+      jn=\$(norm "\$(jarof "\$(printf '%s' "\${line#*|}" | tr '\134' '/')" "\$JARNAME")")
+      case "\$jn" in
+        "\$r"/*) ;;
+        *) printf 'refused pid %s: its jar is not under the install root %s\n' "\$id" "\$CORRAL_INSTALL_ROOT" >> "\$ESCAPES"
+           continue;;
+      esac
       [ "\${PS_KILL_FAIL:-0}" = 1 ] && continue
       if [ -f "\$TABLE" ]; then grep -v "^\$id|" "\$TABLE" > "\$TABLE.tmp" 2>/dev/null; mv "\$TABLE.tmp" "\$TABLE"; fi
       printf '%s\n' "\$id" >> "\$KILLED"
-    done
-    IFS=\$old;;
+    done;;
   *Get-CimInstance*)
     [ "\${PS_QUERY_FAIL:-0}" = 1 ] && exit 1
     qn=0
@@ -606,23 +657,65 @@ case "\$cmd" in
     [ -f "\$TABLE" ] || exit 0
     names=java.exe
     case "\$cmd" in *javaw*) names="java.exe javaw.exe";; esac
-    norm=0
-    case "\$cmd" in *Replace*) norm=1;; esac
+    normf=0
+    case "\$cmd" in *Replace*) normf=1;; esac
     want=\$CORRAL_DAEMON_JAR
-    [ "\$norm" = 1 ] && want=\$(printf '%s' "\$want" | tr '\134' '/')
+    [ "\$normf" = 1 ] && want=\$(printf '%s' "\$want" | tr '\134' '/')
+    r=\$(norm "\${CORRAL_INSTALL_ROOT:-}"); r=\${r%/}
+    ch=\$(norm "\${CORRAL_DAEMON_HOME:-}"); ch=\${ch%/}
+    [ -n "\$ch" ] || ch="\$r/.corral"
+    [ -n "\$r" ] || r=':no-install-root:'
+    # WHICH decision does the installer ask for? The jar-argument rule needs the -jar operand AND the
+    # install's own jar directory; a query carrying neither is the whole-command-line match this fix
+    # replaced, and the stub then answers THAT — so a regression is visible in the suite instead of
+    # being papered over by a smarter stub. The mode is logged, and a row asserts it is "jar".
+    jarq=0
+    case "\$cmd" in *CORRAL_DAEMON_HOME*) case "\$cmd" in *"-jar"*) jarq=1;; esac;; esac
+    if [ "\$jarq" = 1 ]; then printf 'query mode=jar\n' >> "\$PSLOG"
+    else printf 'query mode=whole-line\n' >> "\$PSLOG"; fi
     while IFS='|' read -r pid rest; do
       [ -n "\$rest" ] || continue
       ok=0
       for n in \$names; do [ "\${rest%% *}" = "\$n" ] && ok=1; done
       [ "\$ok" = 1 ] || continue
       cl=\$rest
-      [ "\$norm" = 1 ] && cl=\$(printf '%s' "\$cl" | tr '\134' '/')
-      case "\$cl" in *"\$want"*) printf '%s\n' "\$pid";; esac
+      [ "\$normf" = 1 ] && cl=\$(printf '%s' "\$cl" | tr '\134' '/')
+      case "\$cl" in *"\$want"*)
+        if [ "\$jarq" = 1 ]; then
+          jn=\$(norm "\$(jarof "\$cl" "\$want")")
+          case "\$jn" in
+            /*|[a-z]:/*)
+              case "\$jn" in
+                "\$ch"/*|"\$r"/*) printf 'in %s\n' "\$pid";;
+                *) printf 'out %s\n' "\$pid";;
+              esac;;
+            *) printf 'rel %s\n' "\$pid";;
+          esac
+        else
+          case "\$(norm "\$cl")" in
+            *"\$r"/*) printf 'in %s\n' "\$pid";;
+            *) printf 'out %s\n' "\$pid";;
+          esac
+        fi;;
+      esac
     done < "\$TABLE";;
 esac
 exit 0
 EOF
 chmod +x "$TMP/powershell-stub.sh"
+# One copy per stub directory (F1): the defect was that ONLY two dirs carried a powershell.exe, so
+# every other Windows run resolved the host's real one and its uninstall path killed the operator's
+# daemon. ps_stub puts a copy in EVERY dir below, and $STUB (always on PATH second) is the backstop.
+# The audit block at the end of this suite fails if a stub dir is ever added without one.
+ps_stub() { # ps_stub <dir>...
+  local d
+  for d in "$@"; do
+    mkdir -p "$d"
+    cp "$TMP/powershell-stub.sh" "$d/powershell.exe" && chmod +x "$d/powershell.exe"
+  done
+}
+ps_stub "$STUB" "$FL_STUB" "$SF_STUB"
+: > "$TMP/powershell-escapes"
 # rm stub: models a daemon still holding ~/.corral (Windows "Device or resource busy"). Every other
 # path is delegated to the real rm, so the rest of the uninstall behaves normally.
 REAL_RM=$(command -v rm)
@@ -645,7 +738,7 @@ echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
 exit 0
 EOF
 chmod +x "$WIN_STUB/uname" "$WIN_STUB/schtasks"
-cp "$TMP/powershell-stub.sh" "$WIN_STUB/powershell.exe"; chmod +x "$WIN_STUB/powershell.exe"
+ps_stub "$WIN_STUB"
 
 TMPHOME_W="$TMP/home-win"; SDK_W="$TMPHOME_W/Android/Sdk/platform-tools"
 mkdir -p "$SDK_W" "$TMPHOME_W/bin"; : > "$TMPHOME_W/.bashrc"
@@ -705,6 +798,7 @@ done
 exec "$REAL_MV" "\$@"
 EOF
 chmod +x "$LOCK_STUB/uname" "$LOCK_STUB/mv"
+ps_stub "$LOCK_STUB"
 LOCK_HOME="$TMP/home-lock"; SDK_LOCK="$LOCK_HOME/Android/Sdk/platform-tools"
 mkdir -p "$SDK_LOCK" "$LOCK_HOME/bin" "$LOCK_HOME/.corral"; : > "$LOCK_HOME/.bashrc"
 printf '%s\n' '#!/bin/sh' 'echo "lock-sdk-adb $@"' > "$SDK_LOCK/adb"; chmod +x "$SDK_LOCK/adb"
@@ -1185,25 +1279,35 @@ check "escape: the PowerShell paths are single-quoted, so a \$ in a path cannot 
 # WIN_ESC_EXP is the same spelling the installer printed (win_path == cygpath -w here); on a host
 # without cygpath both sides stay POSIX.
 WIN_ESC_EXP=$(cygpath -w "$WIN_ESC_ADB" 2>/dev/null || printf '%s' "$WIN_ESC_ADB")
-if command -v cmd.exe >/dev/null 2>&1; then
+# These two rows feed the printed assignment to the HOST's cmd.exe/PowerShell and read the value
+# back: the only proof the quoting survives a real parser. They are OPT-IN (HOST_SHELL_TESTS=1) and
+# use the absolute paths captured before $STUB shadowed them, because the suite must never create a
+# real powershell.exe on its own (F1: every un-stubbed powershell.exe was an uninstall that could
+# kill the operator's daemon). The opt-in is LOUD, and the quoting itself is asserted above either
+# way (a cmd.exe line is printed; the PowerShell paths are single-quoted).
+if [ -z "$REAL_CMD" ]; then
+  echo "skip: the cmd.exe round-trip needs a real Windows host (no cmd.exe on PATH here)"
+elif [ "${HOST_SHELL_TESTS:-0}" != 1 ]; then
+  echo "skip: the real-cmd.exe round-trip is opt-in (HOST_SHELL_TESTS=1): the suite must never reach the host's shells (F1)"
+else
   cmd_env_value() { # cmd_env_value <set-statement> -> what a real cmd.exe stores, read back
-    printf '%s\r\nset CORRAL_ADB\r\n' "$1" | cmd.exe 2>/dev/null | tr -d '\r' | while IFS= read -r l; do
+    printf '%s\r\nset CORRAL_ADB\r\n' "$1" | "$REAL_CMD" 2>/dev/null | tr -d '\r' | while IFS= read -r l; do
       case "$l" in CORRAL_ADB=*) printf '%s\n' "${l#CORRAL_ADB=}";; esac
     done
   }
   check "escape: a REAL cmd.exe stores the exact path (spaces, & and ' intact)" \
     same_value "$(cmd_env_value "$CMD_ASSIGN")" "$WIN_ESC_EXP"
-else
-  echo "skip: the cmd.exe round-trip needs a real Windows host (no cmd.exe on PATH here)"
 fi
-if command -v powershell.exe >/dev/null 2>&1; then
+if [ -z "$REAL_POWERSHELL" ]; then
+  echo "skip: the PowerShell round-trip needs a real Windows host (no powershell.exe on PATH here)"
+elif [ "${HOST_SHELL_TESTS:-0}" != 1 ]; then
+  echo "skip: the real-PowerShell round-trip is opt-in (HOST_SHELL_TESTS=1): the suite must never create a real powershell.exe (F1)"
+else
   ps_env_value() { # ps_env_value <assignment> -> what a real PowerShell stores, read back
-    printf '%s\n%s\n' "$1" '$env:CORRAL_ADB' | powershell.exe -NoProfile -Command - 2>/dev/null | tr -d '\r'
+    printf '%s\n%s\n' "$1" '$env:CORRAL_ADB' | "$REAL_POWERSHELL" -NoProfile -Command - 2>/dev/null | tr -d '\r'
   }
   check "escape: a REAL PowerShell stores the exact path ('' round-trips, & and spaces intact)" \
     same_value "$(ps_env_value "$PS_ASSIGN")" "$WIN_ESC_EXP"
-else
-  echo "skip: the PowerShell round-trip needs a real Windows host (no powershell.exe on PATH here)"
 fi
 
 # A path cmd.exe genuinely cannot spell (`%NAME%` is expanded before it looks at the quotes; there
@@ -1257,7 +1361,7 @@ echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
 exit 0
 EOF
 chmod +x "$TASK_A_STUB/uname" "$TASK_A_STUB/schtasks"
-cp "$TMP/powershell-stub.sh" "$TASK_A_STUB/powershell.exe"; chmod +x "$TASK_A_STUB/powershell.exe"
+ps_stub "$TASK_A_STUB"
 env HOME="$TASK_A_HOME" PATH="$TASK_A_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_A_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_A_HOME" >"$TMP/task-a.log" 2>&1; rcta=$?
 dump_on_fail "$rcta" "$TMP/task-a.log"
@@ -1288,6 +1392,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_B_STUB/uname" "$TASK_B_STUB/schtasks"
+ps_stub "$TASK_B_STUB"
 env HOME="$TASK_B_HOME" PATH="$TASK_B_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_B_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_B_HOME" >"$TMP/task-b.log" 2>&1; rctb=$?
 dump_on_fail "$rctb" "$TMP/task-b.log"
@@ -1324,6 +1429,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_I_STUB/uname" "$TASK_I_STUB/schtasks"
+ps_stub "$TASK_I_STUB"
 env HOME="$TASK_I_HOME" PATH="$TASK_I_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_I_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_I_HOME" >"$TMP/task-i.log" 2>&1; rcti=$?
 dump_on_fail "$rcti" "$TMP/task-i.log"
@@ -1360,6 +1466,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_L_STUB/uname" "$TASK_L_STUB/schtasks"
+ps_stub "$TASK_L_STUB"
 env HOME="$TASK_L_HOME" PATH="$TASK_L_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_L_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_L_HOME" >"$TMP/task-l.log" 2>&1; rctl=$?
 dump_on_fail "$rctl" "$TMP/task-l.log"
@@ -1392,6 +1499,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_M_STUB/uname" "$TASK_M_STUB/schtasks"
+ps_stub "$TASK_M_STUB"
 env HOME="$TASK_M_HOME" PATH="$TASK_M_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_M_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_M_HOME" >"$TMP/task-m.log" 2>&1; rctm=$?
 dump_on_fail "$rctm" "$TMP/task-m.log"
@@ -1422,6 +1530,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_N_STUB/uname" "$TASK_N_STUB/schtasks"
+ps_stub "$TASK_N_STUB"
 env HOME="$TASK_N_HOME" PATH="$TASK_N_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_N_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_N_HOME" >"$TMP/task-n.log" 2>&1; rctn=$?
 dump_on_fail "$rctn" "$TMP/task-n.log"
@@ -1453,6 +1562,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_O_STUB/uname" "$TASK_O_STUB/schtasks"
+ps_stub "$TASK_O_STUB"
 env HOME="$TASK_O_HOME" PATH="$TASK_O_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_O_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_O_HOME" >"$TMP/task-o.log" 2>&1; rcto=$?
 dump_on_fail "$rcto" "$TMP/task-o.log"
@@ -1477,6 +1587,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_J_STUB/uname" "$TASK_J_STUB/schtasks"
+ps_stub "$TASK_J_STUB"
 env HOME="$TASK_J_HOME" PATH="$TASK_J_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_J_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_J_HOME" >"$TMP/task-j.log" 2>&1; rctj=$?
 dump_on_fail "$rctj" "$TMP/task-j.log"
@@ -1501,6 +1612,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_C_STUB/uname" "$TASK_C_STUB/schtasks"
+ps_stub "$TASK_C_STUB"
 env HOME="$TASK_C_HOME" PATH="$TASK_C_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_C_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_C_HOME" >"$TMP/task-c.log" 2>&1; rctc=$?
 dump_on_fail "$rctc" "$TMP/task-c.log"
@@ -1525,6 +1637,7 @@ printf 'SUCCESS: %s\n' "\$*"
 exit 0
 EOF
 chmod +x "$TASK_D_STUB/uname" "$TASK_D_STUB/schtasks"
+ps_stub "$TASK_D_STUB"
 env HOME="$TASK_D_HOME" PATH="$TASK_D_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_D_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_D_HOME" >"$TMP/task-d.log" 2>&1; rctd=$?
 dump_on_fail "$rctd" "$TMP/task-d.log"
@@ -1572,6 +1685,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_E_STUB/uname" "$TASK_E_STUB/schtasks"
+ps_stub "$TASK_E_STUB"
 env HOME="$TASK_E_HOME" PATH="$TASK_E_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_E_HOME" --uninstall \
   >"$TMP/task-e-uninstall.log" 2>&1; rcte=$?
 dump_on_fail "$rcte" "$TMP/task-e-uninstall.log"
@@ -1594,6 +1708,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_G_STUB/uname" "$TASK_G_STUB/schtasks"
+ps_stub "$TASK_G_STUB"
 env HOME="$TASK_G_HOME" PATH="$TASK_G_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_G_HOME" --uninstall \
   >"$TMP/task-g-uninstall.log" 2>&1; rctg=$?
 dump_on_fail "$rctg" "$TMP/task-g-uninstall.log"
@@ -1616,6 +1731,7 @@ case " \$* " in
 esac
 EOF
 chmod +x "$TASK_H_STUB/uname" "$TASK_H_STUB/schtasks"
+ps_stub "$TASK_H_STUB"
 env HOME="$TASK_H_HOME" PATH="$TASK_H_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_H_HOME" --uninstall \
   >"$TMP/task-h-uninstall.log" 2>&1; rcth=$?
 dump_on_fail "$rcth" "$TMP/task-h-uninstall.log"
@@ -1636,6 +1752,7 @@ exit 0
 EOF
 : > "$POSIX_T_LOG"
 chmod +x "$POSIX_T_STUB/schtasks"
+ps_stub "$POSIX_T_STUB"
 env HOME="$POSIX_T_HOME" PATH="$POSIX_T_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$POSIX_T_SDK/adb" --jar "$JAR" --no-ui --home "$POSIX_T_HOME" >"$TMP/posix-task.log" 2>&1; rcpt=$?
 dump_on_fail "$rcpt" "$TMP/posix-task.log"
@@ -1660,6 +1777,7 @@ echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
 exit 0
 EOF
 chmod +x "$TASK_K_STUB/uname" "$TASK_K_STUB/schtasks"
+ps_stub "$TASK_K_STUB"
 : > "$TASK_K_LOG"
 env HOME="$TASK_K_HOME" PATH="$TASK_K_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_K_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_K_SB" >"$TMP/task-k.log" 2>&1; rctk=$?
@@ -1680,6 +1798,7 @@ printf '%s\n' '#!/bin/sh' 'echo "task-f-adb $@"' > "$TASK_F_SDK/adb"; chmod +x "
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_F_STUB/uname"
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$TASK_F_STUB/schtasks"
 chmod +x "$TASK_F_STUB/uname" "$TASK_F_STUB/schtasks"
+ps_stub "$TASK_F_STUB"
 ln -s /dev/full "$TASK_F_HOME/bin/corral-daemon.bat"
 env HOME="$TASK_F_HOME" PATH="$TASK_F_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
   --adb "$TASK_F_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_F_HOME" >"$TMP/task-f.log" 2>&1; rctf=$?
@@ -1816,6 +1935,7 @@ p=${2#/}
 printf 'C:\\%s\n' "$(printf '%s' "$p" | tr '/' '\\')"
 EOF
 chmod +x "$FW_STUB/cygpath"
+ps_stub "$FW_STUB"
 FW_HOME=$(win_new_home fw-slash)
 FW_POSIX_JAR="$FW_HOME/.corral/corral-daemon-all.jar"
 FW_WIN_JAR="C:$(printf '%s' "$FW_POSIX_JAR" | tr '/' '\\')"
@@ -1845,20 +1965,102 @@ check "uninstall javaw: a javaw.exe daemon is matched and stopped" bash -c \
 check "uninstall javaw: the summary never says no daemon process was running" bash -c \
   "grep '^Removed:' '$TMP/javaw-uninstall.log' | grep -qF '(daemon stopped)' && ! grep -q 'no daemon process was running' '$TMP/javaw-uninstall.log'"
 
-# (h2) the daemon runs from a jar COPIED to another directory: its command line carries a path this
-#      install never wrote. Matching the installed PATH misses it and the summary then claims no
-#      daemon was running while one is alive (found on a real Windows box); the FILE NAME match
-#      finds and stops it.
+# (h2) row 30 / F1: a daemon running from a jar COPIED OUTSIDE the install root is NOT ours. The
+#      old rule matched the jar FILE NAME alone and stopped it — which on a box with one Corral is
+#      the operator's live daemon, and is exactly how a `--home <sandbox> --uninstall` (and this
+#      suite) killed it. The match is now confined to the install root: this process must be named,
+#      left running, and never claimed as stopped.
 CP_HOME=$(win_new_home copied-jar)
 CP_PROCS="$TMP/win-procs-copied"; printf '%s\n' "4242|java.exe -jar $(winp "$TMP/copied/corral-daemon-all.jar")" > "$CP_PROCS"
 : > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
 env HOME="$CP_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$CP_PROCS" \
   bash "$SRC/install.sh" --home "$CP_HOME" --uninstall >"$TMP/copied-uninstall.log" 2>&1; rccp=$?
 dump_on_fail "$rccp" "$TMP/copied-uninstall.log"
-check "uninstall copied jar: the daemon started from a copied jar is matched and stopped" bash -c \
-  "[ '$rccp' -eq 0 ] && [ \"\$(cat '$TMP/powershell-killed')\" = 4242 ] && [ ! -s '$CP_PROCS' ]"
-check "uninstall copied jar: the summary never says no daemon process was running" bash -c \
-  "grep '^Removed:' '$TMP/copied-uninstall.log' | grep -qF '(daemon stopped)' && ! grep -q 'no daemon process was running' '$TMP/copied-uninstall.log'"
+check "uninstall copied jar OUTSIDE the root: the process is NOT stopped (it belongs to another install root)" bash -c \
+  "[ '$rccp' -eq 0 ] && [ ! -s '$TMP/powershell-killed' ] && grep -q '^4242|' '$CP_PROCS'"
+check "uninstall copied jar OUTSIDE the root: it says no daemon outside this install root was touched" \
+  grep -q 'no daemon outside this install root was touched: PID 4242' "$TMP/copied-uninstall.log"
+check "uninstall copied jar OUTSIDE the root: the summary never claims 'daemon stopped'" bash -c \
+  "! grep -q 'daemon stopped' '$TMP/copied-uninstall.log' && grep '^Removed:' '$TMP/copied-uninstall.log' | grep -qF 'a daemon outside it was left untouched'"
+
+# (h3) the fallback still exists: a jar COPIED to another directory INSIDE the install root is a
+#      daemon of this install (an operator or a test copied it there), so it is matched by name and
+#      stopped. This is what "keep the file-name match as a fallback" has to mean — confined.
+CPIN_HOME=$(win_new_home copied-in-root)
+CPIN_PROCS="$TMP/win-procs-copied-in"; printf '%s\n' "5150|java.exe -jar $(winp "$CPIN_HOME/tmp/corral-daemon-all.jar")" > "$CPIN_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$CPIN_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$CPIN_PROCS" \
+  bash "$SRC/install.sh" --home "$CPIN_HOME" --uninstall >"$TMP/copied-in-uninstall.log" 2>&1; rccin=$?
+dump_on_fail "$rccin" "$TMP/copied-in-uninstall.log"
+check "uninstall copied jar INSIDE the root: the daemon is matched by name and stopped" bash -c \
+  "[ '$rccin' -eq 0 ] && [ \"\$(cat '$TMP/powershell-killed')\" = 5150 ] && [ ! -s '$CPIN_PROCS' ]"
+check "uninstall copied jar INSIDE the root: the summary claims the verified stop" bash -c \
+  "grep '^Removed:' '$TMP/copied-in-uninstall.log' | grep -qF '(daemon stopped)' && ! grep -q 'no daemon process was running' '$TMP/copied-in-uninstall.log'"
+
+# (h4) row 30 finding 1: the advertised cross-root guard must be the guard that RUNS. The stub
+#      HARD-REFUSES any Stop-Process that arrives without CORRAL_INSTALL_ROOT, so this row fails if
+#      install.sh ever drops the variable from the stop call — the refusal is exercised by a real
+#      installer uninstall, not only by the hand-written self-test at the end of this file.
+WIRED_HOME=$(win_new_home wired-guard)
+WIRED_PROCS="$TMP/win-procs-wired"; win_proc_line 6161 "$WIRED_HOME" > "$WIRED_PROCS"
+# $TMP/powershell-escapes is NOT reset by these rows: it accumulates every refusal the whole suite
+# makes, so the closing check ("no row ever asked to stop a daemon outside its sandbox") keeps its
+# full meaning.
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$WIRED_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$WIRED_PROCS" \
+  bash "$SRC/install.sh" --home "$WIRED_HOME" --uninstall >"$TMP/wired-uninstall.log" 2>&1; rcwired=$?
+dump_on_fail "$rcwired" "$TMP/wired-uninstall.log"
+check "daemon guard: a REAL uninstall's stop call passes CORRAL_INSTALL_ROOT (a rootless stop is refused, not performed)" bash -c \
+  "[ '$rcwired' -eq 0 ] && [ \"\$(cat '$TMP/powershell-killed')\" = 6161 ] && [ ! -s '$TMP/powershell-escapes' ]"
+check "daemon guard: the stop invocation itself carried the install root, not '<unset>'" bash -c \
+  "grep -q '^stop root=.' '$TMP/powershell.log' && ! grep -q '^stop root=<unset>' '$TMP/powershell.log'"
+
+# (h5) row 30 finding 2: the in-root decision is about the JAR ARGUMENT, not the whole command line.
+#      This process's jar is OUTSIDE the root while a -D flag carries a path UNDER the root: the old
+#      test ("the command line contains <root>/") tags it "ours" and kills the wrong daemon — the
+#      jar argument is the only thing that says otherwise. It must be tagged out, never asked about,
+#      named as left running, and never claimed stopped.
+DJ_HOME=$(win_new_home nonjar-token)
+DJ_PROCS="$TMP/win-procs-nonjar"
+printf '%s\n' "7171|java.exe -Dcorral.install=$(winp "$DJ_HOME")/share -jar $(winp "$TMP/elsewhere/corral-daemon-all.jar")" > "$DJ_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$DJ_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$DJ_PROCS" \
+  bash "$SRC/install.sh" --home "$DJ_HOME" --uninstall >"$TMP/nonjar-uninstall.log" 2>&1; rcdj=$?
+dump_on_fail "$rcdj" "$TMP/nonjar-uninstall.log"
+check "uninstall jar argument only: a root under a NON-jar token (-Dfoo=<root>/x) does NOT make the daemon ours" bash -c \
+  "[ '$rcdj' -eq 0 ] && [ ! -s '$TMP/powershell-killed' ] && ! grep -q 'Stop-Process -Id 7171' '$TMP/powershell.log' && grep -q '^7171|' '$DJ_PROCS'"
+check "uninstall jar argument only: the query asked for the jar-argument decision, not a whole-line substring" bash -c \
+  "grep -q '^query mode=jar' '$TMP/powershell.log' && ! grep -q '^query mode=whole-line' '$TMP/powershell.log'"
+check "uninstall jar argument only: that daemon is named as left running, never claimed stopped" bash -c \
+  "grep -q 'no daemon outside this install root was touched: PID 7171' '$TMP/nonjar-uninstall.log' && ! grep -q 'daemon stopped' '$TMP/nonjar-uninstall.log'"
+
+# (h6) a daemon started with a RELATIVE jar (cwd inside the root) cannot be proved ours: it is tagged
+#      unresolved, named, left running — and the NOTE must not claim it belongs to another install
+#      root, which the code never established (review minor 3).
+REL_HOME=$(win_new_home relative-jar)
+REL_PROCS="$TMP/win-procs-relative"; printf '%s\n' "8181|java.exe -jar corral-daemon-all.jar" > "$REL_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$REL_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$REL_PROCS" \
+  bash "$SRC/install.sh" --home "$REL_HOME" --uninstall >"$TMP/relative-uninstall.log" 2>&1; rcrel=$?
+dump_on_fail "$rcrel" "$TMP/relative-uninstall.log"
+check "uninstall relative jar: the daemon is left running (its root cannot be established, so it is not killed)" bash -c \
+  "[ '$rcrel' -eq 0 ] && [ ! -s '$TMP/powershell-killed' ] && grep -q '^8181|' '$REL_PROCS'"
+check "uninstall relative jar: the NOTE says the jar could not be resolved, NOT that it belongs to another root" bash -c \
+  "grep -q 'could not be resolved: PID 8181' '$TMP/relative-uninstall.log' && ! grep -q 'belongs to another install' '$TMP/relative-uninstall.log' && ! grep -q 'daemon stopped' '$TMP/relative-uninstall.log'"
+
+# (h7) an in-root daemon (stopped) AND a daemon outside the root (left) in the same uninstall: the
+#      summary line itself must name the one left running, not leave that to the NOTE (minor 4).
+BOTH_HOME=$(win_new_home both-daemons)
+BOTH_PROCS="$TMP/win-procs-both"
+{ win_proc_line 9001 "$BOTH_HOME"; printf '%s\n' "9002|java.exe -jar $(winp "$TMP/elsewhere/corral-daemon-all.jar")"; } > "$BOTH_PROCS"
+: > "$TMP/powershell-killed"; : > "$TMP/powershell.log"
+env HOME="$BOTH_HOME" PATH="$WIN_STUB:$STUB:$PATH" PS_TABLE="$BOTH_PROCS" \
+  bash "$SRC/install.sh" --home "$BOTH_HOME" --uninstall >"$TMP/both-uninstall.log" 2>&1; rcboth=$?
+dump_on_fail "$rcboth" "$TMP/both-uninstall.log"
+check "uninstall in-root + outside together: only the in-root daemon is stopped" bash -c \
+  "[ '$rcboth' -eq 0 ] && [ \"\$(cat '$TMP/powershell-killed')\" = 9001 ] && grep -q '^9002|' '$BOTH_PROCS' && ! grep -q '^9001|' '$BOTH_PROCS'"
+check "uninstall in-root + outside together: the summary line NAMES the daemon left running" bash -c \
+  "line=\$(grep '^Removed:' '$TMP/both-uninstall.log'); printf '%s' \"\$line\" | grep -qF '(daemon stopped; another daemon process was left running: PID 9002)'"
 
 # (i) a re-query fails transiently right after the kill, then a later poll succeeds and shows the
 #     daemon gone. The flag must be CLEARED by that success, or the summary keeps saying "could not
@@ -1889,6 +2091,67 @@ check "uninstall no-powershell: claims neither 'daemon stopped' nor 'no daemon p
   "! grep -q 'daemon stopped' '$TMP/nops-uninstall.log' && ! grep -q 'no daemon process was running' '$TMP/nops-uninstall.log'"
 check "uninstall no-powershell: says the daemon process could not be identified" bash -c \
   "grep -q 'PowerShell was not found, so the corral daemon process could not be identified' '$TMP/nops-uninstall.log'"
+# minor 7: the install-root rendering (win_path | tr) is only needed when there IS a PowerShell to
+# ask. This row's PATH has neither cygpath nor tr, so a lazy render leaves no shell error behind.
+check "uninstall no-powershell: does not shell out to win_path/tr for a root it never uses (minor 7)" bash -c \
+  "! grep -q 'command not found' '$TMP/nops-uninstall.log'"
+
+# ===== row 30 / F1: the suite can never reach the real Windows tooling =====
+# The defect: only TWO stub dirs carried a powershell.exe, so every other Windows run resolved
+# C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe, install.sh's uninstall path ran for
+# real, and the operator's live CorralDaemon was killed — while the suite printed green. The stub
+# now exists in every stub dir (ps_stub) and in $STUB, and this block is the assertion that keeps it
+# true: a stub dir added later without a copy fails here instead of silently reaching the host.
+# A "stub dir" here is a dir that can boot the installer's Windows branch (`uname`), drive its task
+# stub (`schtasks`) or make win_path render a Windows path (`cygpath`) — the three ways a row can
+# reach the daemon-stop path. NOP_STUB is excluded on purpose (that row is DEFINED by having no
+# PowerShell, and its PATH excludes $STUB). Dirs that carry only unrelated tools ($TMP/rm-stub, the
+# decoy adb dirs) are not on that path; the $STUB backstop still sits second on every row's PATH.
+ps_audit_dirs=$(find "$TMP" -maxdepth 2 -type f \( -name uname -o -name schtasks -o -name cygpath \) \
+  -exec dirname {} \; | sort -u | grep -vxF "$NOP_STUB")
+check "windows stubs: the audit found the suite's stub dirs (it cannot pass vacuously)" \
+  test "$(printf '%s\n' "$ps_audit_dirs" | grep -c .)" -ge 15
+ps_missing=$(printf '%s\n' "$ps_audit_dirs" | while IFS= read -r d; do
+  [ -n "$d" ] && [ -x "$d/powershell.exe" ] || printf '%s ' "$d"
+done)
+check "windows stubs: EVERY stub dir carries its own powershell.exe (F1)" test -z "$ps_missing"
+ps_host=$(printf '%s\n' "$ps_audit_dirs" | while IFS= read -r d; do
+  [ -n "$d" ] || continue
+  r=$(env PATH="$d:$STUB:$PATH" bash -c 'command -v powershell.exe' 2>/dev/null)
+  case "$r" in "$TMP"/*) ;; *) printf '%s->%s ' "$d" "${r:-none}";; esac
+done)
+check "windows stubs: PATH resolution in EVERY stub dir lands on the suite's stub, never the host's (F1)" \
+  test -z "$ps_host"
+
+# The suite's own guard, proved rather than hoped for: the stub REFUSES a stop that carries no
+# CORRAL_INSTALL_ROOT at all, or a pid whose JAR (not whose command line) is outside the install
+# root it was given, and records the refusal. A guard that never fires and one that forbids
+# everything are both failures, so the same pid is then stopped from inside the root. The real
+# installer path for the first refusal is row (h4) above; this is the direct unit test.
+GUARD_TABLE="$TMP/guard-procs"; GUARD_HOME="$TMP/home-guard"; GUARD_ELSE="$TMP/guard-elsewhere"
+printf '%s\n' "31337|java.exe -jar $(winp "$GUARD_ELSE/.corral/corral-daemon-all.jar")" > "$GUARD_TABLE"
+# ... and a stop with NO root at all is refused too: that is the wiring row (h4) turns into an
+# installer-level assertion, so if install.sh ever drops CORRAL_INSTALL_ROOT from the stop call the
+# suite fails rather than killing whatever the query matched.
+: > "$TMP/guard-killed"; : > "$TMP/guard-escapes"
+env PS_TABLE="$GUARD_TABLE" PS_LOG="$TMP/guard.log" PS_KILLED="$TMP/guard-killed" \
+  PS_ESCAPES="$TMP/guard-escapes" CORRAL_INSTALL_ROOT= \
+  "$TMP/powershell-stub.sh" -NoProfile -NonInteractive -Command "Stop-Process -Id 31337 -Force" >/dev/null 2>&1
+check "daemon guard: a stop that carries NO install root is refused, not performed" bash -c \
+  "[ ! -s '$TMP/guard-killed' ] && grep -q 'no CORRAL_INSTALL_ROOT' '$TMP/guard-escapes' && grep -q '^31337|' '$GUARD_TABLE'"
+: > "$TMP/guard-killed"; : > "$TMP/guard-escapes"
+env PS_TABLE="$GUARD_TABLE" PS_LOG="$TMP/guard.log" PS_KILLED="$TMP/guard-killed" \
+  PS_ESCAPES="$TMP/guard-escapes" CORRAL_INSTALL_ROOT="$(winp "$GUARD_HOME")" \
+  "$TMP/powershell-stub.sh" -NoProfile -NonInteractive -Command "Stop-Process -Id 31337 -Force" >/dev/null 2>&1
+check "daemon guard: a pid whose jar is OUTSIDE the install root is refused, not killed" bash -c \
+  "[ ! -s '$TMP/guard-killed' ] && grep -q 'not under the install root' '$TMP/guard-escapes' && grep -q '^31337|' '$GUARD_TABLE'"
+: > "$TMP/guard-killed"; : > "$TMP/guard-escapes"
+env PS_TABLE="$GUARD_TABLE" PS_LOG="$TMP/guard.log" PS_KILLED="$TMP/guard-killed" \
+  PS_ESCAPES="$TMP/guard-escapes" CORRAL_INSTALL_ROOT="$(winp "$GUARD_ELSE")" \
+  "$TMP/powershell-stub.sh" -NoProfile -NonInteractive -Command "Stop-Process -Id 31337 -Force" >/dev/null 2>&1
+check "daemon guard: the same pid INSIDE the root is still stopped (not a blanket refusal)" bash -c \
+  "[ \"\$(cat '$TMP/guard-killed')\" = 31337 ] && [ ! -s '$TMP/guard-escapes' ] && [ ! -s '$GUARD_TABLE' ]"
+check "daemon guard: no row ever asked to stop a daemon outside its sandbox" test ! -s "$TMP/powershell-escapes"
 
 # ===== review 43 §3: the README's cutover links must resolve where the README is =====
 # README.md is shipped verbatim in the bundle, so its [CUTOVER.md](CUTOVER.md#updates) link has to

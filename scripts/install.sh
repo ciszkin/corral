@@ -185,34 +185,85 @@ if [[ $UNINSTALL -eq 1 ]]; then
     echo "Windows: skipping systemctl (no systemd user session here)"
     # /end stops the task's cmd.exe wrapper, NOT the java.exe it launched: the daemon survives it
     # and keeps the API port and ~/.corral. PowerShell (wmic is gone from Windows 11) finds OUR java
-    # by the daemon jar name in its command line — never by port (configurable, and another process
-    # may own it) and never all java.exe — and a stop is CLAIMED only after a re-query shows no
+    # by the daemon jar in its command line — never by port (configurable, and another process may
+    # own it) and never all java.exe — and a stop is CLAIMED only after a re-query shows no
     # matching process remains. No match is success: there was nothing to stop.
+    #
+    # The match is confined to THIS install root, and that guard is the whole point of this block.
+    # Matching the jar FILE NAME alone (what this did before) over-matches: on a box with one
+    # Corral, a sandbox's "our daemon" and the operator's live CorralDaemon are the same process,
+    # so `--home <sandbox> --uninstall` — and the shipped test suite, whose stub dirs mostly did
+    # not carry a powershell.exe — killed the production daemon and then claimed "daemon stopped".
+    # The Scheduled Task has been sandbox-guarded for the same reason (see the TASK_STATE=sandbox
+    # branch below); note that SANDBOX=1 never even enters this branch (line above), but a sandbox
+    # is usually spelled HOME=<sandbox> --home <sandbox>, which is SANDBOX=0 — so the containment
+    # check is what actually protects it.
+    #
+    # Containment is decided on the JAR ARGUMENT, never on the whole command line. The query takes
+    # the process's `-jar` operand (or, failing that, the token that names the daemon jar) and tests
+    # THAT path, so a process which merely carries the root in a non-jar token — `-Dfoo=<root>`, a
+    # classpath entry, a java.exe living under the root — while running its jar from elsewhere is
+    # NOT ours. Two tiers are ours: the jar under $CORRAL_HOME (primary: the installed location),
+    # and, as the fallback for a daemon started from a COPIED jar, a jar of that name anywhere under
+    # $TARGET_HOME. A jar path that is not absolute (a relative `-jar`, a command line that only
+    # mentions the name) is also left running: it cannot be SHOWN to be ours, and an uninstall never
+    # kills on a guess. Any other match is named, never stopped.
     POWERSHELL=""
     for ps in powershell.exe powershell pwsh.exe pwsh; do
       if command -v "$ps" >/dev/null 2>&1; then POWERSHELL="$ps"; break; fi
     done
-    # PIDs go to DAEMON_PIDS; DAEMON_QUERY_FAILED records that the query itself failed, which is
-    # NOT the same as "nothing matched" and must never be claimed as a stop or a no-op.
-    DAEMON_QUERY_FAILED=0
-    # Match the jar FILE NAME, not the install path: a daemon started from a jar COPIED to another
-    # directory carries a different path, and a path match then left it running while the summary
-    # said "no daemon process was running". A java(w).exe whose command line merely CONTAINS the
-    # name is stopped; this deliberately OVER-matches and errs toward stopping our own daemon.
     DAEMON_JAR_NAME='corral-daemon-all.jar'
-    daemon_pids() {
-      if DAEMON_PIDS=$(CORRAL_DAEMON_JAR="$DAEMON_JAR_NAME" "$POWERSHELL" -NoProfile -NonInteractive -Command \
-        "\$jar = \$env:CORRAL_DAEMON_JAR.Replace('\','/'); Get-CimInstance Win32_Process | Where-Object { \$_.Name -match '^javaw?\.exe\$' -and \$_.CommandLine -and \$_.CommandLine.Replace('\','/').IndexOf(\$jar, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { \$_.ProcessId }" \
+    # Both sides are compared separator-blind and case-insensitively (inside PowerShell): win_path
+    # renders the MSYS root the way cmd.exe/PowerShell spell it (C:\...), the process command line
+    # may carry either separator, and Windows paths are case-insensitive. The roots are rendered
+    # only when there IS a PowerShell to ask, so the no-PowerShell path does not depend on
+    # cygpath/tr for a value it never uses.
+    DAEMON_ROOT=""
+    DAEMON_CORRAL_ROOT=""
+    # PIDs whose JAR ARGUMENT is under this install go to DAEMON_PIDS; a jar outside both roots goes
+    # to DAEMON_OUTSIDE, and one that cannot be resolved to an absolute path goes to
+    # DAEMON_UNRESOLVED — neither is ever stopped, both are named. DAEMON_QUERY_FAILED records that
+    # the query itself failed, which is NOT the same as "nothing matched" and is never claimed as a
+    # stop or a no-op.
+    DAEMON_QUERY_FAILED=0
+    DAEMON_PIDS=""
+    DAEMON_OUTSIDE=""
+    DAEMON_UNRESOLVED=""
+    daemon_scan() {
+      local raw tag pid
+      if raw=$(CORRAL_DAEMON_JAR="$DAEMON_JAR_NAME" CORRAL_INSTALL_ROOT="$DAEMON_ROOT" \
+        CORRAL_DAEMON_HOME="$DAEMON_CORRAL_ROOT" \
+        "$POWERSHELL" -NoProfile -NonInteractive -Command \
+        "\$jar = \$env:CORRAL_DAEMON_JAR.Replace('\','/'); \$root = \$env:CORRAL_INSTALL_ROOT.Replace('\','/').TrimEnd('/'); \$chome = \$env:CORRAL_DAEMON_HOME.Replace('\','/').TrimEnd('/'); if (\$root -eq '') { \$root = ':no-install-root:' }; if (\$chome -eq '') { \$chome = \$root + '/.corral' }; Get-CimInstance Win32_Process | Where-Object { \$_.Name -match '^javaw?\.exe\$' -and \$_.CommandLine -and \$_.CommandLine.Replace('\','/').IndexOf(\$jar, [StringComparison]::OrdinalIgnoreCase) -ge 0 } | ForEach-Object { \$cl = \$_.CommandLine.Replace('\','/'); \$jp = ''; \$m = [regex]::Match(\$cl, '(?i)(?:^|\s)-jar\s+(?:\"([^\"]+)\"|(\S+))'); if (\$m.Success) { if (\$m.Groups[1].Length -gt 0) { \$jp = \$m.Groups[1].Value } else { \$jp = \$m.Groups[2].Value } } else { foreach (\$t in (\$cl -split '\s+')) { \$u = \$t.Trim('\"'); if (\$u.EndsWith('/' + \$jar, [StringComparison]::OrdinalIgnoreCase)) { \$jp = \$u; break } } }; if (\$jp -ne '') { \$jp = \$jp.Replace('\','/').TrimEnd('\"') }; if (\$jp -eq '' -or -not (\$jp.StartsWith('/') -or \$jp -match '^[A-Za-z]:/')) { 'rel ' + \$_.ProcessId } elseif (\$jp.StartsWith(\$chome + '/', [StringComparison]::OrdinalIgnoreCase) -or \$jp.StartsWith(\$root + '/', [StringComparison]::OrdinalIgnoreCase)) { 'in ' + \$_.ProcessId } else { 'out ' + \$_.ProcessId } }" \
         2>/dev/null); then
         DAEMON_QUERY_FAILED=0
       else
-        DAEMON_QUERY_FAILED=1; DAEMON_PIDS=""
+        DAEMON_QUERY_FAILED=1; raw=""
       fi
-      DAEMON_PIDS=$(printf '%s\n' "$DAEMON_PIDS" | tr -d '\r')
+      DAEMON_PIDS=""
+      DAEMON_OUTSIDE=""
+      DAEMON_UNRESOLVED=""
+      while read -r tag pid; do
+        case "$tag" in
+          in)  [[ -n "$pid" ]] && DAEMON_PIDS="${DAEMON_PIDS:+$DAEMON_PIDS }$pid";;
+          out) [[ -n "$pid" ]] && DAEMON_OUTSIDE="${DAEMON_OUTSIDE:+$DAEMON_OUTSIDE }$pid";;
+          rel) [[ -n "$pid" ]] && DAEMON_UNRESOLVED="${DAEMON_UNRESOLVED:+$DAEMON_UNRESOLVED }$pid";;
+        esac
+      done <<EOF
+$(printf '%s\n' "$raw" | tr -d '\r')
+EOF
     }
     daemon_before=""
     daemon_left=""
-    if [[ -n "$POWERSHELL" ]]; then daemon_pids; daemon_before=$DAEMON_PIDS; daemon_left=$daemon_before; fi
+    daemon_outside=""
+    daemon_unresolved=""
+    if [[ -n "$POWERSHELL" ]]; then
+      DAEMON_ROOT=$(win_path "$TARGET_HOME" | tr '\\' '/'); DAEMON_ROOT="${DAEMON_ROOT%/}"
+      DAEMON_CORRAL_ROOT=$(win_path "$CORRAL_HOME" | tr '\\' '/'); DAEMON_CORRAL_ROOT="${DAEMON_CORRAL_ROOT%/}"
+      daemon_scan
+      daemon_before=$DAEMON_PIDS; daemon_outside=$DAEMON_OUTSIDE; daemon_unresolved=$DAEMON_UNRESOLVED
+      daemon_left=$daemon_before
+    fi
 
     # Stop the running task BEFORE deleting it: deleting a task does not stop its process.
     # A task that is not running fails the /end and a box that never had the task fails the delete;
@@ -229,11 +280,17 @@ if [[ $UNINSTALL -eq 1 ]]; then
       daemon_ids=""
       for p in $daemon_before; do daemon_ids="${daemon_ids:+$daemon_ids,}$p"; done
       if [[ -n "$daemon_ids" ]]; then
-        "$POWERSHELL" -NoProfile -NonInteractive -Command \
+        # The install root is passed to the STOP, not only to the query: the test stub refuses a
+        # stop that arrives without it, so the guard the suite advertises is the one that actually
+        # runs (a regression to an unscoped stop fails the suite instead of killing a daemon), and a
+        # future PowerShell-side check has the value it needs.
+        CORRAL_INSTALL_ROOT="$DAEMON_ROOT" \
+          "$POWERSHELL" -NoProfile -NonInteractive -Command \
           "Stop-Process -Id $daemon_ids -Force -ErrorAction SilentlyContinue" 2>/dev/null
         # Stop-Process is not guaranteed synchronous; poll briefly before deciding what to claim.
         for _ in 1 2 3 4 5; do
-          daemon_pids; daemon_left=$DAEMON_PIDS
+          daemon_scan; daemon_left=$DAEMON_PIDS
+          daemon_outside=$DAEMON_OUTSIDE; daemon_unresolved=$DAEMON_UNRESOLVED
           [[ $DAEMON_QUERY_FAILED -eq 0 && -z "$daemon_left" ]] && break
           sleep 0.2 2>/dev/null || true
         done
@@ -245,6 +302,16 @@ if [[ $UNINSTALL -eq 1 ]]; then
         echo "WARNING: the corral daemon process could NOT be stopped (still running: PID $(echo $daemon_left));"
         echo "         it may still serve the API and keep ~/.corral from being removed."
       fi
+      if [[ -n "$daemon_outside" ]]; then
+        echo "NOTE: no daemon outside this install root was touched: PID $(echo $daemon_outside)"
+        echo "      runs $DAEMON_JAR_NAME from a jar path outside both $CORRAL_HOME and $TARGET_HOME,"
+        echo "      so it belongs to another install and was left running."
+      fi
+      if [[ -n "$daemon_unresolved" ]]; then
+        echo "NOTE: left a daemon running whose jar could not be resolved: PID $(echo $daemon_unresolved)"
+        echo "      its command line names $DAEMON_JAR_NAME but not as an absolute -jar path (a"
+        echo "      relative jar, say), so it cannot be shown to belong to this install root."
+      fi
     else
       echo "WARNING: PowerShell was not found, so the corral daemon process could not be identified;"
       echo "         if java.exe is still running the daemon jar it keeps ~/.corral from being removed."
@@ -253,8 +320,14 @@ if [[ $UNINSTALL -eq 1 ]]; then
     if task_ok "$del_rc" "$del_out"; then
       if [[ -z "$POWERSHELL" || $DAEMON_QUERY_FAILED -eq 1 || -n "$daemon_left" ]]; then
         note_removed "Scheduled Task CorralDaemon"
+      elif [[ -n "$daemon_before" && -n "$daemon_outside$daemon_unresolved" ]]; then
+        note_removed "Scheduled Task CorralDaemon (daemon stopped; another daemon process was left running: PID $(echo $daemon_outside $daemon_unresolved))"
       elif [[ -n "$daemon_before" ]]; then
         note_removed "Scheduled Task CorralDaemon (daemon stopped)"
+      elif [[ -n "$daemon_outside" ]]; then
+        note_removed "Scheduled Task CorralDaemon (no daemon in this install root; a daemon outside it was left untouched)"
+      elif [[ -n "$daemon_unresolved" ]]; then
+        note_removed "Scheduled Task CorralDaemon (no daemon in this install root; a daemon whose jar could not be resolved was left untouched)"
       else
         note_removed "Scheduled Task CorralDaemon (no daemon process was running)"
       fi

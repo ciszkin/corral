@@ -516,6 +516,41 @@ replace_file() { # replace_file <src> <dst> <label> [mode]
   fi
 }
 
+# --- the Windows .bat twins: never write a file whose bytes are already right -------------------
+# cmd.exe does NOT keep a batch file's handle open across commands: it RE-OPENS the file by NAME and
+# resumes at the saved byte offset. Rewriting corral.bat under an in-flight `corral devices` call
+# therefore makes that call read the NEW file at the OLD offset — measured on this box as
+# `'C:\Program' is not recognized`, rc=9009, with the CLI's work already done — and the same race
+# against adb-wrapper.bat turned a successful adb call's rc from 0 into 1 (QA pass 43 §5 F2).
+# The temp-file rename that makes the POSIX shims safe does NOT transfer: cmd.exe re-opens the NAME,
+# so it lands on the new inode anyway, and the QA proved the rename atomic and the `.bat` still
+# garbled. What works is not writing at all. The twins are release-FROZEN content (the release-
+# varying logic lives in the jar, which IS replaced atomically), so a twin that is already
+# byte-identical to the bundle is left completely untouched: same inode, same mtime, no window of
+# any kind. When the bytes genuinely DIFFER (a release that edits a twin) the new content still has
+# to land, so it is written atomically — no caller can ever see a half-written file — and the
+# summary names the one window that remains, a call already in flight ACROSS that write. Refusing
+# instead would leave the box permanently unable to receive a changed twin; see row31-report.md.
+# `cmp` is the platform's own (Git Bash and Cygwin both ship coreutils), so this adds no dependency.
+BAT_KEPT=""
+BAT_WRITTEN=""
+BAT_REPLACED=""
+bat_install() { # bat_install <file name>
+  local name="$1" src="$SCRIPT_DIR/$1" dst="$BIN_DIR/$1"
+  if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+    BAT_KEPT="$BAT_KEPT $name"
+    return 0
+  fi
+  if [ -e "$dst" ]; then BAT_REPLACED="$BAT_REPLACED $name"; fi
+  replace_file "$src" "$dst" "$name" || return 1
+  BAT_WRITTEN="$BAT_WRITTEN $name"
+}
+bat_list() { # bat_list <space-separated names> -> "a.bat, b.bat"
+  local out="" n
+  for n in $1; do out="${out:+$out, }$n"; done
+  printf '%s' "$out"
+}
+
 # Gate EVERY adb call, including absolute-path ones from gradle/AGP/IDE, by replacing the
 # SDK's platform-tools/adb with the wrapper (real binary kept as adb.real next to it).
 # Updates $ADB to the real binary so the daemon and the ~/bin wrapper use it directly.
@@ -646,11 +681,28 @@ fi
 if [[ $IS_WINDOWS -eq 1 ]]; then
   # The bundle ships .bat twins; on Windows they replace the POSIX shims. An extensionless POSIX
   # `adb` on the Windows PATH would shadow/confuse the real adb.exe, so it is never installed here.
-  cp "$SCRIPT_DIR/corral.bat" "$BIN_DIR/corral.bat" \
+  # bat_install skips the write entirely when the installed twin already matches the bundle, which
+  # is what keeps an in-flight cmd.exe call off a rewritten file (see the helper).
+  bat_install corral.bat \
     || { echo "ERROR: cannot install $BIN_DIR/corral.bat." >&2; exit 1; }
-  cp "$SCRIPT_DIR/adb-wrapper.bat" "$BIN_DIR/adb-wrapper.bat" \
+  bat_install adb-wrapper.bat \
     || { echo "ERROR: cannot install $BIN_DIR/adb-wrapper.bat." >&2; exit 1; }
-  echo "Installed: corral.bat, adb-wrapper.bat ($BIN_DIR) — no POSIX corral/adb shim on Windows"
+  # Name only what this run actually did: a twin that was already current is reported as unchanged,
+  # never under "Installed:".
+  if [[ -n "$BAT_WRITTEN" ]]; then
+    echo "Installed: $(bat_list "$BAT_WRITTEN") ($BIN_DIR) — no POSIX corral/adb shim on Windows"
+  fi
+  if [[ -n "$BAT_KEPT" ]]; then
+    echo "Unchanged: $(bat_list "$BAT_KEPT") ($BIN_DIR) — already byte-identical to the bundle, so NOT rewritten (a call in flight keeps the file it started)"
+  fi
+  if [[ -n "$BAT_REPLACED" ]]; then
+    echo "WARNING: rewrote $(bat_list "$BAT_REPLACED") — the bundle's bytes differ from the installed file."
+    echo "         cmd.exe re-opens a running .bat by name, so a call in flight ACROSS this write can"
+    echo "         execute a line at a stale offset (QA pass 43 §5 F2): 'is not recognized', rc 9009,"
+    echo "         or no line at all. If a corral/adb call was running during this install, its output"
+    echo "         and exit code cannot be trusted — re-run that call now and read the result. Nothing"
+    echo "         can protect a call already in flight; an unchanged twin is never written at all."
+  fi
   # F-NEW-1 on the INSTALL path: a box installed before the .bat path still carries the bash
   # `adb`/`corral`/`corral-ui` the old installer put on its PATH, and until now only --uninstall
   # ever looked at them — so an upgrade left them there, including the stray bash `adb` finding F2
@@ -932,7 +984,14 @@ fi
 if [[ $IS_WINDOWS -eq 1 ]]; then
   echo
   echo "==> Installed to $TARGET_HOME (platform: Windows, uname: $UNAME_S)"
-  echo "Installed Windows shims: corral.bat, adb-wrapper.bat ($BIN_DIR) — run corral from cmd.exe/PowerShell (PATH note at the end)"
+  # The closing summary repeats the .bat outcome in the same honest terms as the install line: a
+  # twin this run did not write is called unchanged, never installed.
+  if [[ -n "$BAT_WRITTEN" ]]; then
+    echo "Installed Windows shims: $(bat_list "$BAT_WRITTEN") ($BIN_DIR) — run corral from cmd.exe/PowerShell (PATH note at the end)"
+  fi
+  if [[ -n "$BAT_KEPT" ]]; then
+    echo "Unchanged Windows shims: $(bat_list "$BAT_KEPT") ($BIN_DIR) — byte-identical to the bundle, NOT rewritten, so a call already running keeps its file"
+  fi
   echo "Installed gradle gate (~/.gradle/init.d/corral-gate.gradle.kts -> $CORRAL_SHIM)"
   echo "Daemon:"
   case "$TASK_STATE" in

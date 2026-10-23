@@ -778,6 +778,119 @@ check "win: gate points at the .bat shim" grep -qF "$TMPHOME_W/bin/corral.bat" "
 check "win: daemon jar installed" cmp -s "$JAR" "$TMPHOME_W/.corral/corral-daemon-all.jar"
 check "win: no jar temp file left behind" bash -c "! ls '$TMPHOME_W/.corral' | grep -q '\.new\.'"
 
+# ===== row 31 / F2: an UNCHANGED .bat twin is never rewritten, and the summary says so ==========
+# cmd.exe does not keep a batch file's handle open: it re-opens the file by NAME and resumes at the
+# saved byte offset, so rewriting corral.bat under an in-flight `corral devices` makes that call
+# execute a stale-offset line (QA pass 43 §5 F2, measured on this box: `'C:\Program' is not
+# recognized`, rc=9009, CLI work already done; the same race against adb-wrapper.bat turned a
+# successful adb call's rc from 0 into 1). A temp+rename does NOT help — cmd.exe lands on the new
+# file either way — so an unchanged twin must not be written at all: same inode, same mtime.
+# Identity is read with `stat -c '%i %Y'` (inode + mtime; coreutils ships in Git Bash and the QA
+# itself used the inode column to prove `mv -f` was atomic). The inode IS available on this host, so
+# no mtime-only fallback is used; mtime is the column that separates "no write" from the old
+# in-place `cp` (which keeps the inode and rewrites the bytes), the inode is what proves a changed
+# twin was written by rename in (b).
+bat_cp=$(grep -nE '^[[:space:]]*cp[[:space:]]+"\$SCRIPT_DIR/(corral|adb-wrapper)\.bat"' "$SRC/install.sh" || true)
+check "bat freeze: no plain cp of a .bat twin in install.sh (the pre-change write)" test -z "$bat_cp"
+check "bat freeze: both twins go through the cmp-guarded bat_install" \
+  test "$(grep -cE '^[[:space:]]*bat_install (corral|adb-wrapper)\.bat' "$SRC/install.sh")" -eq 2
+check "bat freeze: the skip is a byte comparison against the bundle, not a date or size guess" \
+  grep -qF '[ -f "$dst" ] && cmp -s "$src" "$dst"' "$SRC/install.sh"
+
+stat_bat() { stat -c '%i %Y' "$1" 2>/dev/null; }
+stat_ino() { stat -c '%i' "$1" 2>/dev/null; }
+# (a) the install above wrote both twins because they were absent. A second install of the SAME
+# bundle must not touch them: not their bytes (obviously), and not their inode or mtime either.
+BAT_BEFORE_C=$(stat_bat "$TMPHOME_W/bin/corral.bat")
+BAT_BEFORE_A=$(stat_bat "$TMPHOME_W/bin/adb-wrapper.bat")
+sleep 1   # the mtime column has 1s resolution; without this a `cp` could land inside the same second
+env HOME="$TMPHOME_W" PATH="$WIN_STUB:$STUB:$PATH" \
+  bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$SDK_W/adb" --jar "$JAR" --no-ui --home "$TMPHOME_W" \
+  >"$TMP/win-reinstall.log" 2>&1; rcwr=$?
+dump_on_fail "$rcwr" "$TMP/win-reinstall.log"
+check "bat freeze: the unchanged re-install exits 0" test "$rcwr" -eq 0
+check "bat freeze: the unchanged corral.bat is NOT rewritten (same inode + mtime)" \
+  test "$(stat_bat "$TMPHOME_W/bin/corral.bat")" = "$BAT_BEFORE_C"
+check "bat freeze: the unchanged adb-wrapper.bat is NOT rewritten (same inode + mtime)" \
+  test "$(stat_bat "$TMPHOME_W/bin/adb-wrapper.bat")" = "$BAT_BEFORE_A"
+check "bat freeze: both twins still hold the bundle's bytes" bash -c \
+  "cmp -s '$SRC/corral.bat' '$TMPHOME_W/bin/corral.bat' && cmp -s '$SRC/adb-wrapper.bat' '$TMPHOME_W/bin/adb-wrapper.bat'"
+check "bat freeze: the install line names BOTH twins as Unchanged" \
+  grep -q '^Unchanged: corral.bat, adb-wrapper.bat (' "$TMP/win-reinstall.log"
+check "bat freeze: the closing summary names BOTH twins as Unchanged" \
+  grep -q '^Unchanged Windows shims: corral.bat, adb-wrapper.bat (' "$TMP/win-reinstall.log"
+check "bat freeze: the summary does NOT claim it installed a twin it did not write" bash -c \
+  "! grep -qE '^(Installed: corral\.bat|Installed Windows shims)' '$TMP/win-reinstall.log'"
+
+# (b) a release that REALLY edits a twin: the bytes differ, so the write is deliberate and must land
+# — atomically (no caller can ever see a half-written file) — while the twin that did not change is
+# still untouched, and the summary names both facts plus the one window that remains: a call already
+# in flight ACROSS that write. Refusing instead (the other option the owner left open) would leave
+# the box permanently unable to receive a changed twin, so it is not what this implements; the
+# `--refuse` alternative would have to fail here, which is why (b) asserts the write.
+BAT_BUNDLE="$TMP/bat-bundle"; mkdir -p "$BAT_BUNDLE"
+cp "$SRC/install.sh" "$SRC/corral.bat" "$SRC/adb-wrapper.bat" "$SRC/corral-gate.gradle.kts" \
+   "$SRC/corral-rules" "$SRC/corral" "$SRC/adb-wrapper" "$SRC/corral.service" "$BAT_BUNDLE/"
+printf 'rem next release marker: a changed twin\r\n' >> "$BAT_BUNDLE/corral.bat"
+check "bat changed: the next-release corral.bat really differs from the installed one" bash -c \
+  "! cmp -s '$BAT_BUNDLE/corral.bat' '$TMPHOME_W/bin/corral.bat'"
+BAT_C_BEFORE=$(stat_bat "$TMPHOME_W/bin/corral.bat")
+BAT_C_INO=$(stat_ino "$TMPHOME_W/bin/corral.bat")
+BAT_A_BEFORE=$(stat_bat "$TMPHOME_W/bin/adb-wrapper.bat")
+sleep 1
+env HOME="$TMPHOME_W" PATH="$WIN_STUB:$STUB:$PATH" \
+  bash "$BAT_BUNDLE/install.sh" --java "$FAKE_JAVA" --adb "$SDK_W/adb" --jar "$JAR" --no-ui \
+  --home "$TMPHOME_W" >"$TMP/win-batchanged.log" 2>&1; rcb=$?
+dump_on_fail "$rcb" "$TMP/win-batchanged.log"
+check "bat changed: the install exits 0" test "$rcb" -eq 0
+check "bat changed: the new corral.bat is installed byte-for-byte" \
+  cmp -s "$BAT_BUNDLE/corral.bat" "$TMPHOME_W/bin/corral.bat"
+check "bat changed: it was written by RENAME, not in place (inode changed)" \
+  test "$(stat_ino "$TMPHOME_W/bin/corral.bat")" != "$BAT_C_INO"
+check "bat changed: it is newer than the run that skipped it (mtime moved)" \
+  test "$(stat_bat "$TMPHOME_W/bin/corral.bat")" != "$BAT_C_BEFORE"
+check "bat changed: no half-written temp file is left beside it" bash -c \
+  "! ls '$TMPHOME_W/bin' | grep -q '\.new\.'"
+check "bat changed: the twin that did NOT change is still untouched (same inode + mtime)" \
+  test "$(stat_bat "$TMPHOME_W/bin/adb-wrapper.bat")" = "$BAT_A_BEFORE"
+check "bat changed: the summary names exactly the one that was written" bash -c \
+  "grep -q '^Installed: corral.bat (' '$TMP/win-batchanged.log' && ! grep -q 'corral.bat, adb-wrapper.bat' '$TMP/win-batchanged.log'"
+check "bat changed: the summary names exactly the one that was unchanged" \
+  grep -q '^Unchanged: adb-wrapper.bat (' "$TMP/win-batchanged.log"
+# The WARNING is the ONLY user-facing mitigation for the one window left, so it must be true and
+# actionable for THIS run: name what an in-flight caller may have seen, tell the user to distrust and
+# re-run that call, and never advise a re-install — that runs AFTER the write and protects nothing.
+check "bat changed: the summary says so and names the narrow in-flight window, for that twin only" bash -c \
+  "grep -q '^WARNING: rewrote corral.bat ' '$TMP/win-batchanged.log' && ! grep -q '^WARNING: rewrote adb-wrapper.bat' '$TMP/win-batchanged.log' && grep -q 'in flight ACROSS this write' '$TMP/win-batchanged.log' && grep -q \"'is not recognized', rc 9009\" '$TMP/win-batchanged.log' && grep -q 'cannot be trusted' '$TMP/win-batchanged.log' && grep -q 're-run that call now' '$TMP/win-batchanged.log' && ! grep -q 're-run with no corral' '$TMP/win-batchanged.log'"
+
+# (c) a failed twin write is still checked: non-zero, the file named, nothing half-written, and no
+# install summary claiming success. The rename is refused exactly as Windows refuses a locked file;
+# the jar's own replace is untouched, so the refusal is the .bat step's alone.
+BATFAIL_STUB="$TMP/batfailstub"; mkdir -p "$BATFAIL_STUB"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$BATFAIL_STUB/uname"
+cp "$TMP/powershell-stub.sh" "$BATFAIL_STUB/powershell.exe"; chmod +x "$BATFAIL_STUB/powershell.exe"
+cp "$WIN_STUB/schtasks" "$BATFAIL_STUB/schtasks"; chmod +x "$BATFAIL_STUB/schtasks"
+REAL_MV_BAT=$(command -v mv)
+printf '%s\n' '#!/bin/sh' \
+  'for a in "$@"; do case "$a" in *.bat.new.*) echo "mv: cannot move $a: Permission denied" >&2; exit 1;; esac; done' \
+  "exec $REAL_MV_BAT \"\$@\"" > "$BATFAIL_STUB/mv"
+chmod +x "$BATFAIL_STUB/mv"
+# $SRC's corral.bat is the ORIGINAL while the installed one carries (b)'s marker: the bytes differ,
+# so this run must attempt the write and be refused.
+BAT_FAIL_SHA=$(sha256sum "$TMPHOME_W/bin/corral.bat" | cut -d' ' -f1)
+env HOME="$TMPHOME_W" PATH="$BATFAIL_STUB:$STUB:$PATH" \
+  bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$SDK_W/adb" --jar "$JAR" --no-ui --home "$TMPHOME_W" \
+  >"$TMP/win-batfail.log" 2>&1; rcbf=$?
+check "bat write fails: the install refuses (non-zero)" test "$rcbf" -ne 0
+check "bat write fails: the message says the file was NOT replaced, naming it" \
+  grep -q 'corral.bat was NOT replaced' "$TMP/win-batfail.log"
+check "bat write fails: the refusal also names the path it could not install" \
+  grep -qF "ERROR: cannot install $TMPHOME_W/bin/corral.bat." "$TMP/win-batfail.log"
+check "bat write fails: the installed twin is untouched (byte-identical, no partial file)" bash -c \
+  "[ \"\$(sha256sum '$TMPHOME_W/bin/corral.bat' | cut -d' ' -f1)\" = '$BAT_FAIL_SHA' ] && ! ls '$TMPHOME_W/bin' | grep -q '\.new\.'"
+check "bat write fails: no install summary is printed" bash -c \
+  "! grep -q '==> Installed to' '$TMP/win-batfail.log'"
+
 # ===== Windows + a running daemon (review 42 §1): the jar cannot be replaced, so the install must
 # fail loudly instead of reporting success. A running JVM holds its jar open on Windows and the
 # rename is refused; the `mv` stub below refuses ONLY the daemon jar, exactly as the OS does, so the

@@ -30,7 +30,7 @@ TMP=$(mktemp -d)
 TMPHOME="$TMP/home"
 mkdir -p "$TMPHOME"
 cleanup() { rm -rf "$TMP"; }
-trap cleanup EXIT
+trap true EXIT
 
 # --- guard rails: every path we assert on is under the temp HOME, never the real one ---
 case "$TMPHOME" in
@@ -867,7 +867,7 @@ check "bat changed: the summary says so and names the narrow in-flight window, f
 # install summary claiming success. The rename is refused exactly as Windows refuses a locked file;
 # the jar's own replace is untouched, so the refusal is the .bat step's alone.
 BATFAIL_STUB="$TMP/batfailstub"; mkdir -p "$BATFAIL_STUB"
-printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$BATFAIL_STUB/uname"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$BATFAIL_STUB/uname"; chmod +x "$BATFAIL_STUB/uname"
 cp "$TMP/powershell-stub.sh" "$BATFAIL_STUB/powershell.exe"; chmod +x "$BATFAIL_STUB/powershell.exe"
 cp "$WIN_STUB/schtasks" "$BATFAIL_STUB/schtasks"; chmod +x "$BATFAIL_STUB/schtasks"
 REAL_MV_BAT=$(command -v mv)

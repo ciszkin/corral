@@ -156,6 +156,16 @@ if [ "$CHECK" = 1 ]; then
 fi
 
 if [ "$CHECK" = 1 ]; then
+  # On a Windows host a locally rebuilt jar is NOT byte-comparable with the CI-built one: the Kotlin
+  # compiler's class output differs run-to-run there (bytecode-identical, byte-different), so --check
+  # reports drift that has nothing to do with the bundle. Name it where the drift is read.
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo "note: on Windows, jars rebuilt locally are not byte-comparable with CI-built jars (Kotlin" >&2
+      echo "      compiler class output differs run-to-run); treat jar drift here as expected, and verify" >&2
+      echo "      --check on the Linux host that builds the release artifact." >&2
+      ;;
+  esac
   [ "$drift" = 0 ] || { echo "bundle drift detected" >&2; exit 1; }
   echo "bundle up to date"
 fi

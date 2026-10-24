@@ -58,7 +58,9 @@ the same device.
   `user:$USER` if `corral` is off PATH. The ancestor skip/floor lists (`shell_skip`,
   `init_floor`) live in the same editable
   `~/.config/corral/rules` file as the gate lists; a file from an older install without
-  those keys simply keeps the built-in defaults (add the keys to customize). The pid is
+  those keys simply keeps the built-in defaults (add the keys to customize). Membership
+  ignores case and one trailing `.exe` on **both** sides, so a list written once per
+  program (`bash`) matches `bash.exe` too and either spelling is accepted. The pid is
   only a liveness *hint*, recorded
   when the process actually spans the work — so a harness whose session outlives a single
   process (per-prompt or per-tool-call) sets `CORRAL_OWNER` and gets a durable identity.
@@ -74,6 +76,9 @@ the same device.
   CLI; the Windows `.bat` delegates to `corral gate`, so the three cannot drift. A missing
   rules file fails closed and the daemon restores the default from the jar.
   Denials are self-teaching: they name the two working forms.
+  On Windows `corral` is `corral.bat`, so a **batch caller must write `call corral …`**:
+  without `call`, cmd.exe transfers control to the shim and the caller's remaining lines
+  never run (its `exit /b` ends the caller). Interactive cmd.exe/PowerShell are unaffected.
 - **Self-healing** — the daemon watches the SDK adb shim and restores it automatically
   after SDK updates (stashing the updated binary), and restores a missing or blank
   `~/.config/corral/rules` from the jar default; `corral doctor` reports the state of

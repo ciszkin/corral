@@ -7,6 +7,17 @@ import java.lang.ProcessHandle
 internal fun commOf(command: String): String =
     command.substringAfterLast('/').substringAfterLast('\\')
 
+/**
+ * Membership key for the identity lists: lowercased basename with ONE trailing `.exe` stripped.
+ *
+ * Windows image names keep the extension (`bash.exe`) while the lists are written per program
+ * (`bash`), so keying BOTH sides of the comparison means either spelling matches and no entry is
+ * a dead entry on one platform. Keying only the comm would leave the `cmd.exe`-style entries dead
+ * in the other direction. The identity itself still carries the comm verbatim ([commOf]) — this
+ * is a comparison rule, not a rename, so no stored data changes.
+ */
+internal fun commKey(comm: String): String = comm.lowercase().removeSuffix(".exe")
+
 /** Walk cap: a cyclic or absurd chain gives up (→ user:$USER) instead of spinning. */
 private const val MAX_ANCESTRY_DEPTH = 128
 
@@ -23,16 +34,21 @@ internal fun pickAgentAncestor(
     shellSkip: Set<String> = DEFAULT_SHELL_SKIP,
     initFloor: Set<String> = DEFAULT_INIT_FLOOR,
 ): Triple<String, Long, Long>? {
+    // Both sides of the membership tests are keyed with commKey: Windows reports `bash.exe`
+    // where the lists spell `bash`, and the shipped lists also carry `cmd`/`cmd.exe` pairs.
+    // Keying both sides makes either spelling work (and the pairs harmless no-ops).
+    val skip = shellSkip.mapTo(HashSet(), ::commKey)
+    val floor = initFloor.mapTo(HashSet(), ::commKey)
     var pid = parentOf(self) ?: return null
     var depth = 0
     while (pid > 1) {
         if (++depth > MAX_ANCESTRY_DEPTH) return null
         val cs = infoOf(pid) ?: return null
-        // membership matches case-insensitively (Windows keeps on-disk case: CMD.EXE is a
-        // shell); the identity itself carries the comm verbatim
-        val comm = cs.first.lowercase()
-        if (comm in initFloor) return null
-        if (comm !in shellSkip) return Triple(cs.first, pid, cs.second)
+        // membership matches case-insensitively and ignores one trailing .exe (Windows keeps
+        // on-disk case: CMD.EXE is a shell); the identity itself carries the comm verbatim
+        val comm = commKey(cs.first)
+        if (comm in floor) return null
+        if (comm !in skip) return Triple(cs.first, pid, cs.second)
         pid = parentOf(pid) ?: return null
     }
     return null

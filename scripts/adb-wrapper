@@ -26,6 +26,13 @@ fi
 shell_list=" bash sh zsh fish dash ksh env nohup timeout xargs sudo setsid stdbuf script cmd cmd.exe powershell powershell.exe pwsh pwsh.exe conhost conhost.exe "
 init_list=" systemd init services services.exe wininit wininit.exe lsass lsass.exe svchost svchost.exe winlogon winlogon.exe system explorer explorer.exe "
 
+# Membership key for the identity lists: lowercased basename with ONE trailing `.exe` stripped.
+# Windows reports `bash.exe` where the lists spell `bash`; the same rule is in AgentIdentity.kt
+# (commKey), so either spelling matches and a list may be written once per program, not per
+# platform. Applied to BOTH sides below — the configured entries and the walked comm.
+comm_key() { local c=${1,,}; printf '%s' "${c%.exe}"; }
+normalize_list() { local out='' w; for w in $1; do out+=" $(comm_key "$w")"; done; printf '%s' "$out"; }
+
 # Gate rules: CORRAL_RULES override, else ~/.config/corral/rules. Missing/blank -> fail closed.
 # The lists are the single source of truth shared with `corral gate` (see scripts/corral-rules).
 CORRAL_RULES=${CORRAL_RULES:-$HOME/.config/corral/rules}
@@ -50,6 +57,12 @@ while IFS='=' read -r k v || [[ -n $k || -n $v ]]; do
   esac
 done < "$CORRAL_RULES"
 
+# Key both sides of the identity membership tests (see comm_key): an installed rules file that
+# spells the POSIX shells without `.exe` still skips a Windows `bash.exe`, and a hand-edited
+# `bash.exe` entry still skips a bare `bash`. The padding keeps the `*" $key "*` match exact.
+shell_list=" $(normalize_list "$shell_list") "
+init_list=" $(normalize_list "$init_list") "
+
 # Walk up the process tree from $PPID; the first non-shell ancestor is the agent.
 # /proc only (Linux): comm and starttime there match the CLI byte for byte. Where /proc is
 # unreadable (macOS/Windows hosts) this shell cannot walk — it delegates to `corral owner`,
@@ -58,17 +71,18 @@ done < "$CORRAL_RULES"
 # PROC_ROOT is injectable so the suite can simulate a /proc-less host.
 PROC_ROOT=${CORRAL_PROC_ROOT:-/proc}
 agent_process() {
-  local pid="${1:-$PPID}" comm ppid start depth=0
+  local pid="${1:-$PPID}" comm ppid start depth=0 key
   while [ "$pid" -gt 1 ]; do
     [ $((++depth)) -gt 128 ] && return 1  # parity with the CLI's MAX_ANCESTRY_DEPTH cap
     read -r comm ppid start < <(
       awk '{ c = $2; gsub(/[()]/, "", c); print c, $4, $22 }' "$PROC_ROOT/$pid/stat"
     ) || return 1
+    key=$(comm_key "$comm")                # one rule for both sides, parity with the CLI's commKey
     case "$init_list" in
-      *" ${comm,,} "*) return 1;;         # hit init — no agent above us; fall back to user:$USER
+      *" $key "*) return 1;;              # hit init — no agent above us; fall back to user:$USER
     esac
     case "$shell_list" in
-      *" ${comm,,} "*) ;;                 # a shell or wrapper — keep walking (case-insensitive, like the CLI)
+      *" $key "*) ;;                       # a shell or wrapper — keep walking (case/`.exe`-insensitive)
       *) echo "$pid $start $comm"; return 0;;
     esac
     pid="$ppid"
@@ -111,9 +125,18 @@ done
 
 deny() { printf 'corral: %s\nLease it first:\n  corral lease -- <cmd>\n  ser=$(corral claim) && ANDROID_SERIAL=$ser <cmd>\nstatus: corral status\n' "$1" >&2; exit 1; }
 
+# The daemon runs as a user systemd unit on POSIX, a per-user Scheduled Task on Windows; naming
+# systemctl on Windows is a dead end (the CLI's doctor prints the same platform-appropriate hint).
+daemon_hint() {
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) printf 'schtasks /query /tn CorralDaemon' ;;
+    *) printf 'systemctl --user status corral' ;;
+  esac
+}
+
 if [[ -n $serial ]]; then
   resp=$(curl -sfG --max-time 5 --data-urlencode "serial=$serial" --data-urlencode "owner=$OWNER" "$CORRAL_URL/api/check" 2>/dev/null) \
-    || deny "daemon unreachable at $CORRAL_URL — failing closed (no daemon, no leasing). Start it: systemctl --user status corral"
+    || deny "daemon unreachable at $CORRAL_URL — failing closed (no daemon, no leasing). Start it: $(daemon_hint)"
   grep -q '"allowed":true' <<<"$resp" || deny "lease check failed for $serial: $resp"
 elif [[ -n $sub ]] && [[ ! $readonly_list == *" $sub "* ]]; then
   deny "no device pinned (no -s, no ANDROID_SERIAL)"

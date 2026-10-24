@@ -11,6 +11,9 @@ readonly=devices,start-server,kill-server,track-devices,version,help
 valueflags=-H,-P,-L,-p,-t
 
 # Identity walk lists, shared by the CLI (corral gate / owner) and the bash wrapper.
+# Membership ignores case AND one trailing `.exe` on BOTH sides, so write each program once:
+# `bash` matches `bash.exe`, and the `foo`/`foo.exe` pairs below are harmless no-ops (a Linux
+# binary literally named `bash.exe` would also be skipped — an accepted trade).
 # shell_skip: processes that are never the agent — the walk steps over them (Unix + Windows).
 # init_floor: the walk stops here and falls back to user:$USER (an immortal shared process
 # must never become a principal). A wrong entry is silent and shared: the walk stops early and

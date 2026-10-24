@@ -60,6 +60,74 @@ class AgentIdentityTest {
         assertEquals("claude", commOf("/usr/bin/claude"))
     }
 
+    // --- Windows identity walk (row 32): the lists are written per program, the OS reports `.exe`.
+    // Each of these fails on a verbatim-membership walk; see row32-identity-research.md §6.3.
+
+    @Test fun windowsGitBashChainIsWalkedToTheAgent() {
+        // the measured chain: agent <- bash.exe <- bash.exe <- the CLI's fork copy
+        val parent = mapOf(100L to 101L, 101L to 102L, 102L to 103L, 103L to 104L)
+        val info = mapOf(
+            101L to ("bash.exe" to 1L),
+            102L to ("bash.exe" to 2L),
+            103L to ("opencode.exe" to 3L))
+        assertEquals(Triple("opencode.exe", 103L, 3L),
+            pickAgentAncestor(100, parent::get, info::get))
+    }
+
+    @Test fun bareEntriesSkipDotExeComms() {
+        // the default/POSIX spelling must skip the Windows image name
+        val parent = mapOf(100L to 50L, 50L to 30L)
+        val info = mapOf(50L to ("bash.exe" to 1L), 30L to ("agent.exe" to 2L))
+        assertEquals(Triple("agent.exe", 30L, 2L),
+            pickAgentAncestor(100, parent::get, info::get, shellSkip = setOf("bash")))
+    }
+
+    @Test fun explicitDotExeEntriesAreNotDeadEntries() {
+        // the mirror direction: a list (or a user's hand edit) that spells `cmd.exe` must still
+        // skip a bare `cmd` — the shipped lists carry both spellings, so either must work
+        val parent = mapOf(100L to 50L, 50L to 30L)
+        val info = mapOf(50L to ("cmd" to 1L), 30L to ("agent" to 2L))
+        assertEquals(Triple("agent", 30L, 2L),
+            pickAgentAncestor(100, parent::get, info::get, shellSkip = setOf("cmd.exe")))
+    }
+
+    @Test fun dotExeFloorEntriesAreNotDeadEntries() {
+        val parent = mapOf(100L to 30L)
+        assertNull(pickAgentAncestor(100, parent::get, { "services" to 3L },
+            initFloor = setOf("services.exe")))
+        assertNull(pickAgentAncestor(100, parent::get, { "services.exe" to 3L },
+            initFloor = setOf("services")))
+    }
+
+    @Test fun agentExeIsNotSkipped() {
+        // the fix must not swallow every `.exe`: an agent image named `opencode.exe` is a principal
+        val parent = mapOf(100L to 50L, 50L to 30L)
+        val info = mapOf(50L to ("bash.exe" to 1L), 30L to ("opencode.exe" to 2L))
+        assertEquals(Triple("opencode.exe", 30L, 2L),
+            pickAgentAncestor(100, parent::get, info::get))
+    }
+
+    @Test fun aListThatDeliberatelyOmitsBashIsStillHonoured() {
+        // the safety direction: normalising must not hard-code bash — a user who removes `bash`
+        // from shell_skip gets the old (stopping) behaviour, verbatim
+        val parent = mapOf(100L to 50L, 50L to 30L)
+        val info = mapOf(50L to ("bash.exe" to 1L), 30L to ("agent.exe" to 2L))
+        assertEquals(Triple("bash.exe", 50L, 1L),
+            pickAgentAncestor(100, parent::get, info::get, shellSkip = DEFAULT_SHELL_SKIP - "bash"))
+    }
+
+    @Test fun emptySkipReturnsFirstAncestor() =
+        assertEquals(Triple("bash", 50L, 1L),
+            pickAgentAncestor(100, { 50L }, { "bash" to 1L }, shellSkip = emptySet()))
+
+    @Test fun commKeyStripsOneDotExeAndLowercases() {
+        assertEquals("bash", commKey("bash.exe"))
+        assertEquals("bash", commKey("BASH.EXE"))
+        assertEquals("my.sh", commKey("my.sh"))          // only `.exe` is special
+        assertEquals("", commKey(".exe"))
+        assertEquals("claude", commKey("claude"))
+    }
+
     @Test fun processInfoOfReadsCurrentJvm() {
         // exercises the ProcessHandle path directly (not /proc): command basename + a real start
         val info = processInfoOf(ProcessHandle.current().pid())

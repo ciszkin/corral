@@ -666,17 +666,28 @@ fi
 echo "==> Installing to $TARGET_HOME"
 mkdir -p "$CORRAL_HOME" "$BIN_DIR"
 if [[ $IS_WINDOWS -eq 0 ]]; then mkdir -p "$UNIT_DIR"; fi
+# Windows row 33 F4: a jar refusal must not abort the whole upgrade. The daemon jar is the ONE file
+# a running JVM holds open; the ~/bin shims, the gradle gate and the Scheduled Task are independent
+# of it, and an operator upgrading over a running daemon still needs those current. On POSIX the
+# refusal stays fatal (and byte-identical to the pre-change installer); on Windows it is recorded,
+# the rest of the install proceeds, the task is refreshed but NOT started (a second daemon would
+# only compete for the port), and the run exits non-zero with a summary naming exactly what was and
+# was not refreshed. Callers that treat install.sh's exit code as "upgraded" still see the failure.
+JAR_FAILED=0
 if ! replace_file "$JAR" "$CORRAL_HOME/corral-daemon-all.jar" "corral-daemon-all.jar"; then
-  if [[ $IS_WINDOWS -eq 1 ]]; then
-    # The Windows limit: a running JVM keeps its jar open, so no rename lands. Ending the task first
-    # instead can leave the box with NO daemon (the Scheduled Task create is refused for an
-    # unelevated token), so this refuses loudly and names what is still running. Review pass 42 §1.
-    echo "       A running JVM on Windows keeps its jar open. The daemon is still running the OLD jar" >&2
-    echo "       and still serving the previous version; nothing was replaced. Stop it and re-run:" >&2
-    echo "       schtasks /end /tn CorralDaemon, then stop the java.exe whose command line runs" >&2
-    echo "       corral-daemon-all.jar (Task Manager, or Stop-Process on its PID)." >&2
+  if [[ $IS_WINDOWS -eq 0 ]]; then
+    exit 1
   fi
-  exit 1
+  JAR_FAILED=1
+  # The Windows limit: a running JVM keeps its jar open, so no rename lands. Ending the task first
+  # instead can leave the box with NO daemon (the Scheduled Task create is refused for an
+  # unelevated token), so this reports loudly and names what is still running. Review pass 42 §1.
+  echo "       A running JVM on Windows keeps its jar open. The daemon is still running the OLD jar" >&2
+  echo "       and still serving the previous version; the jar was NOT replaced. This run CONTINUES:" >&2
+  echo "       the Windows shims, the gradle gate and the Scheduled Task are still refreshed. Stop the" >&2
+  echo "       daemon and re-run to finish:" >&2
+  echo "       schtasks /end /tn CorralDaemon, then stop the java.exe whose command line runs" >&2
+  echo "       corral-daemon-all.jar (Task Manager, or Stop-Process on its PID)." >&2
 fi
 if [[ $IS_WINDOWS -eq 1 ]]; then
   # The bundle ships .bat twins; on Windows they replace the POSIX shims. An extensionless POSIX
@@ -927,6 +938,7 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
   TASK_STATE=failed
   TASK_DENIED=0
   TASK_BOTH_DENIED=0
+  TASK_REFRESHED=0
   TASK_ELEV=""
   TASK_READ=0
   TASK_STATUS=""
@@ -949,16 +961,28 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
     if task_ok "$before_rc" "$task_before"; then task_before=$(task_fingerprint "$task_before"); else task_before=""; fi
     task_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc onlogon /rl LIMITED /f 2>&1); task_rc=$?
     if task_ok "$task_rc" "$task_out"; then
-      TASK_STATE=onlogon-created
-      run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
-      if task_ok "$run_rc" "$run_out"; then TASK_STATE=onlogon; fi
+      TASK_REFRESHED=1
+      if [[ $JAR_FAILED -eq 1 ]]; then
+        # The task is refreshed, but do NOT /run it: the daemon that would answer is already
+        # running the old jar and holds the port, so the second JVM would only fail to bind.
+        TASK_STATE=onlogon-norun-jar
+      else
+        TASK_STATE=onlogon-created
+        run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
+        if task_ok "$run_rc" "$run_out"; then TASK_STATE=onlogon; fi
+      fi
     elif printf '%s' "$task_out" | grep -qi 'access is denied'; then
       TASK_DENIED=1
       once_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc once /st 00:00 /rl LIMITED /f 2>&1); once_rc=$?
       if task_ok "$once_rc" "$once_out"; then
-        TASK_STATE=once-norun
-        run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
-        if task_ok "$run_rc" "$run_out"; then TASK_STATE=once; fi
+        TASK_REFRESHED=1
+        if [[ $JAR_FAILED -eq 1 ]]; then
+          TASK_STATE=once-norun-jar
+        else
+          TASK_STATE=once-norun
+          run_out=$(schtasks_run /run /tn CorralDaemon 2>&1); run_rc=$?
+          if task_ok "$run_rc" "$run_out"; then TASK_STATE=once; fi
+        fi
       elif printf '%s' "$once_out" | grep -qi 'access is denied'; then
         # Say "both were refused" only when the fallback's own output says so too.
         TASK_BOTH_DENIED=1
@@ -1001,6 +1025,11 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
     onlogon-created)
       echo "  Scheduled Task CorralDaemon created; auto-starts at logon (schtasks /run failed, so it is NOT running now)."
       ;;
+    onlogon-norun-jar)
+      echo "  Scheduled Task CorralDaemon refreshed (auto-starts at logon) but NOT started by this run:"
+      echo "  the daemon that is already running holds the OLD jar and the port, so a second start would"
+      echo "  only fail to bind. Stop the running daemon and re-run install.sh (see the summary below)."
+      ;;
     once)
       echo "  Scheduled Task CorralDaemon created and running, but NOT auto-starting (the onlogon trigger needs elevation)."
       echo "  Run this from an elevated prompt to auto-start at logon:"
@@ -1008,6 +1037,13 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
       ;;
     once-norun)
       echo "  Scheduled Task CorralDaemon created but NOT running (schtasks /run failed), and NOT auto-starting (the onlogon trigger needs elevation)."
+      echo "  Run this from an elevated prompt to auto-start at logon:"
+      echo "  $TASK_ELEV"
+      ;;
+    once-norun-jar)
+      echo "  Scheduled Task CorralDaemon refreshed but NOT running and NOT auto-starting (the onlogon"
+      echo "  trigger needs elevation). It was not started because the running daemon holds the OLD jar"
+      echo "  and the port; stop that daemon and re-run (see the summary below)."
       echo "  Run this from an elevated prompt to auto-start at logon:"
       echo "  $TASK_ELEV"
       ;;
@@ -1117,6 +1153,22 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
   else
     echo "SDK adb shim is NOT installed on Windows — adb is NOT lease-gated by this install."
   fi
+  if [[ $JAR_FAILED -eq 1 ]]; then
+    echo
+    echo "==> Install INCOMPLETE — corral-daemon-all.jar was NOT refreshed"
+    echo "Refreshed by this run: the Windows shims above ($BIN_DIR), the gradle init.d gate"
+    if [[ $TASK_REFRESHED -eq 1 ]]; then
+      echo "  and the CorralDaemon Scheduled Task (definition refreshed; NOT started — the running daemon holds the port)."
+    else
+      echo "  (The Scheduled Task was NOT refreshed — see the Daemon section above.)"
+    fi
+    echo "NOT refreshed: $CORRAL_HOME/corral-daemon-all.jar — the running daemon holds it open, so this"
+    echo "  file is still the OLD jar and the daemon is still serving the previous version. The shims"
+    echo "  and the task are current; the jar is the ONE thing left. From an elevated prompt:"
+    echo "    schtasks /end /tn CorralDaemon"
+    echo "  then stop the java.exe whose command line runs corral-daemon-all.jar, and re-run install.sh."
+    echo "This run exits non-zero so a caller cannot read it as a completed upgrade."
+  fi
 else
 if [[ $SANDBOX -eq 1 ]]; then
   echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
@@ -1146,3 +1198,6 @@ echo
 echo "Cutover checklist (in the corral source repo, scripts/cutover.md; in the bundle, CUTOVER.md beside this installer): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi,"
 echo "then verify a gradle installDebug allow/deny, retire the adb-lease hook, keep old scripts backed up a week."
 fi
+# row 33 F4: a Windows run that could not replace the jar still refreshed everything else, but it is
+# NOT a completed upgrade. Keep that visible to callers ($? / CI) after the honest summary above.
+if [[ ${JAR_FAILED:-0} -eq 1 ]]; then exit 1; fi

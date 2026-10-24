@@ -891,15 +891,21 @@ check "bat write fails: the installed twin is untouched (byte-identical, no part
 check "bat write fails: no install summary is printed" bash -c \
   "! grep -q '==> Installed to' '$TMP/win-batfail.log'"
 
-# ===== Windows + a running daemon (review 42 §1): the jar cannot be replaced, so the install must
-# fail loudly instead of reporting success. A running JVM holds its jar open on Windows and the
-# rename is refused; the `mv` stub below refuses ONLY the daemon jar, exactly as the OS does, so the
-# assertion is that the installer refuses in turn — exits non-zero, says the OLD jar is still there
-# and still serving, names the stop command, leaves the previous jar byte-identical, and prints no
-# install summary (which is where the pre-change installer lied: an unchecked cp kept the old jar
-# and the summary claimed the install succeeded).
+# ===== Windows + a running daemon (review 42 §1, row 33 F4): the jar cannot be replaced, so the
+# install must NOT claim success — but it must not be a no-op upgrade either. A running JVM holds its
+# jar open on Windows and the rename is refused; the `mv` stub below refuses ONLY the daemon jar,
+# exactly as the OS does. The run continues: the shims and the gradle gate are installed, the
+# Scheduled Task definition is refreshed, `/run` is NOT attempted (the running daemon holds the port,
+# so a second JVM would only fail to bind), the summary names the jar as the one failure and what was
+# refreshed, and the exit code is non-zero.
 LOCK_STUB="$TMP/lockstub"; mkdir -p "$LOCK_STUB"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$LOCK_STUB/uname"
+cat > "$LOCK_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/lock-schtasks.log"
+echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
+exit 0
+EOF
 REAL_MV=$(command -v mv)
 cat > "$LOCK_STUB/mv" <<EOF
 #!/bin/sh
@@ -910,8 +916,9 @@ for a in "\$@"; do
 done
 exec "$REAL_MV" "\$@"
 EOF
-chmod +x "$LOCK_STUB/uname" "$LOCK_STUB/mv"
+chmod +x "$LOCK_STUB/uname" "$LOCK_STUB/mv" "$LOCK_STUB/schtasks"
 ps_stub "$LOCK_STUB"
+: > "$TMP/lock-schtasks.log"
 LOCK_HOME="$TMP/home-lock"; SDK_LOCK="$LOCK_HOME/Android/Sdk/platform-tools"
 mkdir -p "$SDK_LOCK" "$LOCK_HOME/bin" "$LOCK_HOME/.corral"; : > "$LOCK_HOME/.bashrc"
 printf '%s\n' '#!/bin/sh' 'echo "lock-sdk-adb $@"' > "$SDK_LOCK/adb"; chmod +x "$SDK_LOCK/adb"
@@ -929,8 +936,22 @@ check "locked jar: names the command that unblocks a re-run" grep -q 'schtasks /
 check "locked jar: the previous jar is untouched (same inode, same bytes)" bash -c \
   "[ \"\$(ls -i '$LOCK_HOME/.corral/corral-daemon-all.jar' | cut -d' ' -f1)\" = '$lock_inode' ] && [ \"\$(sha256sum '$LOCK_HOME/.corral/corral-daemon-all.jar' | cut -d' ' -f1)\" = '$lock_sha' ]"
 check "locked jar: the temp file is cleaned up" bash -c "! ls '$LOCK_HOME/.corral' | grep -q '\.new\.'"
-check "locked jar: no install summary is printed" bash -c \
-  "! grep -q '==> Installed' '$TMP/lock-install.log' && ! grep -q 'Installed Windows shims' '$TMP/lock-install.log'"
+# F4: the refusal no longer aborts the run — everything independent of the jar is still refreshed.
+check "locked jar: the Windows shims were still installed (F4: the run continued)" bash -c \
+  "cmp -s '$SRC/corral.bat' '$LOCK_HOME/bin/corral.bat' && cmp -s '$SRC/adb-wrapper.bat' '$LOCK_HOME/bin/adb-wrapper.bat'"
+check "locked jar: the gradle gate was still installed (F4)" test -s "$LOCK_HOME/.gradle/init.d/corral-gate.gradle.kts"
+check "locked jar: the Scheduled Task definition was refreshed (F4)" \
+  grep -q '/create /tn CorralDaemon' "$TMP/lock-schtasks.log"
+check "locked jar: no second daemon was started (/run not attempted)" bash -c \
+  "! grep -q '/run /tn CorralDaemon' '$TMP/lock-schtasks.log'"
+check "locked jar: the summary names the jar as the one thing NOT refreshed (F4)" \
+  grep -q '^==> Install INCOMPLETE — corral-daemon-all.jar was NOT refreshed$' "$TMP/lock-install.log"
+check "locked jar: the summary names what WAS refreshed (F4)" bash -c \
+  "grep -q '^Refreshed by this run: the Windows shims' '$TMP/lock-install.log' && grep -q 'the CorralDaemon Scheduled Task' '$TMP/lock-install.log'"
+check "locked jar: the task line says refreshed but not started (F4)" \
+  grep -q 'refreshed (auto-starts at logon) but NOT started by this run' "$TMP/lock-install.log"
+check "locked jar: the run still exits before claiming a completed upgrade" bash -c \
+  "! grep -q '^==> Installed\. Smoke-test:' '$TMP/lock-install.log'"
 
 # ===== POSIX byte-for-byte guard: the Linux path must not change =====
 # Compare the current installer against the pre-change installer (the commit this row branched from,

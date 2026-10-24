@@ -61,6 +61,11 @@ Reload your shell, then check that everything came up:
 corral doctor
 ```
 
+On Windows the CLI is `corral.bat`, so from another `.bat`/`.cmd` invoke it as
+**`call corral …`** — without `call`, cmd.exe transfers control to the shim and
+the caller's remaining lines never run. Interactive cmd.exe and PowerShell are
+unaffected.
+
 ## The core loop
 
 Claim a device, use it, release it. There are two styles.
@@ -106,7 +111,10 @@ names the current holder of every device.
 Identity: leases are owned per agent session, not per unix user. Set
 `CORRAL_OWNER` to a stable name if your harness's session outlives a single
 process; otherwise Corral derives an owner from process ancestry and falls
-back to `user:$USER`.
+back to `user:$USER`. Membership in the ancestry `shell_skip`/`init_floor`
+lists ignores case and one trailing `.exe` on **both** sides, so a list entry
+written once per program (`bash`) also matches `bash.exe`, and either spelling
+is accepted.
 
 ## Selectors
 
@@ -258,9 +266,12 @@ intact" from "the publisher is genuine"; none is shipped. See
 Replacing the jars is atomic: `install.sh` writes each jar to a temporary file
 beside it and renames it into place, so a daemon (or console) that is running
 keeps the old file and the next start picks up the new one. On Windows a
-running JVM holds its jar open, so the install refuses and says the jar was
-not replaced and that the old daemon is still running — stop it (end the
-`CorralDaemon` task and the `java.exe` running the jar) and re-run.
+running JVM holds its jar open, so the jar cannot be replaced: the installer
+says so, still refreshes the `~/bin` shims, the gradle gate and the
+`CorralDaemon` Scheduled Task, does **not** start a second daemon (the running
+one holds the port), names the jar as the one thing left, and exits non-zero.
+Stop it (end the `CorralDaemon` task and the `java.exe` running the jar) and
+re-run to finish.
 
 ## Uninstall
 

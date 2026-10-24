@@ -27,20 +27,82 @@ fi
 [ -f "$JAR" ] || { echo "jar not found: $JAR (run from the source tree or beside corral-daemon-all.jar)"; exit 1; }
 
 TMP=$(mktemp -d)
-export TMP
+export TMP SRC ROOT have_setsid have_pkill
 DAEMON_PID=""
+# --- host capabilities (row 33 F6: this suite must also run honestly on Windows/Git-Bash) --------
+# setsid and pkill are POSIX-only. setsid detaches a daemon from this shell and is what lets the
+# orphan row reparent a client onto init; pkill stops every daemon of this run by test tag. Where a
+# tool is missing the workaround below is explicit, and a row whose MEANING depends on the missing
+# semantics is SKIPPED with a message rather than passing vacuously.
+have_setsid=0; command -v setsid >/dev/null 2>&1 && have_setsid=1
+have_pkill=0; command -v pkill >/dev/null 2>&1 && have_pkill=1
+DAEMON_PIDS=""
+# Terminate one process (and its children) NOW. On Windows a plain MSYS `kill` can signal the
+# shell's idea of the process while the native JVM keeps the port until it finishes shutting down,
+# so a restart races the old daemon for the port. taskkill /F /T is immediate and definitive there.
+kill_tree() {
+  local p="$1"
+  [ -n "$p" ] || return 0
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) MSYS2_ARG_CONV_EXCL='*' taskkill /F /T /PID "$p" >/dev/null 2>&1 || kill -9 "$p" 2>/dev/null ;;
+    *) kill -9 "$p" 2>/dev/null ;;
+  esac
+}
+stop_daemons() {
+  local p i
+  if [ "$have_pkill" = 1 ]; then pkill -9 -f "corral.test.tag=$$" 2>/dev/null || true; fi
+  for p in $DAEMON_PID $DAEMON_PIDS; do kill_tree "$p"; done
+  # wait for the port to be released: a second daemon cannot bind while the first is still up
+  for i in $(seq 1 50); do
+    curl -sf --max-time 1 "$CORRAL_URL/api/devices" >/dev/null 2>&1 || return 0
+    sleep 0.2
+  done
+  return 0
+}
 cleanup() {
-  [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
-  pkill -f "corral.test.tag=$$" 2>/dev/null
+  [ -n "$DAEMON_PID" ] && kill_tree "$DAEMON_PID"
+  stop_daemons
   [ -n "${WINEPREFIX:-}" ] && command -v wineserver >/dev/null 2>&1 && timeout 20 wineserver -k 2>/dev/null
   rm -rf "$TMP"
 }
 trap cleanup EXIT
+export -f kill_tree   # the doctor rows start their own short-lived daemons from `bash -c`
 
 mkdir -p "$TMP/bin"
 printf 'dev1 device Pixel_6 13\ndev2 device SM-S918B 13\n' > "$TMP/fake-devices"
 printf '#!/bin/sh\necho "fake-adb $@"\n' > "$TMP/fake-adb"
 chmod +x "$TMP/fake-adb"
+
+# A "different process tree" runner: a NON-shell parent that runs its argv as a child, so the
+# wrapper's ancestry walk sees `proc:<helper>:<pid>` instead of the caller's chain. python3 where a
+# real one exists, else perl (Git Bash and macOS ship it). A Store-alias `python3` on Windows looks
+# executable but exits with an error, so probe it rather than trusting `command -v`; if neither
+# works the two rows that need it are skipped loudly (F6: never a silent, vacuous pass).
+tree_helper=""
+if python3 -c 'pass' >/dev/null 2>&1; then
+  tree_helper=python3
+  printf '%s\n' '#!/bin/sh' \
+    'exec python3 -c "import subprocess,sys; raise SystemExit(subprocess.run(sys.argv[1:]).returncode)" "$@"' \
+    > "$TMP/other-tree"
+elif perl -e 'exit 0' >/dev/null 2>&1; then
+  tree_helper=perl
+  cat > "$TMP/other-tree" <<'EOS'
+#!/bin/sh
+exec perl -e 'my $rc = system @ARGV; exit(($rc == -1) ? 127 : ($rc >> 8))' -- "$@"
+EOS
+fi
+chmod +x "$TMP/other-tree"
+export tree_helper
+other_tree() { "$TMP/other-tree" "$@"; }
+export -f other_tree
+
+# Can this host's JVM exec an EXTENSIONLESS POSIX script? `corral gate -- <cmd>` execs the command,
+# and CreateProcess on Windows does not understand a shebang, so the fake `adb` shim is not
+# executable from the CLI there (it is from the bash wrapper). The rows that need exec parity with
+# a real argv are skipped on such a host, with the reason; the win: rows cover the .bat path.
+gate_exec_ok=1
+case "$(uname -s 2>/dev/null || true)" in MINGW*|MSYS*|CYGWIN*) gate_exec_ok=0;; esac
+export gate_exec_ok
 cp "$SRC/adb-wrapper" "$TMP/bin/adb"
 chmod +x "$TMP/bin/adb"
 cp "$SRC/corral" "$TMP/bin/corral"
@@ -51,10 +113,19 @@ export CORRAL_JAR="$JAR"
 export CORRAL_ENV_FILE="$TMP/daemon.env"   # absent on purpose: inherited env must keep winning in tests
 
 start_daemon() {
-  setsid env CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" CORRAL_PORT=$PORT \
-    java -Dcorral.test.tag=$$ -jar "$JAR" </dev/null >"$TMP/daemon.log" 2>&1 &
-  disown
+  if [ "$have_setsid" = 1 ]; then
+    setsid env CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" CORRAL_PORT=$PORT \
+      java -Dcorral.test.tag=$$ -jar "$JAR" </dev/null >"$TMP/daemon.log" 2>&1 &
+    disown
+  else
+    env CORRAL_FAKE_DEVICES="$TMP/fake-devices" CORRAL_DB="$TMP/corral.db" CORRAL_PORT=$PORT \
+      java -Dcorral.test.tag=$$ -jar "$JAR" </dev/null >"$TMP/daemon.log" 2>&1 &
+  fi
   DAEMON_PID=$!
+  # disown in BOTH modes: without setsid the daemon is still a job of this shell, and the bare
+  # `wait` in the racing-claims rows would then block until the daemon exits (it never does).
+  disown 2>/dev/null || true
+  DAEMON_PIDS="$DAEMON_PIDS $DAEMON_PID"
   local i
   for i in $(seq 1 30); do
     curl -sf "$CORRAL_URL/api/devices" >/dev/null 2>&1 && return 0
@@ -104,7 +175,7 @@ check "ANDROID_SERIAL=dev1 env pin allowed" bash -c "echo '$out' | grep -q fake-
 if CORRAL_OWNER=other adb -s dev1 shell ls >/dev/null 2>"$TMP/c6"; then r=1; else r=0; fi
 check "CORRAL_OWNER=other denied" bash -c "exit $r"
 
-pkill -f "corral.test.tag=$$" 2>/dev/null; sleep 0.5
+stop_daemons; sleep 0.5
 if adb -s dev1 shell ls >/dev/null 2>"$TMP/c7"; then r=1; else r=0; fi
 grep -q "daemon unreachable" "$TMP/c7" && c=0 || c=1
 check "fails closed when daemon down" bash -c "exit $((r || c))"
@@ -154,17 +225,24 @@ proc_owner_check() {
   [ -n "$serial" ] || return 1
   env -u CORRAL_OWNER \
     "$TMP/bin/adb" -s "$serial" shell ls 2>&1 | grep -q fake-adb || return 1
-  # a different process tree (python3 as the direct parent) resolves a different owner
+  # a different process tree (a non-shell parent) resolves a different owner. The helper is
+  # named by its FILE: env execs a program, so a shell function can never be its argv[0]
+  # (the same reason the case-insensitivity row calls $TMP/other-tree directly).
   if env -u CORRAL_OWNER \
-      python3 -c 'import subprocess,sys; raise SystemExit(subprocess.run(sys.argv[1:]).returncode)' \
-      "$TMP/bin/adb" -s "$serial" shell ls >/dev/null 2>&1; then return 1; fi
+      "$TMP/other-tree" "$TMP/bin/adb" -s "$serial" shell ls >/dev/null 2>&1; then return 1; fi
   env -u CORRAL_OWNER corral free "$serial" >/dev/null || return 1
   return 0
 }
-check "proc ancestry owner: shared cli/wrapper, distinct across trees" proc_owner_check
+if [ -n "$tree_helper" ]; then
+  check "proc ancestry owner: shared cli/wrapper, distinct across trees" proc_owner_check
+else
+  echo "skip: proc ancestry row needs a working python3 or perl to create a different parent tree"
+  echo "      (a Windows Store alias for python3 is not one); the CLI's walk is covered by AgentIdentityTest."
+fi
 
 # the ancestry walk has a floor: an orphaned (reparented onto init) client must not resolve to
 # systemd — a shared, immortal principal that would let every orphan free every other's leases
+if [ "$have_setsid" = 1 ]; then
 check "orphaned client resolves to user:*, never proc:systemd:*" bash -c '
   rm -f "$TMP/orphan.owner"
   bash -c "setsid bash -c \"sleep 0.4; env -u CORRAL_OWNER corral owner > $TMP/orphan.owner 2>&1\" </dev/null >/dev/null 2>&1 &"
@@ -175,6 +253,10 @@ check "orphaned client resolves to user:*, never proc:systemd:*" bash -c '
     *) echo "orphan owner was: $o" >&2; exit 1;;
   esac
 '
+else
+  echo "skip: orphaned-client floor row needs setsid (POSIX reparenting onto init); this host has none,"
+  echo "      so the row would test nothing. The floor itself is covered by AgentIdentityTest."
+fi
 
 # identity agreement: for each identity source, the CLI (Kotlin chain) and the wrapper (bash chain)
 # must resolve the same owner — a CLI-claimed lease is honored by the wrapper with the same env.
@@ -222,8 +304,10 @@ check "posix: a planted ./corral is not adopted for the owner fallback" bash -c 
   curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
     -d "{\"selector\":{\"serial\":\"dev2\"},\"owner\":\"delegated-owner\"}" >/dev/null || exit 1
   # "." first (the CWD alias under test), then an empty scratch dir, then the fake CLI, and only
-  # then the system dirs (which supply curl/grep) — so a real corral in /usr/bin cannot shadow it
-  ( cd "$d" && PATH=".:$scratch:$fake:/usr/bin:/bin" CORRAL_PROC_ROOT="$TMP/noproc" env -u CORRAL_OWNER \
+  # then the tool directories (which supply curl/grep) — so a real corral cannot shadow the fake one.
+  # curl lives in /mingw64/bin on Git Bash, not /usr/bin, so name its directory explicitly (F6).
+  tooldir=$(dirname "$(command -v curl)")
+  ( cd "$d" && PATH=".:$scratch:$fake:/usr/bin:/bin:$tooldir" CORRAL_PROC_ROOT="$TMP/noproc" env -u CORRAL_OWNER \
       "$TMP/bin/adb" -s dev2 shell ls >/dev/null 2>&1 ); rc=$?
   curl -sf -X DELETE "$CORRAL_URL/api/leases/dev2" -H "Content-Type: application/json" \
     -d "{\"owner\":\"delegated-owner\"}" >/dev/null 2>&1
@@ -246,18 +330,119 @@ check "blank identity keys keep defaults in both readers" bash -c '
 
 # identity entries in the rules file match the lowercased comm in both readers: an uppercase
 # shell_skip entry must still skip that process, not be silently dead (a dead entry would make
-# the wrapper resolve proc:python3:* where the claim saw the agent above it)
+# the wrapper resolve proc:<helper>:* where the claim saw the agent above it). The helper's name is
+# added in its OWN case to the skip list: PYTHON3 / PERL.
+if [ -n "$tree_helper" ]; then
+if [ "$gate_exec_ok" = 1 ]; then
 check "rules identity entries match case-insensitively in both readers" bash -c '
   d="$TMP/case-rules"; mkdir -p "$d"
-  printf "readonly=devices\nvalueflags=-P\nshell_skip=bash,sh,env,PYTHON3\n" > "$d/rules"
-  s=$(CORRAL_RULES="$d/rules" env -u CORRAL_OWNER corral claim 2>/dev/null) || exit 1
-  [ -n "$s" ] || exit 1
+  helper_upper=$(printf "%s" "$tree_helper" | tr "[:lower:]" "[:upper:]")
+  printf "readonly=devices\nvalueflags=-P\nshell_skip=bash,sh,env,%s\n" "$helper_upper" > "$d/rules"
+  s=$(CORRAL_RULES="$d/rules" env -u CORRAL_OWNER corral claim 2>"$d/claim.err") || {
+    echo "claim failed: $(cat "$d/claim.err")" >&2; exit 1; }
+  [ -n "$s" ] || { echo "claim returned no serial" >&2; exit 1; }
   rc=0
-  CORRAL_RULES="$d/rules" env -u CORRAL_OWNER \
-    python3 -c "import subprocess,sys; raise SystemExit(subprocess.run(sys.argv[1:]).returncode)" \
-    "$TMP/bin/adb" -s "$s" shell ls >/dev/null 2>&1 || rc=1
+  # Name the helper FILE, not the other_tree() function: `env` execs a program, and an exported
+  # bash function is not one — it never appears as argv[0] of anything (measured on POSIX:
+  # "env: other_tree: No such file or directory", rc=127, which is a harness failure, not a
+  # product one). $TMP/other-tree is the executable the function wrapped all along.
+  err=$(CORRAL_RULES="$d/rules" env -u CORRAL_OWNER \
+    "$TMP/other-tree" "$TMP/bin/adb" -s "$s" shell ls 2>&1) || rc=1
+  [ "$rc" -eq 0 ] || echo "wrapper denied $s: $err" >&2
   CORRAL_RULES="$d/rules" env -u CORRAL_OWNER corral free "$s" >/dev/null 2>&1
   exit $rc
+'
+else
+# No readable /proc: the CLI and the wrapper are two independent walks, and MSYS fork copies make
+# them legitimately disagree (row32 research §6.2a — one may degrade to user:$USER). Comparing them
+# on the host chain would be flaky, so run the deterministic half here: a simulated chain whose
+# comms are UPPERCASE and `.exe`-spelled must be skipped by the wrapper's normalised list. The CLI
+# half of the same rule is AgentIdentityTest.skipListsMatchCaseInsensitivelyButIdentityKeepsCase.
+echo "skip: host-chain identity-agreement row needs a POSIX /proc whose ancestry both walks can read"
+echo "      (on MSYS the fork copies can make the CLI and the wrapper legitimately disagree, row32"
+echo "      research §6.2a); running the deterministic wrapper half instead"
+check "uppercase/.exe identity entries are skipped by the wrapper (simulated chain)" bash -c '
+  d="$TMP/case-chain"; stub="$d/stub"; rm -rf "$d"; mkdir -p "$d/proc/self" "$stub"
+  : > "$d/proc/self/stat"
+  cat > "$stub/awk" <<AWK
+#!/bin/sh
+p=\${2%/*}; p=\${p##*/}
+case "\$p" in
+  203) echo "agent.exe 1 3" ;;
+  201) echo "BASH.EXE 202 1" ;;
+  202) echo "Env.Exe 203 2" ;;
+  *)   echo "BASH.EXE 201 0" ;;
+esac
+AWK
+  chmod +x "$stub/awk"
+  printf "readonly=devices\nvalueflags=-P\nshell_skip=BASH,ENV\n" > "$d/rules"
+  corral free dev1 >/dev/null 2>&1
+  curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
+    -d "{\"selector\":{\"serial\":\"dev1\"},\"owner\":\"proc:agent.exe:203:3\"}" >/dev/null || {
+    echo "could not plant the agent lease on dev1" >&2; exit 1; }
+  rc=0
+  err=$(PATH="$stub:$PATH" CORRAL_RULES="$d/rules" CORRAL_PROC_ROOT="$d/proc" \
+    CORRAL_REAL_ADB="$TMP/fake-adb" env -u CORRAL_OWNER \
+    "$TMP/bin/adb" -s dev1 shell ls 2>&1) || rc=1
+  [ "$rc" -eq 0 ] || echo "wrapper did not skip the uppercase/.exe entries: $err" >&2
+  curl -sf -X DELETE "$CORRAL_URL/api/leases/dev1" -H "Content-Type: application/json" \
+    -d "{\"owner\":\"proc:agent.exe:203:3\"}" >/dev/null 2>&1
+  exit $rc
+'
+fi
+else
+  echo "skip: case-insensitive identity row needs a working python3 or perl as the non-shell parent"
+fi
+
+# F3 (row 32): Windows reports `bash.exe` where the identity lists spell `bash`. The walk must step
+# over it and resolve the agent ABOVE — this is the behavioural drift guard for the two copies of
+# the lists (RulesFile.DEFAULT_SHELL_SKIP and this wrapper's shell_list): a spelling added to one
+# reader only, or a one-sided `.exe` entry, fails here. Host-independent: the chain is simulated
+# through CORRAL_PROC_ROOT (on Git-Bash the host's own $PPID is a transient fork copy, so the row
+# must not depend on it) with a table-driven awk stub on PATH for this row only.
+check "windows .exe comm spellings are skipped by the wrapper's walk (F3 drift guard)" bash -c '
+  d="$TMP/win-chain"; stub="$d/stub"; rm -rf "$d"; mkdir -p "$d/proc/self" "$stub"
+  : > "$d/proc/self/stat"                       # the walk gate: "is there a procfs"
+  cat > "$stub/awk" <<AWK
+#!/bin/sh
+p=\${2%/*}; p=\${p##*/}
+case "\$p" in
+  103) echo "opencode.exe 1 3" ;;     # the agent
+  101) echo "bash.exe 102 1" ;;       # what the walk used to stop on
+  102) echo "bash.exe 103 2" ;;
+  *)   echo "bash.exe 101 0" ;;       # the transient parent that started the wrapper
+esac
+AWK
+  chmod +x "$stub/awk"
+  # dev1 may be leased from an earlier row; free the tester lease first so the plant is deterministic
+  corral free dev1 >/dev/null 2>&1
+  if ! curl -sf -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
+      -d "{\"selector\":{\"serial\":\"dev1\"},\"owner\":\"proc:opencode.exe:103:3\"}" >/dev/null; then
+    echo "could not plant the agent lease on dev1 (already leased?)" >&2; exit 1
+  fi
+  rc=0
+  PATH="$stub:$PATH" CORRAL_PROC_ROOT="$d/proc" CORRAL_REAL_ADB="$TMP/fake-adb" env -u CORRAL_OWNER \
+    "$TMP/bin/adb" -s dev1 shell ls >/dev/null 2>&1 || rc=1
+  curl -sf -X DELETE "$CORRAL_URL/api/leases/dev1" -H "Content-Type: application/json" \
+    -d "{\"owner\":\"proc:opencode.exe:103:3\"}" >/dev/null 2>&1
+  [ "$rc" -eq 0 ] || { echo "the wrapper did not walk past bash.exe to the agent" >&2; exit 1; }
+  exit 0
+'
+
+# The two readers' built-in skip lists must be the SAME LIST once keyed with the same rule
+# (comm_key): a name added to one reader only, or a one-sided `.exe` entry, diverges here. A static
+# check is the only way to compare the literals; behaviour can only see the comms a host has.
+# Anchored on the constant's declaration so a move fails loudly instead of passing vacuously.
+check "wrapper and CLI built-in identity lists agree (list-parity guard)" bash -c '
+  [ -n "$ROOT" ] || { echo "skip: deployed bundle has no daemon sources to compare against" >&2; exit 0; }
+  norm() { local out="" w; for w in $1; do w=${w,,}; out+=" ${w%.exe}"; done; printf "%s\n" "$out" | tr " " "\n" | sort -u | tr "\n" " "; }
+  from_cli=$(sed -n "/^val DEFAULT_SHELL_SKIP = setOf(/,/)/p" \
+               "$ROOT/corral-daemon/src/main/kotlin/dev/corral/RulesFile.kt")
+  [ -n "$from_cli" ] || { echo "DEFAULT_SHELL_SKIP not found in RulesFile.kt (did it move?)" >&2; exit 1; }
+  cli=$(norm "$(printf "%s" "$from_cli" | grep -o "\"[^\"]*\"" | tr -d "\"" | tr "\n" " ")")
+  sh=$(norm "$(grep -m1 "^shell_list=" "$SRC/adb-wrapper" | cut -d"\"" -f2)")
+  [ "$cli" = "$sh" ] || { echo "skip lists diverge: cli=[$cli] sh=[$sh]" >&2; exit 1; }
+  exit 0
 '
 
 # drift guard: for each argv the bash wrapper's verdict must equal `corral gate`'s
@@ -265,6 +450,10 @@ check "bash wrapper and corral gate agree on classification" bash -c '
   for line in "devices" "--version" "-P 5037 devices" "-t 3 shell ls" "shell ls" "install foo.apk" "-s \"\" devices" "-s"; do
     eval adb $line >/dev/null 2>&1; b=$?
     eval corral gate -- $line >/dev/null 2>&1; g=$?
+    # 127 means the CLI classified the argv as ALLOWED and tried to exec it; on Windows a JVM
+    # cannot exec the extensionless POSIX shim (CreateProcess has no shebang), so an allowed argv
+    # ends there. That is still the same classification as the wrapper'"'"'s 0.
+    [ "$gate_exec_ok" = 0 ] && [ "$g" -eq 127 ] && g=0
     [ "$b" = "$g" ] || { echo "mismatch [$line]: bash=$b gate=$g" >&2; exit 1; }
   done
   exit 0
@@ -292,6 +481,8 @@ check "hand-edited rules parse identically in bash and kotlin" bash -c '
   printf "readonly = devices\nvalueflags = -P,-H,-L,-p,-t" > "$d/rules"
   CORRAL_RULES="$d/rules" adb -P 5037 devices >/dev/null 2>&1; b=$?
   CORRAL_RULES="$d/rules" corral gate -- -P 5037 devices >/dev/null 2>&1; g=$?
+  # see the gate-classification row: 127 = allowed and unexecutable from the JVM on Windows
+  [ "$gate_exec_ok" = 0 ] && [ "$g" -eq 127 ] && g=0
   [ "$b" = "$g" ] && [ "$b" = 0 ] || { echo "mismatch: bash=$b gate=$g (expected both 0)" >&2; exit 1; }
   exit 0
 '
@@ -315,17 +506,22 @@ check "corral doctor prints the empty-pool hint and exits 0" bash -c '
   # a daemon left on 8801 by another session would answer below; take the next free port
   port=8801
   while curl -sf --max-time 1 "http://127.0.0.1:$port/api/devices" >/dev/null 2>&1; do port=$((port+1)); done
-  setsid env CORRAL_FAKE_DEVICES="$TMP/empty-devices" CORRAL_DB="$TMP/corral3.db" CORRAL_PORT=$port \
-    java -Dcorral.test.tag=doctor-empty -jar "$CORRAL_JAR" </dev/null >"$TMP/daemon3.log" 2>&1 &
+  if [ "$have_setsid" = 1 ]; then
+    setsid env CORRAL_FAKE_DEVICES="$TMP/empty-devices" CORRAL_DB="$TMP/corral3.db" CORRAL_PORT=$port \
+      java -Dcorral.test.tag=doctor-empty -jar "$CORRAL_JAR" </dev/null >"$TMP/daemon3.log" 2>&1 &
+  else
+    env CORRAL_FAKE_DEVICES="$TMP/empty-devices" CORRAL_DB="$TMP/corral3.db" CORRAL_PORT=$port \
+      java -Dcorral.test.tag=doctor-empty -jar "$CORRAL_JAR" </dev/null >"$TMP/daemon3.log" 2>&1 &
+  fi
   d3=$!
   up=0
   for i in $(seq 1 30); do
     curl -sf "http://127.0.0.1:$port/api/devices" >/dev/null 2>&1 && { up=1; break; }; sleep 0.2
   done
-  [ $up -eq 1 ] || { kill $d3 2>/dev/null; cat "$TMP/daemon3.log" >&2; exit 1; }
+  [ $up -eq 1 ] || { kill_tree "$d3"; cat "$TMP/daemon3.log" >&2; exit 1; }
   # pin the SDK probe too, or the exit code reflects the host SDK state, not the pool
   out=$(CORRAL_URL="http://127.0.0.1:$port" CORRAL_ADB="$TMP/fake-adb" corral doctor 2>&1); rc=$?
-  kill $d3 2>/dev/null
+  kill_tree "$d3"
   echo "$out" | grep -q "^devices: hint - .*adb kill-server && adb start-server" \
     || { echo "no empty-pool hint in: $out" >&2; exit 1; }
   [ $rc -eq 0 ] || { echo "doctor exited $rc on an empty pool: $out" >&2; exit 1; }
@@ -335,17 +531,23 @@ check "corral doctor prints the empty-pool hint and exits 0" bash -c '
 # a daemon whose configured adb no longer exists must FAIL doctor rather than silently pass
 # this shell's own SDK tree (a fallback chain used to mask the stale daemon config)
 check "doctor fails on the daemon's stale adb, not the shell's tree" bash -c '
-  setsid env CORRAL_ADB="$TMP/gone/adb.real" CORRAL_FAKE_DEVICES="$TMP/fake-devices" \
-    CORRAL_DB="$TMP/corral2.db" CORRAL_PORT=8800 java -Dcorral.test.tag=doctor-stale -jar "$CORRAL_JAR" \
-    </dev/null >"$TMP/daemon2.log" 2>&1 &
+  if [ "$have_setsid" = 1 ]; then
+    setsid env CORRAL_ADB="$TMP/gone/adb.real" CORRAL_FAKE_DEVICES="$TMP/fake-devices" \
+      CORRAL_DB="$TMP/corral2.db" CORRAL_PORT=8800 java -Dcorral.test.tag=doctor-stale -jar "$CORRAL_JAR" \
+      </dev/null >"$TMP/daemon2.log" 2>&1 &
+  else
+    env CORRAL_ADB="$TMP/gone/adb.real" CORRAL_FAKE_DEVICES="$TMP/fake-devices" \
+      CORRAL_DB="$TMP/corral2.db" CORRAL_PORT=8800 java -Dcorral.test.tag=doctor-stale -jar "$CORRAL_JAR" \
+      </dev/null >"$TMP/daemon2.log" 2>&1 &
+  fi
   d2=$!
   up=0
   for i in $(seq 1 30); do
     curl -sf http://127.0.0.1:8800/api/devices >/dev/null 2>&1 && { up=1; break; }; sleep 0.2
   done
-  [ $up -eq 1 ] || { kill $d2 2>/dev/null; cat "$TMP/daemon2.log" >&2; exit 1; }
+  [ $up -eq 1 ] || { kill_tree "$d2"; cat "$TMP/daemon2.log" >&2; exit 1; }
   out=$(CORRAL_URL=http://127.0.0.1:8800 corral doctor 2>&1); rc=$?
-  kill $d2 2>/dev/null
+  kill_tree "$d2"
   [ $rc -ne 0 ] || { echo "doctor exited 0 (stale adb passed): $out" >&2; exit 1; }
   echo "$out" | grep -q "the daemon.s configured adb" || { echo "no daemon note in: $out" >&2; exit 1; }
   exit 0
@@ -364,7 +566,10 @@ check "doctor finds the Windows SDK adb under LOCALAPPDATA" bash -c '
   chmod +x "$TMP/localappdata/Android/Sdk/platform-tools/adb.exe"
   out=$(env -u ANDROID_HOME -u ANDROID_SDK_ROOT -u CORRAL_ADB \
     LOCALAPPDATA="$TMP/localappdata" HOME="$TMP/empty-home" CORRAL_URL=http://127.0.0.1:9 corral doctor 2>&1)
-  echo "$out" | grep -q "skipped - unmanaged adb path ($TMP/localappdata/Android/Sdk/platform-tools/adb.exe)" \
+  # the printed path is native on a Windows host and POSIX elsewhere; match on the marker plus the
+  # trailing components with either separator (row 33 F6: the old single POSIX grep failed on MSYS)
+  echo "$out" | grep -q "skipped - unmanaged adb path (" \
+    && echo "$out" | grep -qE "localappdata[/\\\\]Android[/\\\\]Sdk[/\\\\]platform-tools[/\\\\]adb\.exe" \
     || { echo "no localappdata adb in: $out" >&2; exit 1; }
   exit 0
 '
@@ -432,20 +637,45 @@ check "corral claim --model and queue listing" bash -c '
   exit 0
 '
 
+# The identity rows above can leave a lease recorded under an owner this shell cannot free: on a
+# host without /proc the CLI's derived identity can differ between invocations (row32 research
+# §6.2a — one walk may degrade to user:$USER), so a claim and a later free need not use the same
+# owner. Start the queue rows from a fresh daemon + database instead of an unpredictable lease table.
+restart_daemon_clean() {
+  stop_daemons
+  rm -f "$TMP/corral.db" "$TMP/corral.db-wal" "$TMP/corral.db-shm"
+  DAEMON_PID=""; DAEMON_PIDS=""
+  start_daemon
+}
+restart_daemon_clean || exit 1
+
 check "FIFO: first waiter gets the freed device" bash -c '
-  corral claim dev1 >/dev/null; corral claim dev2 >/dev/null
+  qhas() { curl -sf "$CORRAL_URL/api/queue" | grep -q "\"owner\":\"$1\""; }
+  wgot() { [ "$(cat "$1" 2>/dev/null)" = "$2" ]; }
+  wait_for() { local i; for i in $(seq 1 40); do "$@" && return 0; sleep 0.5; done; return 1; }
+  corral free --all >/dev/null 2>&1
+  for s in dev1 dev2; do
+    r=$(curl -s -X POST "$CORRAL_URL/api/leases" -H "Content-Type: application/json" \
+      -d "{\"selector\":{\"serial\":\"$s\"},\"owner\":\"tester\"}")
+    case "$r" in
+      *"\"serial\":\"$s\""*) ;;
+      *) echo "plant $s failed: $r" >&2; exit 1;;
+    esac
+  done
   (corral wait --timeout 30 >"$TMP/w1.out" 2>&1) &
-  sleep 1
   (CORRAL_OWNER=second corral wait --serial dev2 --timeout 30 >"$TMP/w2.out" 2>&1) &
-  sleep 1
-  curl -sf "$CORRAL_URL/api/queue" | grep -q "\"owner\":\"tester\"" || exit 1
-  curl -sf "$CORRAL_URL/api/queue" | grep -q "\"owner\":\"second\"" || exit 1
+  # JVM startup on a Windows host is slower than a fixed 1s sleep allows (F6): poll, do not guess
+  wait_for qhas tester || { echo "no tester ticket: $(curl -s "$CORRAL_URL/api/queue")" >&2; exit 1; }
+  wait_for qhas second || {
+    echo "no second ticket: $(curl -s "$CORRAL_URL/api/queue")" >&2
+    echo "w1: $(cat "$TMP/w1.out" 2>&1)" >&2
+    echo "w2: $(cat "$TMP/w2.out" 2>&1)" >&2
+    exit 1
+  }
   corral free dev1 >/dev/null
-  sleep 2
-  [ "$(cat "$TMP/w1.out")" = "dev1" ] || exit 1
+  wait_for wgot "$TMP/w1.out" dev1 || { echo "w1: $(cat "$TMP/w1.out")" >&2; exit 1; }
   corral free dev2 >/dev/null
-  sleep 2
-  [ "$(cat "$TMP/w2.out")" = "dev2" ] || exit 1
+  wait_for wgot "$TMP/w2.out" dev2 || { echo "w2: $(cat "$TMP/w2.out")" >&2; exit 1; }
   wait
   exit 0
 '
@@ -482,23 +712,30 @@ check "lapsed unpolled ticket is dropped and the next waiter is served" bash -c 
 # Real cmd.exe misparses a multi-line LF-only .bat, and adb-wrapper.bat/corral.bat use parenthesised
 # blocks and `call :label` targets — the constructs that break without CRLF. Wine tolerates LF, so
 # this check is the only thing that catches it; .gitattributes forces CRLF on checkout.
+# CR-agnostic on purpose (row 33 F6): on MSYS `grep -q $'\r'` cannot match a lone CR, so the old
+# check reported a false NEGATIVE there. Count the CR bytes and require one per line instead.
 bat_crlf() {
-  local f
+  local f n crs lines
   for f in "$SRC/adb-wrapper.bat" "$SRC/corral.bat"; do
-    grep -q $'\r' "$f" || { echo "$f is not CRLF-terminated" >&2; return 1; }
+    n=$(tr -cd '\r' < "$f" | wc -c | tr -d ' ')
+    lines=$(wc -l < "$f" | tr -d ' ')
+    [ "$n" -gt 0 ] || { echo "$f has no CR bytes (LF-only)" >&2; return 1; }
+    [ "$n" -eq "$lines" ] || { echo "$f has $n CR bytes for $lines lines (not CRLF throughout)" >&2; return 1; }
   done
 }
 check "shipped .bat files are CRLF (real cmd.exe misparses LF batch)" bat_crlf
 
 # --- Windows .bat wrapper: resolve the CLI from PATH entries only, never the CWD ---
 # where/call also search the CWD, so a planted corral.bat there could both satisfy the guard and
-# run as the gate. wine runs the batch files; install/init it in CI (.github/workflows/ci.yml).
+# run as the gate. Two ways to run the batch files (row 33 F6): wine on a POSIX host (installed by
+# CI), or a NATIVE cmd.exe on a Windows host (MINGW/MSYS/CYGWIN) — the QA measured those rows at
+# seconds there. Wine wins when both exist so CI behaviour is unchanged.
 skip_bat_checks() {
   {
     echo
     echo '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
-    echo 'WARNING: wine is not available - the Windows .bat wrapper checks were SKIPPED, so'
-    echo 'this run proves NOTHING about adb-wrapper.bat or corral.bat:'
+    echo 'WARNING: no wine and not a native Windows host - the Windows .bat wrapper checks were'
+    echo 'SKIPPED, so this run proves NOTHING about adb-wrapper.bat or corral.bat:'
     echo '  win: a planted corral.bat or extensionless corral in the CWD is ignored'
     echo '  win: a planted CLI in the CWD is never executed as the gate'
     echo '  win: corral on PATH is resolved and delegated to, exit code preserved'
@@ -508,17 +745,45 @@ skip_bat_checks() {
     echo '  win: corral.bat resolves java from an absolute PATH entry'
     echo '  win: a forward-slash absolute PATH entry resolves'
     echo '  win: corral.exe outranks corral.bat, matching cmd PATHEXT'
-    echo 'wine is installed by CI (see .github/workflows/ci.yml); local runs may skip.'
+    echo 'They run under wine (installed by CI, see .github/workflows/ci.yml) or natively on a'
+    echo 'Windows host (Git Bash/MSYS/Cygwin with cmd.exe on PATH).'
     echo '!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!'
     echo
   } >&2
 }
 
+WINMODE=missing
 if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
   export WINEPREFIX="$TMP/wineprefix" WINEDEBUG=-all WINEDLLOVERRIDES="mscoree,mshtml="
   if timeout 120 wineboot -i >/dev/null 2>&1 && timeout 60 wine cmd /c "exit" >/dev/null 2>&1; then
-    winpath() { printf 'Z:%s' "${1//\//\\}"; }
+    WINMODE=wine
+  else
+    WINMODE=unusable
+  fi
+elif command -v cmd.exe >/dev/null 2>&1; then
+  case "$(uname -s 2>/dev/null || true)" in
+    MINGW*|MSYS*|CYGWIN*) WINMODE=native ;;
+  esac
+fi
+
+if [ "$WINMODE" = wine ] || [ "$WINMODE" = native ]; then
+    if [ "$WINMODE" = wine ]; then
+      winpath() { printf 'Z:%s' "${1//\//\\}"; }
+      HOST_EXE="$WINEPREFIX/drive_c/windows/system32/hostname.exe"
+    else
+      winpath() { cygpath -w "$1"; }
+      HOST_EXE="$(cygpath -u "${SYSTEMROOT:-C:\\Windows}")/System32/hostname.exe"
+    fi
     winpath_fwd() { local p; p=$(winpath "$1"); printf '%s' "${p//\\//}"; }
+    # run_launch <dir>: run the launch.bat already written there, in the selected mode.
+    run_launch() {
+      local d="$1" wd; wd=$(winpath "$d")
+      if [ "$WINMODE" = wine ]; then
+        ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
+      else
+        ( cd "$d" && MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 timeout 90 cmd /c "$wd\\launch.bat" 2>&1 )
+      fi
+    }
     # run_bat <dir> <windows PATH> [args...]: run adb-wrapper.bat from <dir> with that PATH
     run_bat() {
       local d="$1" wpath="$2"; shift 2
@@ -528,7 +793,7 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
       # instead of the delegate's code. Propagate deliberately at every level instead.
       printf '@echo off\r\nset "PATH=%s"\r\ncall "%s\\adb-wrapper.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
         "$wpath" "$wd" "$*" > "$d/launch.bat"
-      ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
+      run_launch "$d"
     }
     # run_corral <dir> <windows PATH> <extra set-line> [args...]: run corral.bat from <dir>
     run_corral() {
@@ -536,7 +801,7 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
       local wd; wd=$(winpath "$d")
       printf '@echo off\r\nset "PATH=%s"\r\n%s\r\ncall "%s\\corral.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
         "$wpath" "$extra" "$wd" "$*" > "$d/launch.bat"
-      ( cd "$d" && timeout 90 wine cmd /c "$wd\\launch.bat" 2>&1 )
+      run_launch "$d"
     }
     bat_dir() {
       local d="$TMP/win/$1"; rm -rf "$d"; mkdir -p "$d"
@@ -671,7 +936,7 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
     check_bat_pathext_order() {
       local d out pe
       d=$(bat_dir ext); mkdir -p "$d/bin"
-      pe="$WINEPREFIX/drive_c/windows/system32/hostname.exe"
+      pe="$HOST_EXE"
       [ -f "$pe" ] || { echo "no PE to plant at $pe" >&2; return 1; }
       cp "$pe" "$d/bin/corral.exe"
       printf '@echo off\r\necho BAT-WON > bat.marker\r\nexit /b 0\r\n' > "$d/bin/corral.bat"
@@ -681,16 +946,15 @@ if command -v wine >/dev/null 2>&1 && command -v wineboot >/dev/null 2>&1; then
       return 0
     }
     check "win: corral.exe outranks corral.bat, matching cmd PATHEXT" check_bat_pathext_order
-  else
-    skip_bat_checks
-    # These checks exist because CI silently skipped them in a green build. Under CI a skip must
-    # FAIL, or a wineboot flake on a cold runner reproduces the original hole. Locally it stays a
-    # warning so the suite still runs on a machine without wine.
-    [ -n "${CI:-}" ] && check "win: .bat wrapper checks actually RAN (wine present but unusable)" false
-  fi
+elif [ "$WINMODE" = unusable ]; then
+  skip_bat_checks
+  # These checks exist because CI silently skipped them in a green build. Under CI a skip must
+  # FAIL, or a wineboot flake on a cold runner reproduces the original hole. Locally it stays a
+  # warning so the suite still runs on a machine without wine.
+  [ -n "${CI:-}" ] && check "win: .bat wrapper checks actually RAN (wine present but unusable)" false
 else
   skip_bat_checks
-  [ -n "${CI:-}" ] && check "win: .bat wrapper checks actually RAN (wine unavailable)" false
+  [ -n "${CI:-}" ] && check "win: .bat wrapper checks actually RAN (no wine and not a Windows host)" false
 fi
 
 # --- report ---

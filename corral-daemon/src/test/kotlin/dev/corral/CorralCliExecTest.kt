@@ -227,4 +227,16 @@ class CorralCliExecTest {
         assertEquals(7, rc)
         assertTrue(released, "a non-zero exit must still free the lease")
     }
+
+    // --- row 33 F7: the doctor's unreachable-daemon hint names the platform's own supervisor ------
+
+    @Test fun daemonDownHintIsPlatformAppropriate() {
+        val posix = daemonDownHint(windows = false)
+        assertTrue("systemctl --user status corral" in posix, posix)
+        assertFalse("schtasks" in posix, "POSIX hint must not name the Windows task: $posix")
+        val win = daemonDownHint(windows = true)
+        assertTrue("schtasks /query /tn CorralDaemon" in win, win)
+        assertTrue("CorralDaemon" in win, win)
+        assertFalse("systemctl" in win, "Windows hint must not name systemd: $win")
+    }
 }

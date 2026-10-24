@@ -52,6 +52,15 @@ internal fun emulatorProblems(doctor: DoctorResponse?): List<String> =
 internal fun emptyPoolHint(devices: List<Device>?): String? =
     EMPTY_POOL_HINT.takeIf { devices != null && devices.isEmpty() }
 
+/**
+ * The doctor's unreachable-daemon hint. POSIX hosts run the user unit; Windows has no systemd and
+ * runs the per-user `CorralDaemon` Scheduled Task — a `systemctl` suggestion there is a dead end.
+ * [windows] is injectable so both branches are testable on either host.
+ */
+internal fun daemonDownHint(windows: Boolean = isWindows): String =
+    if (windows) "is the CorralDaemon Scheduled Task running? schtasks /query /tn CorralDaemon"
+    else "is it running? systemctl --user status corral"
+
 /** The doctor's one update line. Switches on the explicit state — never says "current" when unknown. */
 internal fun updateLine(info: UpdateInfo?): String = when (info?.state) {
     null -> "update: unknown (could not read /api/update)"
@@ -505,7 +514,7 @@ object CorralCli {
                     if (r.statusCode() == 200) decodeDeviceList(r.body()) else null
                 } catch (_: Exception) { null }
                 if (pool != null) println("daemon: ok ($url, ${pool.size} device(s))")
-                else { println("daemon: FAIL - unreachable at $url (is it running? systemctl --user status corral)"); problems++ }
+                else { println("daemon: FAIL - unreachable at $url (${daemonDownHint()})"); problems++ }
                 // an empty pool is not a failure, but silence reads as "nothing is plugged in"
                 emptyPoolHint(pool)?.let { println("devices: hint - $it") }
                 // a wedged emulator is stuck, not booting: name it and its remedy (Windows smoke H2).

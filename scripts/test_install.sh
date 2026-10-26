@@ -30,7 +30,7 @@ TMP=$(mktemp -d)
 TMPHOME="$TMP/home"
 mkdir -p "$TMPHOME"
 cleanup() { rm -rf "$TMP"; }
-trap true EXIT
+trap cleanup EXIT
 
 # --- guard rails: every path we assert on is under the temp HOME, never the real one ---
 case "$TMPHOME" in

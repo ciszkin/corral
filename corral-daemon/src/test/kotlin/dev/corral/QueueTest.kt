@@ -393,4 +393,43 @@ class QueueTest {
         m.dispatchFreeDevices()
         assertEquals("emulator-5554", (m.poll(t.id, "W") as Poll.Offered).lease.serial)
     }
+
+    // --- row 35: the queueing CLI lease holds what it is served (review 44 §3). Before this, the
+    // `corral wait` client printed its serial and exited, releasing the device to the NEXT ticket,
+    // so the first waiter lost it and the last waiter won. The queueing lease polls under its own
+    // live pid and keeps the lease for the command's lifetime, so that inversion cannot happen.
+
+    @Test fun queuedHoldKeepsTheFirstWaitersDevice() = runTest {
+        val m = mgr()
+        val cli = ProcessHandle.current().pid()      // the lease process: alive across the whole command
+        m.claim("dev1", "alice"); m.claim("dev2", "alice")
+        val bob = m.enqueue(Selector(serial = "dev1"), "bob", cli, 1800, waitSeconds = 600)
+        val carol = m.enqueue(Selector(serial = "dev1"), "carol", cli, 1800, waitSeconds = 600)
+        assertTrue(m.poll(bob.id, "bob", cli) is Poll.Queued)     // FIFO: bob is first
+        assertTrue(m.poll(carol.id, "carol", cli) is Poll.Queued)
+
+        m.free("dev1", "alice"); runCurrent()
+        val held = (m.poll(bob.id, "bob", cli) as Poll.Offered).lease
+        assertEquals("bob", held.owner)
+        assertEquals(cli, held.pid)                  // pinned to the live CLI, not to nobody
+
+        now += 5                                     // bob's command runs: no poll, no release
+        m.sweep(); runCurrent()
+        assertEquals("bob", m.snapshot["dev1"]?.owner)                 // bob still holds it...
+        assertTrue(m.poll(carol.id, "carol", cli) is Poll.Queued)      // ...and carol still waits
+        assertTrue(runCatching { m.claim("dev1", "sneaky") }.exceptionOrNull() is LeaseBusyException)
+
+        m.free("dev1", "bob"); runCurrent()          // bob's command exits -> the lease is handed back
+        assertEquals("carol", (m.poll(carol.id, "carol", cli) as Poll.Offered).lease.owner)
+    }
+
+    @Test fun queuedHoldTimesOutWithoutTouchingTheDevice() = runTest {
+        val m = mgr()
+        m.claim("dev1", "alice"); m.claim("dev2", "alice")
+        val bob = m.enqueue(Selector(serial = "dev1"), "bob", 0, 1800, waitSeconds = 5)
+        assertTrue(m.poll(bob.id, "bob") is Poll.Queued)
+        now += 6; m.sweep(); runCurrent()
+        assertEquals(TicketEnd.DEADLINE, (m.poll(bob.id, "bob") as Poll.Expired).reason)
+        assertEquals("alice", m.snapshot["dev1"]?.owner)   // a deadline frees nothing and steals nothing
+    }
 }

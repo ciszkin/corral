@@ -229,6 +229,67 @@ internal fun runLeased(
     }
 
 /**
+ * `corral lease`'s own flags, split from the command. Everything after `--` is the command, so a
+ * command flag can never be mistaken for a lease flag; a flag-shaped token BEFORE it that lease does
+ * not know is an error, never a program to run (pass 44 §6).
+ */
+internal data class LeaseCliArgs(val all: Boolean, val timeoutSeconds: Long?, val cmd: List<String>)
+
+/** null = a usage error: unknown flag, missing/not-a-number timeout, or `--all` with `--timeout`. */
+internal fun parseLeaseArgs(args: List<String>): LeaseCliArgs? {
+    var all = false
+    var timeout: Long? = null
+    var i = 0
+    while (i < args.size && args[i].startsWith("-")) {
+        when {
+            args[i] == "--" -> { i++; break }
+            args[i] == "--all" -> { all = true; i++ }
+            args[i] == "--timeout" -> {
+                timeout = args.getOrNull(i + 1)?.toLongOrNull() ?: return null
+                i += 2
+            }
+            args[i].startsWith("--timeout=") -> {
+                timeout = args[i].substringAfter("=").toLongOrNull() ?: return null
+                i++
+            }
+            else -> return null
+        }
+    }
+    if (all && timeout != null) return null   // `--all` holds everything it can; queueing is one device
+    return LeaseCliArgs(all, timeout, args.drop(i))
+}
+
+/**
+ * The one-line busy answer for `claim` and `lease`: what is connected, booting or leased, who holds
+ * what, and the CLI form that queues and KEEPS the device — never the server's raw JSON (pass 44 §6;
+ * pass 9 fixed claim the same way). Lenient on an unexpected body: a server that answers something
+ * else must not crash the CLI with a parse trace.
+ */
+internal fun busyLine(selector: Selector, body: String): String {
+    val obj = runCatching { Json.parseToJsonElement(body).jsonObject }.getOrNull()
+        ?: return "corral: no free device matches $selector — corral status for holders"
+    val matching = runCatching { obj["matching"]!!.jsonPrimitive.content.toInt() }.getOrNull()
+    val booting = runCatching { obj["booting"]!!.jsonPrimitive.content.toInt() }.getOrNull() ?: 0
+    val holders = runCatching {
+        obj["busy"]!!.jsonArray.joinToString(", ") {
+            it.jsonObject.let { o ->
+                "${o["serial"]!!.jsonPrimitive.content} by ${o["owner"]!!.jsonPrimitive.content}"
+            }
+        }
+    }.getOrNull().orEmpty()
+    return when {
+        matching == 0 -> "corral: no connected device matches $selector"
+        booting > 0 -> "corral: no free device matches $selector ($booting emulator(s) booting) — " +
+            "corral lease --timeout S --type emulator -- <cmd> queues until boot"
+        else -> {
+            val who = if (holders.isEmpty()) "" else ": $holders"
+            "corral: no free device matches $selector (${matching ?: "some"} connected, all leased$who) — " +
+                "corral lease --timeout S -- <cmd> queues and holds, corral status for holders"
+        }
+    }
+}
+
+/**
  * corral CLI — all logic in the jar (portable), launched by 3-line shims.
  * claim: JVM exits right after printing -> no pid recorded -> TTL-bound lease (MVP `adb-lease claim` semantics).
  * lease: JVM outlives the child -> pid recorded -> instant crash recovery (MVP `withdev` semantics).
@@ -424,13 +485,7 @@ object CorralCli {
             Json.encodeToString(ClaimRequest(selector = selector, owner = owner, pid = pid, ttlSeconds = 1800)))
         if (r.statusCode() == 200)
             return Json.parseToJsonElement(r.body()).jsonObject["serial"]!!.jsonPrimitive.content
-        val body = Json.parseToJsonElement(r.body()).jsonObject
-        val matching = runCatching { body["matching"]!!.jsonPrimitive.content.toInt() }.getOrNull()
-        val booting = runCatching { body["booting"]!!.jsonPrimitive.content.toInt() }.getOrNull() ?: 0
-        if (matching == 0) System.err.println("corral: no connected device matches $selector")
-        else if (booting > 0)
-            System.err.println("corral: no free device matches $selector ($booting emulator(s) booting) — corral wait --type emulator queues until boot")
-        else System.err.println("corral: no free device matches $selector (${matching ?: "some"} connected, all leased) — corral wait to queue, corral status for holders")
+        System.err.println(busyLine(selector, r.body()))
         exitProcess(1)
     }
 
@@ -449,6 +504,60 @@ object CorralCli {
         val tail = if (booting > 0) "; $booting matching emulator(s) still booting" else ""
         System.err.println("corral: gave up after ${waitSeconds}s waiting for $selector$tail")
         exitProcess(1)
+    }
+
+    /**
+     * Enter the FIFO ticket queue, block until a matching device is offered (accepting it here), and
+     * return its serial. From the acceptance on it is a normal owner-scoped lease: [holderPid] is the
+     * liveness signal, and it lives until [release] or that pid dies. The shutdown hook always cancels
+     * an UNSERVED ticket; with [releaseOnExit] it also hands a served lease back when this process
+     * exits — `wait`'s documented contract. A queueing `lease` passes false: it releases in
+     * [runHolding]'s finally, and a killed CLI is covered by the pid/TTL machinery like a plain claim.
+     */
+    private fun awaitServed(sel: Selector, waitSeconds: Long, holderPid: Long,
+                            releaseOnExit: Boolean): String {
+        // Own pid: killing this CLI frees the ticket at once (the daemon skips dead pids).
+        val ticket = send("POST", "/api/leases",
+            Json.encodeToString(ClaimRequest(selector = sel, owner = owner,
+                pid = ProcessHandle.current().pid(), ttlSeconds = 1800, waitSeconds = waitSeconds))).str("ticket")
+        val served = AtomicReference<String?>(null)
+        Runtime.getRuntime().addShutdownHook(Thread {
+            runCatching {
+                val s = served.get()
+                if (s != null) { if (releaseOnExit) release(s) }
+                else http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/tickets/$ticket"))
+                    .timeout(Duration.ofSeconds(2))
+                    .method("DELETE", HttpRequest.BodyPublishers.ofString(
+                        Json.encodeToString(TicketCancelRequest(owner = owner))))
+                    .header("Content-Type", "application/json")
+                    .build(), HttpResponse.BodyHandlers.ofString())
+            }
+        })
+        while (true) {
+            val r = trySend("POST", "/api/leases/tickets/$ticket/poll",
+                Json.encodeToString(TicketPollRequest(owner = owner, pid = holderPid)))
+            when (r.statusCode()) {
+                200 -> { val serial = r.body().str("serial"); served.set(serial); return serial }
+                202 -> Thread.sleep(runCatching { r.body().str("retryAfterMs").toLong() }.getOrDefault(1000L))
+                else -> waitTimedOut(sel, waitSeconds)
+            }
+        }
+    }
+
+    /**
+     * Run [cmd] holding [serial]: `ANDROID_SERIAL` and `CORRAL_OWNER` exported, the configured adb's
+     * directory on PATH, and the lease returned however the command ends. This CLI process outlives
+     * the child, so the pid recorded on the lease keeps it held for exactly the command's lifetime.
+     */
+    private fun runHolding(serial: String, cmd: List<String>): Int {
+        var resolved: Boolean? = null
+        val launchArgv = commandArgv(cmd, onResolved = { resolved = it })
+        return runLeased(cmd, resolved, {
+            ProcessBuilder(launchArgv).apply {
+                environment()["ANDROID_SERIAL"] = serial
+                environment()["CORRAL_OWNER"] = owner
+            }.withAdbOnPath()
+        }) { release(serial) }
     }
 
     @JvmStatic
@@ -656,39 +765,50 @@ object CorralCli {
             }
             "lease" -> {
                 val (sel, rest0) = parseSelector(args.drop(1).toTypedArray())
-                val all = rest0.firstOrNull() == "--all"
-                val cmd = rest0.drop(if (all) 1 else 0).let { if (it.firstOrNull() == "--") it.drop(1) else it }
-                if (cmd.isEmpty()) { System.err.println("usage: corral lease [--all] -- <cmd>"); exitProcess(2) }
+                val leaseArgs = parseLeaseArgs(rest0) ?: usage(2)
+                val cmd = leaseArgs.cmd
+                if (cmd.isEmpty()) {
+                    System.err.println("usage: corral lease [--all | --timeout S] [selector] -- <cmd>")
+                    exitProcess(2)
+                }
                 val isGradle = cmd.firstOrNull()?.let { File(it).name } in setOf("gradle", "gradlew")
-                if (all) {
-                    val claimed = mutableListOf<String>()
-                    while (true) {
-                        val s = claimFree(owner, pid, selector = sel) ?: break
-                        claimed += s
+                val queueSeconds = leaseArgs.timeoutSeconds?.takeIf { it > 0 }
+                when {
+                    leaseArgs.all -> {
+                        val claimed = mutableListOf<String>()
+                        while (true) {
+                            val s = claimFree(owner, pid, selector = sel) ?: break
+                            claimed += s
+                        }
+                        if (claimed.isEmpty()) { System.err.println("corral: no free device"); exitProcess(1) }
+                        val gradleFlag = if (isGradle) listOf("-PcorralOwner=$owner") else emptyList()
+                        val argv = cmd + gradleFlag
+                        var resolved: Boolean? = null
+                        val launchArgv = commandArgv(argv, onResolved = { resolved = it })
+                        val rc = runLeased(argv, resolved, {
+                            ProcessBuilder(launchArgv).apply {
+                                environment()["CORRAL_OWNER"] = owner
+                            }.withAdbOnPath()
+                        }) { claimed.forEach { release(it) } }
+                        exitProcess(rc)
                     }
-                    if (claimed.isEmpty()) { System.err.println("corral: no free device"); exitProcess(1) }
-                    val gradleFlag = if (isGradle) listOf("-PcorralOwner=$owner") else emptyList()
-                    val argv = cmd + gradleFlag
-                    var resolved: Boolean? = null
-                    val launchArgv = commandArgv(argv, onResolved = { resolved = it })
-                    val rc = runLeased(argv, resolved, {
-                        ProcessBuilder(launchArgv).apply {
-                            environment()["CORRAL_OWNER"] = owner
-                        }.withAdbOnPath()
-                    }) { claimed.forEach { release(it) } }
-                    exitProcess(rc)
-                } else {
-                    val serial = send("POST", "/api/leases",
-                        Json.encodeToString(ClaimRequest(selector = sel, owner = owner, pid = pid, ttlSeconds = 1800))).str("serial")
-                    var resolved: Boolean? = null
-                    val launchArgv = commandArgv(cmd, onResolved = { resolved = it })
-                    val rc = runLeased(cmd, resolved, {
-                        ProcessBuilder(launchArgv).apply {
-                            environment()["ANDROID_SERIAL"] = serial
-                            environment()["CORRAL_OWNER"] = owner
-                        }.withAdbOnPath()
-                    }) { release(serial) }
-                    exitProcess(rc)
+                    // Row 35: wait in the FIFO queue, then run HOLDING the served device. The lease is
+                    // accepted under this CLI's live pid and released only when the command exits, so
+                    // the next ticket cannot take it while the command runs (the `wait` inversion).
+                    queueSeconds != null -> {
+                        val serial = awaitServed(sel, queueSeconds, pid, releaseOnExit = false)
+                        exitProcess(runHolding(serial, cmd))
+                    }
+                    else -> {
+                        val r = trySend("POST", "/api/leases",
+                            Json.encodeToString(ClaimRequest(selector = sel, owner = owner, pid = pid, ttlSeconds = 1800)))
+                        if (r.statusCode() != 200) {
+                            System.err.println(busyLine(sel, r.body()))
+                            exitProcess(1)
+                        }
+                        val serial = Json.parseToJsonElement(r.body()).jsonObject["serial"]!!.jsonPrimitive.content
+                        exitProcess(runHolding(serial, cmd))
+                    }
                 }
             }
             "wait" -> {
@@ -696,35 +816,10 @@ object CorralCli {
                 val i = rest.indexOf("--timeout")
                 val waitSeconds = if (i >= 0) rest.getOrNull(i + 1)?.toLongOrNull() ?: usage(2) else 600L
                 if (waitSeconds <= 0) { println(claimOne(sel, holderPid())); return }
-                // Own pid: killing this CLI frees the ticket at once (the daemon skips dead pids).
-                val ticket = send("POST", "/api/leases",
-                    Json.encodeToString(ClaimRequest(selector = sel, owner = owner,
-                        pid = pid, ttlSeconds = 1800, waitSeconds = waitSeconds))).str("ticket")
                 // A served lease outlives this process only as long as the process does: hand it back on
                 // exit (normal or signal-driven; a SIGKILL leaves the TTL/pid-prune machinery in charge).
-                // The owner check makes this a no-op on anyone else's lease.
-                val served = AtomicReference<String?>(null)
-                Runtime.getRuntime().addShutdownHook(Thread {
-                    runCatching {
-                        val s = served.get()
-                        if (s != null) release(s)
-                        else http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/tickets/$ticket"))
-                            .timeout(Duration.ofSeconds(2))
-                            .method("DELETE", HttpRequest.BodyPublishers.ofString(
-                                Json.encodeToString(TicketCancelRequest(owner = owner))))
-                            .header("Content-Type", "application/json")
-                            .build(), HttpResponse.BodyHandlers.ofString())
-                    }
-                })
-                while (true) {
-                    val r = trySend("POST", "/api/leases/tickets/$ticket/poll",
-                        Json.encodeToString(TicketPollRequest(owner = owner, pid = holderPid())))
-                    when (r.statusCode()) {
-                        200 -> { val serial = r.body().str("serial"); served.set(serial); println(serial); return }
-                        202 -> Thread.sleep(runCatching { r.body().str("retryAfterMs").toLong() }.getOrDefault(1000L))
-                        else -> waitTimedOut(sel, waitSeconds)
-                    }
-                }
+                // Use `lease --timeout` when the device must stay held to run a command.
+                println(awaitServed(sel, waitSeconds, holderPid(), releaseOnExit = true))
             }
             "gate" -> {
                 if (rules.readonly.isEmpty() || rules.valueFlags.isEmpty()) {
@@ -803,7 +898,7 @@ object CorralCli {
         println("usage: corral devices|status|queue|owner|doctor|check [--owner <o>] [<serial>...]" +
             "|update [--apply]" +
             "|claim [--all|<serial>] [selector]|free [--all|<serial>]|renew <serial>" +
-            "|wait [--timeout S (max 600)] [selector]|lease [--all] [selector] -- <cmd>" +
+            "|wait [--timeout S (max 600)] [selector]|lease [--all | --timeout S] [selector] -- <cmd>" +
             "|gate [--owner o] -- <adb args>" +
             "|screenshot <serial> [--out F]|events" +
             "|avd [list|start A|stop A [--force]]" +

@@ -666,14 +666,16 @@ fi
 echo "==> Installing to $TARGET_HOME"
 mkdir -p "$CORRAL_HOME" "$BIN_DIR"
 if [[ $IS_WINDOWS -eq 0 ]]; then mkdir -p "$UNIT_DIR"; fi
-# Windows row 33 F4: a jar refusal must not abort the whole upgrade. The daemon jar is the ONE file
-# a running JVM holds open; the ~/bin shims, the gradle gate and the Scheduled Task are independent
-# of it, and an operator upgrading over a running daemon still needs those current. On POSIX the
-# refusal stays fatal (and byte-identical to the pre-change installer); on Windows it is recorded,
-# the rest of the install proceeds, the task is refreshed but NOT started (a second daemon would
-# only compete for the port), and the run exits non-zero with a summary naming exactly what was and
-# was not refreshed. Callers that treat install.sh's exit code as "upgraded" still see the failure.
+# Windows row 33 F4 / row 36: a jar refusal must not abort the whole upgrade. A running JVM holds its
+# jar open, and BOTH the daemon jar and the console jar are held that way. The ~/bin shims, the gradle
+# gate and the Scheduled Task are independent of both, and an operator upgrading over a running
+# daemon/console still needs those current. On POSIX a refusal stays fatal (and byte-identical to the
+# pre-change installer); on Windows each refusal is recorded, the rest of the install proceeds, the
+# task is refreshed but NOT started when the daemon jar is the one left behind (a second daemon would
+# only compete for the port), and the run exits non-zero with a summary naming EXACTLY which jars were
+# not refreshed. Callers that treat install.sh's exit code as "upgraded" still see the failure.
 JAR_FAILED=0
+UI_JAR_FAILED=0
 if ! replace_file "$JAR" "$CORRAL_HOME/corral-daemon-all.jar" "corral-daemon-all.jar"; then
   if [[ $IS_WINDOWS -eq 0 ]]; then
     exit 1
@@ -744,13 +746,17 @@ fi
 
 if want_ui && [[ $IS_WINDOWS -eq 1 ]]; then
   # The bundle has no corral-ui.bat, so there is no working Windows UI shim or launcher to install.
-  # Copy the jar so it can be started with java -jar, and say plainly what is missing.
-  replace_file "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" "corral-ui-all.jar" || {
-    echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2
-    echo "       On Windows a running console holds its jar open; quit Corral and re-run." >&2
-    exit 1
-  }
-  echo "Installed: corral-ui jar ($CORRAL_HOME/corral-ui-all.jar) — no corral-ui shim or app-grid launcher on Windows"
+  # Copy the jar so it can be started with java -jar, and say plainly what is missing. Row 36: a
+  # running console holds this jar open exactly as a running daemon holds the daemon jar, so the
+  # refusal is RECORDED and the run continues to the gradle gate, the task and the summary.
+  if replace_file "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" "corral-ui-all.jar"; then
+    echo "Installed: corral-ui jar ($CORRAL_HOME/corral-ui-all.jar) — no corral-ui shim or app-grid launcher on Windows"
+  else
+    UI_JAR_FAILED=1
+    echo "       A running console on Windows keeps its jar open, so corral-ui-all.jar was NOT replaced." >&2
+    echo "       This run CONTINUES: the Windows shims, the gradle gate and the Scheduled Task are still" >&2
+    echo "       refreshed. Quit the Corral console and re-run install.sh to finish." >&2
+  fi
 elif want_ui; then
   replace_file "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" "corral-ui-all.jar" \
     || { echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2; exit 1; }
@@ -1153,20 +1159,46 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
   else
     echo "SDK adb shim is NOT installed on Windows — adb is NOT lease-gated by this install."
   fi
-  if [[ $JAR_FAILED -eq 1 ]]; then
+  if [[ $JAR_FAILED -eq 1 || $UI_JAR_FAILED -eq 1 ]]; then
+    INCOMPLETE=""
+    if [[ $JAR_FAILED -eq 1 ]]; then INCOMPLETE="corral-daemon-all.jar"; fi
+    if [[ $UI_JAR_FAILED -eq 1 ]]; then
+      INCOMPLETE="${INCOMPLETE:+$INCOMPLETE and }corral-ui-all.jar"
+    fi
     echo
-    echo "==> Install INCOMPLETE — corral-daemon-all.jar was NOT refreshed"
+    if [[ $JAR_FAILED -eq 1 && $UI_JAR_FAILED -eq 1 ]]; then
+      echo "==> Install INCOMPLETE — corral-daemon-all.jar and corral-ui-all.jar were NOT refreshed"
+    else
+      echo "==> Install INCOMPLETE — $INCOMPLETE was NOT refreshed"
+    fi
     echo "Refreshed by this run: the Windows shims above ($BIN_DIR), the gradle init.d gate"
     if [[ $TASK_REFRESHED -eq 1 ]]; then
-      echo "  and the CorralDaemon Scheduled Task (definition refreshed; NOT started — the running daemon holds the port)."
+      if [[ $JAR_FAILED -eq 1 ]]; then
+        echo "  and the CorralDaemon Scheduled Task (definition refreshed; NOT started — the running daemon holds the port)."
+      else
+        echo "  and the CorralDaemon Scheduled Task (definition refreshed)."
+      fi
     else
       echo "  (The Scheduled Task was NOT refreshed — see the Daemon section above.)"
     fi
-    echo "NOT refreshed: $CORRAL_HOME/corral-daemon-all.jar — the running daemon holds it open, so this"
-    echo "  file is still the OLD jar and the daemon is still serving the previous version. The shims"
-    echo "  and the task are current; the jar is the ONE thing left. From an elevated prompt:"
-    echo "    schtasks /end /tn CorralDaemon"
-    echo "  then stop the java.exe whose command line runs corral-daemon-all.jar, and re-run install.sh."
+    echo "NOT refreshed:"
+    if [[ $JAR_FAILED -eq 1 ]]; then
+      echo "  $CORRAL_HOME/corral-daemon-all.jar — the running daemon holds it open, so this file is"
+      echo "  still the OLD jar and the daemon is still serving the previous version."
+    fi
+    if [[ $UI_JAR_FAILED -eq 1 ]]; then
+      echo "  $CORRAL_HOME/corral-ui-all.jar — the running console holds it open, so the console is"
+      echo "  still the previous version."
+    fi
+    echo "Everything else is current. To finish:"
+    if [[ $JAR_FAILED -eq 1 ]]; then
+      echo "  - from an elevated prompt: schtasks /end /tn CorralDaemon, then stop the java.exe whose"
+      echo "    command line runs corral-daemon-all.jar"
+    fi
+    if [[ $UI_JAR_FAILED -eq 1 ]]; then
+      echo "  - quit the Corral console (it holds corral-ui-all.jar open)"
+    fi
+    echo "  then re-run install.sh."
     echo "This run exits non-zero so a caller cannot read it as a completed upgrade."
   fi
 else
@@ -1195,9 +1227,10 @@ else
   echo "  Install Android platform-tools, or pass --adb PATH to the real adb, then re-run to gate them."
 fi
 echo
-echo "Cutover checklist (in the corral source repo, scripts/cutover.md; in the bundle, CUTOVER.md beside this installer): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi,"
-echo "then verify a gradle installDebug allow/deny, retire the adb-lease hook, keep old scripts backed up a week."
+echo "Adoption guide (CUTOVER.md beside this installer; at the repo root in a source checkout): install, the claim/lease/wait loop, Gradle builds, emulators, the console, updates and known limits."
+echo "Then verify: corral doctor, corral devices, and one gated gradle installDebug allow/deny. Keep your old scripts backed up a week."
 fi
-# row 33 F4: a Windows run that could not replace the jar still refreshed everything else, but it is
-# NOT a completed upgrade. Keep that visible to callers ($? / CI) after the honest summary above.
-if [[ ${JAR_FAILED:-0} -eq 1 ]]; then exit 1; fi
+# row 33 F4 / row 36: a Windows run that could not replace one or both jars still refreshed everything
+# else, but it is NOT a completed upgrade. Keep that visible to callers ($? / CI) after the honest
+# summary above.
+if [[ ${JAR_FAILED:-0} -eq 1 || ${UI_JAR_FAILED:-0} -eq 1 ]]; then exit 1; fi

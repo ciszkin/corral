@@ -92,6 +92,12 @@ done
 [ -f "$REPO_ROOT/README.md" ] || { echo "ERROR: missing $REPO_ROOT/README.md" >&2; exit 1; }
 mirror "$REPO_ROOT/README.md" "README.md"
 
+# Repo SECURITY.md: the guide links [SECURITY.md](SECURITY.md) from its Updates section, so the
+# bundle must carry it beside the guide — a link a bundle-only reader cannot open is a break (the
+# same class the missing cutover doc was). The release workflow stages the whole bundle dir.
+[ -f "$REPO_ROOT/SECURITY.md" ] || { echo "ERROR: missing $REPO_ROOT/SECURITY.md" >&2; exit 1; }
+mirror "$REPO_ROOT/SECURITY.md" "SECURITY.md"
+
 # The shipped cutover document is the TRACKED repo-root CUTOVER.md. scripts/cutover.md (the long
 # internal checklist) is NOT in git, so a bundle built from it is empty in CI and in the release
 # workflow — and the README's [CUTOVER.md](CUTOVER.md#updates) link then goes nowhere again. It ships

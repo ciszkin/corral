@@ -239,6 +239,62 @@ check_f1_handback() {
   [ "$freed" = 1 ]
 }
 
+# --- review 44 §3: `corral lease --timeout` queues AND keeps the device ---
+# The guide used to send people to `corral wait`, which returns its lease on exit: with a second
+# waiter queued, the first waiter's served device cascaded to the next ticket and the LAST waiter
+# won. This is review 44's bob/carol trace with the queueing lease: bob (first) holds while his
+# command runs, carol waits, and only bob's exit hands her the device.
+status_owner() { # status_owner <serial> -> owner (empty = not leased)
+  curl -s "$CORRAL_URL/api/status" | grep -o "\"serial\":\"$1\",\"lease\":{[^}]*}" \
+    | grep -o '"owner":"[^"]*"' | cut -d'"' -f4
+}
+check_lease_timeout_holds() {
+  claim_two || return 1
+  CORRAL_OWNER=bob timeout 30 corral lease --serial dev1 --timeout 60 -- \
+    sh -c 'echo "bob $ANDROID_SERIAL"; sleep 6' >"$TMP/hold-bob.out" 2>&1 &
+  local bob=$! i held=0 still=0 handed=0 free_after=0 bob_rc=0 claim_rc=0
+  wait_queue_not_empty || { kill -9 "$bob" 2>/dev/null; free_all; return 1; }
+  CORRAL_OWNER=carol timeout 30 corral lease --serial dev1 --timeout 60 -- \
+    sh -c 'echo "carol $ANDROID_SERIAL"; sleep 2' >"$TMP/hold-carol.out" 2>&1 &
+  local carol=$!
+  for i in $(seq 1 50); do
+    curl -s "$CORRAL_URL/api/queue" | grep -q '"owner":"carol"' && break; sleep 0.1
+  done
+  corral free dev1 >/dev/null 2>&1                 # alice frees it: bob (first) must be served
+  for i in $(seq 1 60); do
+    [ "$(status_owner dev1)" = bob ] && { held=1; break; }
+    sleep 0.05
+  done
+  if [ "$held" != 1 ]; then kill -9 "$bob" "$carol" 2>/dev/null; free_all; return 1; fi
+  # It STAYS bob's while his command runs: carol still waits, and a stranger's claim cannot take it.
+  sleep 1
+  if [ "$(status_owner dev1)" = bob ] && kill -0 "$bob" 2>/dev/null \
+     && curl -s "$CORRAL_URL/api/queue" | grep -q '"owner":"carol"'; then still=1; fi
+  CORRAL_OWNER=sneaky corral claim dev1 >/dev/null 2>&1 || claim_rc=$?
+  wait "$bob" 2>/dev/null; bob_rc=$?
+  for i in $(seq 1 60); do
+    [ "$(status_owner dev1)" = carol ] && { handed=1; break; }
+    sleep 0.05
+  done
+  wait "$carol" 2>/dev/null
+  for i in $(seq 1 60); do
+    [ -z "$(status_owner dev1)" ] && { free_after=1; break; }
+    sleep 0.05
+  done
+  free_all
+  [ "$still" = 1 ] && [ "$claim_rc" -ne 0 ] && [ "$bob_rc" = 0 ] && [ "$handed" = 1 ] \
+    && [ "$free_after" = 1 ] \
+    && grep -q '^bob dev1$' "$TMP/hold-bob.out" && grep -q '^carol dev1$' "$TMP/hold-carol.out"
+}
+check_lease_timeout_gives_up() {
+  claim_two || return 1
+  CORRAL_OWNER=bob corral lease --serial dev1 --timeout 1 -- sh -c 'echo RAN' >"$TMP/hold-timedout.out" 2>&1
+  local rc=$?
+  free_all
+  [ "$rc" = 1 ] && grep -q 'gave up after 1s' "$TMP/hold-timedout.out" \
+    && ! grep -q RAN "$TMP/hold-timedout.out"
+}
+
 # --- 5.8: a SIGKILLed `corral wait` is pruned by pid at dispatch; next served < 3s ---
 check_5_8() {
   claim_two || return 1
@@ -929,6 +985,8 @@ check "1.6 restart with tickets queued: waiter errors promptly, never hangs" che
 check "5.20 SIGINT cancels the waiter ticket immediately" check_5_20
 check "5.8 SIGKILLed corral wait: next waiter served < 3s (pid prune)" check_5_8
 check "F1 served corral wait hands its lease back on exit" check_f1_handback
+check "44§3 queueing lease: the first waiter HOLDS the device, the next ticket gets it on exit" check_lease_timeout_holds
+check "44§3 queueing lease: a deadline gives up without running the command" check_lease_timeout_gives_up
 check "5.9/5.11 quiet REST/MCP waiter skipped within staleness window, not offer hold" check_5_9
 if [ "${SLOW:-0}" = 1 ]; then
   check "1.14 poll-silence drop leaves corral queue within POLL_SILENCE_S + slack" check_1_14

@@ -13,24 +13,42 @@ blame each other's failures. Corral puts a lease in front of adb so that only
 the session holding a device can touch it, and everything else either waits
 its turn or is turned away with a message naming the holder.
 
-This guide is for someone adopting Corral on a Linux host with a working
-Android SDK. It assumes no prior knowledge of the project.
+This guide is for someone adopting Corral on a Linux host — or on Windows, via the
+installer's Windows branch — with a working Android SDK. It assumes no prior
+knowledge of the project.
 
 ## Requirements
 
-- Linux (the daemon and CLI are OS-agnostic Java; the installer and the
-  service unit target Linux).
+- Linux, or Windows through the installer's Windows branch (Git Bash or Cygwin).
 - JDK 17 or newer.
 - A working Android SDK with `platform-tools/adb`.
 - Optional: `scrcpy`, for the console's read-only live view.
 
+### Windows
+
+Windows is an **install target**: `install.sh` has a Windows branch that writes the
+`.bat` shims to `%USERPROFILE%\bin`, installs a Gradle gate, and runs the daemon from
+a per-user `CorralDaemon` Scheduled Task (there is no systemd and no `~/bin` shell
+shim). The desktop console is verified on Windows with JDK 25. The full checklist was
+host-verified on one Windows box. macOS is not an install target: the daemon and CLI
+are portable Java, but there is no installer, service or host verification for it.
+
+Two Windows nuances remain, and both are reported by the installer rather than hidden:
+
+- a `.bat` twin that has to be rewritten can be read at a stale offset by a call
+  already in flight — an unchanged twin is never written at all;
+- a running daemon or console holds its jar open, so that jar cannot be replaced: the
+  run continues, refreshes everything else, names every jar it left behind, and exits
+  non-zero.
+
 ## Install
 
 From a release bundle (`corral-<version>.zip`), unpack it and run the
-installer:
+installer. The zip is **flat** — `install.sh` and both jars sit at the zip root, which
+is what `corral update --apply` expects when it extracts a release:
 
 ```sh
-unzip corral-<version>.zip
+unzip corral-<version>.zip -d corral-<version>
 cd corral-<version>
 ./install.sh
 ```
@@ -46,7 +64,7 @@ The installer is user-scoped — no root — and idempotent, so it is safe to
 re-run. It:
 
 - detects Java and adb, or takes `--java PATH` / `--adb PATH` explicitly;
-- stops and enables the `corral` systemd **user** service;
+- enables the `corral` systemd **user** service at login and restarts it;
 - puts an `adb` wrapper and the `corral` CLI on `~/bin` (which must precede
   the SDK directory on `PATH`);
 - shims the SDK's `platform-tools/adb` so absolute-path callers are gated too
@@ -97,16 +115,24 @@ through the usual TTL/pid machinery.
 When nothing is free and you would rather wait than poll:
 
 ```sh
-corral wait                        # queues for any device, blocks until served
-corral wait --timeout 120 --model Pixel_7
+corral lease --timeout 120 -- ./gradlew connectedAndroidTest
+corral lease --timeout 120 --model Pixel_7 -- adb install app.apk
 ```
 
-`corral wait` registers a ticket and polls it. A matching device is offered to
-the longest-waiting ticket that is still polling, so waiting is FIFO by
-arrival. The wait process returns its lease when it exits; a hard kill is
-still covered by the TTL. A ticket that goes quiet is dropped after about
-30 seconds. `corral queue` lists the outstanding tickets, and `corral status`
-names the current holder of every device.
+`corral lease --timeout S` registers a ticket, blocks until a matching device is
+offered, then runs the command **holding** that device until the command exits. A
+matching device is offered to the longest-waiting ticket that is still polling, so
+waiting is FIFO by arrival — and because the lease lives for the command's lifetime,
+the device cannot move on to the next ticket while the command runs. A command that
+crashes still frees its device through the usual TTL/pid machinery, and a ticket that
+times out runs nothing.
+
+`corral wait` uses the same queue but is the poll-then-decide form: it blocks until
+served, prints the serial, and returns the lease when the wait process exits. Use it
+when you want to know which device you would get and then decide what to do; use
+`lease --timeout` when you want the device held for the work. A ticket that goes quiet
+is dropped after about 30 seconds. `corral queue` lists the outstanding tickets, and
+`corral status` names the current holder of every device.
 
 Identity: leases are owned per agent session, not per unix user. Set
 `CORRAL_OWNER` to a stable name if your harness's session outlives a single
@@ -266,17 +292,19 @@ intact" from "the publisher is genuine"; none is shipped. See
 Replacing the jars is atomic: `install.sh` writes each jar to a temporary file
 beside it and renames it into place, so a daemon (or console) that is running
 keeps the old file and the next start picks up the new one. On Windows a
-running JVM holds its jar open, so the jar cannot be replaced: the installer
-says so, still refreshes the `~/bin` shims, the gradle gate and the
-`CorralDaemon` Scheduled Task, does **not** start a second daemon (the running
-one holds the port), names the jar as the one thing left, and exits non-zero.
-Stop it (end the `CorralDaemon` task and the `java.exe` running the jar) and
-re-run to finish.
+running JVM holds its jar open, so a jar cannot be replaced: the installer
+says which jar it could not replace, still refreshes the `~/bin` shims, the
+gradle gate and the `CorralDaemon` Scheduled Task, does **not** start a second
+daemon (a running one holds the port), names **every** jar left behind in one
+closing summary, and exits non-zero. Quit the console and stop the daemon
+(end the `CorralDaemon` task and the `java.exe` running the jar), then re-run
+to finish.
 
 ## Uninstall
 
 ```sh
-scripts/install.sh --uninstall
+./install.sh --uninstall          # from a bundle
+scripts/install.sh --uninstall    # from a source checkout
 ```
 
 This stops and disables the `corral` user service, removes the unit, the adb
@@ -300,6 +328,7 @@ edits in the shell rc files are left alone.
 - **Loopback only.** The daemon binds `127.0.0.1` and rejects non-local Host
   headers, so it cannot be reached from another machine. A non-default port via
   `--url` still has to be a local one.
-- **Linux host.** The installer, the systemd user service and the emulator
-  systemd-run path target Linux. The daemon and CLI themselves are
-  OS-agnostic, but non-Linux hosts are not verified by this project.
+- **Linux-specific service paths.** The systemd user service and the emulator's
+  `systemd-run` path are Linux-only; Windows runs the daemon from a per-user Scheduled
+  Task instead (see [Windows](#windows)), and macOS has no installer. The daemon and
+  CLI themselves are OS-agnostic Java.

@@ -953,6 +953,88 @@ check "locked jar: the task line says refreshed but not started (F4)" \
 check "locked jar: the run still exits before claiming a completed upgrade" bash -c \
   "! grep -q '^==> Installed\. Smoke-test:' '$TMP/lock-install.log'"
 
+# ===== row 36 (review 44 §4): the CONSOLE jar gets the same treatment. A running console holds its
+# jar open on Windows exactly as a running daemon does. The stub refuses the rename of the jar(s)
+# named by LOCK_DAEMON_TOO, so one scenario can hold both and another only the console. The run must
+# continue past the refusal(s) — shims, gradle gate and Scheduled Task — and name EVERY jar left
+# behind in one INCOMPLETE summary, exiting non-zero.
+UI_LOCK_STUB="$TMP/uilockstub"; mkdir -p "$UI_LOCK_STUB"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$UI_LOCK_STUB/uname"
+cat > "$UI_LOCK_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TMP/uilock-schtasks.log"
+echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'
+exit 0
+EOF
+cat > "$UI_LOCK_STUB/mv" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  case "\$a" in
+    */corral-ui-all.jar)
+      echo "mv: cannot move '\$a': Device or resource busy" >&2; exit 1;;
+    */corral-daemon-all.jar)
+      if [ "\${LOCK_DAEMON_TOO:-1}" = 1 ]; then
+        echo "mv: cannot move '\$a': Device or resource busy" >&2; exit 1
+      fi;;
+  esac
+done
+exec "$REAL_MV" "\$@"
+EOF
+chmod +x "$UI_LOCK_STUB/uname" "$UI_LOCK_STUB/mv" "$UI_LOCK_STUB/schtasks"
+ps_stub "$UI_LOCK_STUB"
+mk_ui_lock_home() { # mk_ui_lock_home <home>
+  local h="$1" sdk="$1/Android/Sdk/platform-tools"
+  mkdir -p "$sdk" "$h/bin" "$h/.corral"; : > "$h/.bashrc"
+  printf '%s\n' '#!/bin/sh' 'echo "uilock-sdk-adb $@"' > "$sdk/adb"; chmod +x "$sdk/adb"
+  printf 'old daemon jar\n' > "$h/.corral/corral-daemon-all.jar"
+  printf 'old console jar\n' > "$h/.corral/corral-ui-all.jar"
+}
+UI_LOCK_HOME="$TMP/home-uilock"; mk_ui_lock_home "$UI_LOCK_HOME"
+ui_lock_inode=$(ls -i "$UI_LOCK_HOME/.corral/corral-ui-all.jar" | cut -d' ' -f1)
+ui_lock_sha=$(sha256sum "$UI_LOCK_HOME/.corral/corral-ui-all.jar" | cut -d' ' -f1)
+: > "$TMP/uilock-schtasks.log"
+env HOME="$UI_LOCK_HOME" PATH="$UI_LOCK_STUB:$STUB:$PATH" LOCK_DAEMON_TOO=1 \
+  bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$UI_LOCK_HOME/Android/Sdk/platform-tools/adb" \
+  --jar "$JAR" --ui --home "$UI_LOCK_HOME" >"$TMP/uilock-install.log" 2>&1; rcuil=$?
+check "console jar locked: the install exits non-zero" test "$rcuil" -ne 0
+check "console jar locked: it does not claim to have installed the console jar" bash -c \
+  "! grep -q '^Installed: corral-ui jar' '$TMP/uilock-install.log'"
+check "console jar locked: says the console jar was NOT replaced, on the console's own terms" bash -c \
+  "grep -q 'corral-ui-all.jar was NOT replaced' '$TMP/uilock-install.log' && grep -q 'running console on Windows keeps its jar open' '$TMP/uilock-install.log'"
+check "console jar locked: the previous console jar is untouched (same inode, same bytes)" bash -c \
+  "[ \"\$(ls -i '$UI_LOCK_HOME/.corral/corral-ui-all.jar' | cut -d' ' -f1)\" = '$ui_lock_inode' ] && [ \"\$(sha256sum '$UI_LOCK_HOME/.corral/corral-ui-all.jar' | cut -d' ' -f1)\" = '$ui_lock_sha' ]"
+check "console jar locked: no half-written temp file is left beside either jar" bash -c \
+  "! ls '$UI_LOCK_HOME/.corral' | grep -q '\.new\.'"
+check "console jar locked: the run CONTINUED to the shims, gate and task" bash -c \
+  "cmp -s '$SRC/corral.bat' '$UI_LOCK_HOME/bin/corral.bat' && test -s '$UI_LOCK_HOME/.gradle/init.d/corral-gate.gradle.kts' && grep -q '/create /tn CorralDaemon' '$TMP/uilock-schtasks.log'"
+check "console jar locked: no second daemon was started (/run not attempted)" bash -c \
+  "! grep -q '/run /tn CorralDaemon' '$TMP/uilock-schtasks.log'"
+check "console jar locked: ONE summary names BOTH jars as NOT refreshed" \
+  grep -q '^==> Install INCOMPLETE — corral-daemon-all.jar and corral-ui-all.jar were NOT refreshed$' "$TMP/uilock-install.log"
+check "console jar locked: the summary lists both jar paths under NOT refreshed:" bash -c \
+  "sed -n '/^NOT refreshed:/,/^Everything else is current/p' '$TMP/uilock-install.log' | grep -q 'corral-daemon-all.jar' && sed -n '/^NOT refreshed:/,/^Everything else is current/p' '$TMP/uilock-install.log' | grep -q 'corral-ui-all.jar'"
+check "console jar locked: the summary names both remedies (stop the daemon, quit the console)" bash -c \
+  "grep -q 'schtasks /end /tn CorralDaemon' '$TMP/uilock-install.log' && grep -q 'quit the Corral console' '$TMP/uilock-install.log'"
+check "console jar locked: the run does not print a completed-install summary" bash -c \
+  "! grep -q '^==> Installed\. Smoke-test:' '$TMP/uilock-install.log'"
+
+# Console jar ONLY: the daemon jar was refreshed, so the task may be started; the summary must be
+# singular, still name the console, and the exit still non-zero.
+UI_ONLY_HOME="$TMP/home-uionly"; mk_ui_lock_home "$UI_ONLY_HOME"
+: > "$TMP/uilock-schtasks.log"
+env HOME="$UI_ONLY_HOME" PATH="$UI_LOCK_STUB:$STUB:$PATH" LOCK_DAEMON_TOO=0 \
+  bash "$SRC/install.sh" --java "$FAKE_JAVA" --adb "$UI_ONLY_HOME/Android/Sdk/platform-tools/adb" \
+  --jar "$JAR" --ui --home "$UI_ONLY_HOME" >"$TMP/uionly-install.log" 2>&1; rcuio=$?
+check "console jar only: the install exits non-zero" test "$rcuio" -ne 0
+check "console jar only: the summary names only the console jar" \
+  grep -q '^==> Install INCOMPLETE — corral-ui-all.jar was NOT refreshed$' "$TMP/uionly-install.log"
+check "console jar only: only the console jar is listed as not refreshed" bash -c \
+  "sed -n '/^NOT refreshed:/,/^Everything else is current/p' '$TMP/uionly-install.log' | grep -q 'corral-ui-all.jar' && ! sed -n '/^NOT refreshed:/,/^Everything else is current/p' '$TMP/uionly-install.log' | grep -q 'corral-daemon-all.jar'"
+check "console jar only: the daemon jar WAS refreshed and the task started" bash -c \
+  "cmp -s '$JAR' '$UI_ONLY_HOME/.corral/corral-daemon-all.jar' && grep -q '/run /tn CorralDaemon' '$TMP/uilock-schtasks.log'"
+check "console jar only: the trust line does not say the task was not started" bash -c \
+  "! grep -q 'definition refreshed; NOT started' '$TMP/uionly-install.log'"
+
 # ===== POSIX byte-for-byte guard: the Linux path must not change =====
 # Compare the current installer against the pre-change installer (the commit this row branched from,
 # ee9cc77) on identical POSIX sandboxes: same exit code, same messages, same installed files/content.
@@ -990,14 +1072,15 @@ else
   posix_snapshot "$TMP/posix-pre-bundle" posix-pre
   posix_snapshot "$TMP/posix-new-bundle" posix-new
   check "POSIX: exit code matches the pre-change installer" cmp -s "$TMP/posix-pre.rc" "$TMP/posix-new.rc"
-  # One message is deliberately rewritten by this change: the closing checklist hint now also names
-  # the bundle's own copy (review 43 §3), which a bundle-only reader needs. Everything else stays
-  # byte-pinned, including the whole install summary around it. This deletes that line from BOTH
-  # sides, so the line itself is pinned by its own assertion in the docs block below — nothing about
-  # it may be left unpinned.
-  sed '/^Cutover checklist (/d' "$TMP/posix-pre.log" > "$TMP/posix-pre.log.cmp"
-  sed '/^Cutover checklist (/d' "$TMP/posix-new.log" > "$TMP/posix-new.log.cmp"
-  check "POSIX: every message matches the pre-change installer (byte-for-byte, minus the rewritten checklist hint)" \
+  # The closing hint is deliberately rewritten (review 44 §5: the old one pointed at a checklist the
+  # guide no longer has). Everything else stays byte-pinned, including the whole install summary
+  # around it. BOTH hint pairs — the pre-change pair and the new pair — are deleted from BOTH sides,
+  # so the hint is pinned by its own assertion in the docs block below; nothing about it may be left
+  # unpinned.
+  hint_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\)'
+  sed -e "/$hint_re/d" "$TMP/posix-pre.log" > "$TMP/posix-pre.log.cmp"
+  sed -e "/$hint_re/d" "$TMP/posix-new.log" > "$TMP/posix-new.log.cmp"
+  check "POSIX: every message matches the pre-change installer (byte-for-byte, minus the rewritten guide hint)" \
     cmp -s "$TMP/posix-pre.log.cmp" "$TMP/posix-new.log.cmp"
   check "POSIX: installed files + contents match the pre-change installer" cmp -s "$TMP/posix-pre.files" "$TMP/posix-new.files"
 fi
@@ -2300,12 +2383,17 @@ check "docs: the README's cutover doc is a file named exactly as linked" test -f
 # listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.
 check "docs: no lowercase cutover.md shipped beside it (exact-name listing, so a case-insensitive host cannot fool it)" \
   bash -c "[ -z \"\$(ls '$DOCDIR' | grep -x cutover.md)\" ]"
-# The closing hint is the only pointer a bundle-only reader gets to the checklist, and the POSIX guard
+# The closing hint is the only pointer a bundle-only reader gets to the guide, and the POSIX guard
 # above deletes it from both logs before comparing — so pin it here, explicitly: it must be emitted,
-# and it must name the source doc AND the copy a bundle-only reader actually has.
-check "docs: the installer's closing hint names the source doc and the bundle's copy" grep -qxF \
-  "Cutover checklist (in the corral source repo, scripts/cutover.md; in the bundle, CUTOVER.md beside this installer): ~/bin/adb --version, corral devices, corral lease -- adb shell echo hi," \
-  "$TMP/install1.log"
+# name the copy a bundle-only reader actually has, and point at what the guide offers (review 44 §5:
+# it used to send readers to a cutover checklist the rewritten guide no longer contains).
+check "docs: the installer's closing hint points at the adoption guide, not a checklist" bash -c \
+  "grep -qxF 'Adoption guide (CUTOVER.md beside this installer; at the repo root in a source checkout): install, the claim/lease/wait loop, Gradle builds, emulators, the console, updates and known limits.' '$TMP/install1.log' && ! grep -q 'Cutover checklist' '$TMP/install1.log'"
+# SECURITY.md is linked from the guide's Updates section, so it must ship beside it (same class of
+# break as the missing cutover doc): a file named exactly as linked, in the bundle and in a checkout.
+check "docs: SECURITY.md ships beside the guide the link is in" test -f "$DOCDIR/SECURITY.md"
+check "docs: the guide's SECURITY.md link resolves" bash -c \
+  "grep -q '](SECURITY.md)' '$DOCDIR/CUTOVER.md'"
 doc_anchors=$(grep -E '^#+ ' "$DOCDIR/CUTOVER.md" | tr 'A-Z' 'a-z' \
   | sed -E 's/^#+ //; s/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')
 doc_frags=$(grep -oE '\]\(CUTOVER\.md#[a-z0-9-]+\)' "$DOCDIR/README.md" | sed -E 's/^\]\(CUTOVER\.md#//; s/\)$//')

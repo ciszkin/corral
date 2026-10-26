@@ -12,11 +12,13 @@ the same device.
 - **Selector FIFO queue** — a claim may select by `serial | model | os≥ | type | avd`
   (empty = any usable device). A request with `waitSeconds > 0` gets a **ticket** and the
   client polls it; a matching device is offered to the longest-waiting ticket in arrival
-  order. `corral wait` is the polling client and `corral queue` lists outstanding tickets.
-  A served `corral wait` returns its lease when the wait process exits — a hard kill is still
-  covered by the usual TTL/pid machinery; use `corral claim` when the device must stay held past
-  the calling process's lifetime, since a claim's TTL is the hold and its owner string is the
-  identity. `corral free` drops an owned lease and `corral status` names the current holders.
+  order. `corral lease --timeout S -- <cmd>` is the queue-and-hold form: it waits in that
+  queue, then runs the command with the served device leased until the command exits, so
+  the first waiter keeps the device and the next ticket gets the next one. `corral wait`
+  is the polling client that returns its lease when the wait process exits (poll, then
+  decide), and `corral queue` lists outstanding tickets. A `corral claim`'s TTL is the
+  hold and its owner string is the identity, so a claim outlives the process that made it.
+  `corral free` drops an owned lease and `corral status` names the current holders.
   An offer that is not polled within a short hold is dropped, and the device moves on. A queued
   ticket must keep being polled — one that goes quiet is dropped after ~30 s — and every freed,
   expired or reclaimed device goes to the longest-waiting ticket that is still polling. A ticket
@@ -84,7 +86,8 @@ the same device.
   `~/.config/corral/rules` from the jar default; `corral doctor` reports the state of
   every enforcement layer on demand.
 - **CLI** — `corral claim [--all|<serial>] [selector]`, `wait [--timeout S] [selector]`,
-  `queue`, `free [--all|<serial>]`, `renew <serial>`, `lease [--all] [selector] -- <cmd>`,
+  `queue`, `free [--all|<serial>]`, `renew <serial>`,
+  `lease [--all | --timeout S] [selector] -- <cmd>`,
   `screenshot <serial> [--out F]`, `events`, `check`, `owner`, `doctor`, `devices`, `status`,
   `avd [list|start A|stop A [--force]]` — all logic in the jar behind 3-line
   launcher shims, so it works for humans and agents alike.
@@ -151,8 +154,9 @@ the same device.
 - **Desktop UI** — `corral-ui [--url http://127.0.0.1:port]` (else `CORRAL_URL`, then the stored
   pref, default `http://127.0.0.1:8798`; the daemon is loopback-only, so `--url` picks a
   non-default local port unless the operator deliberately rebinds it) opens a Compose operator
-  console — **verified on JDK 17 (Linux) and JDK 25 (Windows)** with the bundled Skiko natives;
-  very new JDKs beyond 25 are untested. The daemon and CLI are unaffected either way. One six-section screen with a left rail and scrollspy — **Devices** (horizontal card
+  console — **verified on JDK 17 (Linux)**, with the Windows coverage stated once in
+  [CUTOVER.md § Windows](CUTOVER.md#windows); very new JDKs beyond those are untested. The daemon
+  and CLI are unaffected either way. One six-section screen with a left rail and scrollspy — **Devices** (horizontal card
   console: one six-section screen with a left rail and scrollspy — **Devices** (horizontal card
   carousel with paging chevrons, live thumbnails, holder and TTL countdown), **Emulators** (AVDs
   with running serials, a boot chip while booting, and start/stop), **Queue** (the wait list),
@@ -192,8 +196,9 @@ the same device.
 
 One headless Kotlin/Ktor daemon (`java -jar`, OS-agnostic), a Compose Desktop operator
 console, a native adb-wrapper twin (`.sh` / `.bat`), an SDK adb shim, a Gradle init.d gate,
-and the `corral` CLI. Install on
-a Linux host with `scripts/install.sh` or the self-contained `corral-installer/` bundle
+and the `corral` CLI. Install with `scripts/install.sh` or the self-contained
+`corral-installer/` bundle on a Linux host, or on Windows through the installer's Windows
+branch ([CUTOVER.md § Windows](CUTOVER.md#windows))
 (the installer manages the daemon unit, the shims, the SDK shim, and the gradle gate, and
 restores everything on `--uninstall`).
 
@@ -219,6 +224,6 @@ boot gate) and M7 the config/doctor API. Corral replaces the
 - ~~Emulator lifecycle management~~ — done (M6): list/start/stop AVDs over CLI, REST and MCP, the
   `CORRAL_EMULATOR` resolution, the `booted` gate with its boot-wait queue, and the console
   Emulators seat
-- Verified Windows/macOS support: the `.bat` delegates the gate to `corral gate`, the CLI
-  walks ancestry via `ProcessHandle` where `/proc` is absent, and the bash wrapper delegates
-  identity to `corral owner` there — real non-Linux-host verification is still outstanding
+- Windows support is stated once, in the guide: [CUTOVER.md § Windows](CUTOVER.md#windows)
+  covers the install target, the console on JDK 25, what was host-verified, and the two
+  remaining nuances (the `.bat` in-flight window and the jar-lock refusal)

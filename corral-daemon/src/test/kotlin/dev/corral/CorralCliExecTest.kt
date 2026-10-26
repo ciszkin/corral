@@ -228,6 +228,64 @@ class CorralCliExecTest {
         assertTrue(released, "a non-zero exit must still free the lease")
     }
 
+    // --- row 38: `lease`'s own flags are checked BEFORE a device is claimed, and its busy answer is
+    // --- the friendly line (holders + the queueing form), never the raw server JSON.
+
+    @Test fun leaseArgsSplitTimeoutAndCommand() {
+        val a = parseLeaseArgs(listOf("--timeout", "30", "--", "sh", "-c", "echo hi"))!!
+        assertEquals(30L, a.timeoutSeconds)
+        assertFalse(a.all)
+        assertEquals(listOf("sh", "-c", "echo hi"), a.cmd)
+    }
+
+    @Test fun leaseArgsAcceptEqualsTimeoutAndLegacyAll() {
+        val eq = parseLeaseArgs(listOf("--timeout=45", "--", "true"))!!
+        assertEquals(45L, eq.timeoutSeconds)
+        val legacy = parseLeaseArgs(listOf("--all", "echo", "hi"))!!
+        assertTrue(legacy.all)
+        assertEquals(listOf("echo", "hi"), legacy.cmd)
+    }
+
+    @Test fun leaseArgsLeaveOptionsAfterTheSeparatorToTheCommand() {
+        val a = parseLeaseArgs(listOf("--timeout", "5", "--", "sh", "-c", "--timeout 9"))!!
+        assertEquals(listOf("sh", "-c", "--timeout 9"), a.cmd)
+    }
+
+    @Test fun leaseArgsRejectUnknownFlagsBeforeTheSeparator() {
+        // the review's repro: `--modle` used to be claimed a device and run as the program (rc 127)
+        assertNull(parseLeaseArgs(listOf("--modle", "X", "--", "echo", "hi")))
+        assertNull(parseLeaseArgs(listOf("-x", "--", "echo", "hi")))
+    }
+
+    @Test fun leaseArgsRejectBadTimeoutAndAllPlusQueue() {
+        assertNull(parseLeaseArgs(listOf("--timeout", "--", "true")))
+        assertNull(parseLeaseArgs(listOf("--timeout", "soon", "--", "true")))
+        assertNull(parseLeaseArgs(listOf("--all", "--timeout", "30", "--", "true")))
+    }
+
+    @Test fun leaseBusyLineNamesHoldersAndTheQueueingForm() {
+        val line = busyLine(Selector(serial = "devA"),
+            """{"busy":[{"serial":"devA","owner":"alice","ttlLeft":1798}],"matching":2,"timedOut":false}""")
+        assertTrue("devA by alice" in line, line)
+        assertTrue("corral lease --timeout S -- <cmd>" in line, line)
+        assertFalse(line.contains("\"busy\""), "must not reprint the server JSON: $line")
+        assertFalse(line.contains("{"), "must not reprint the server JSON: $line")
+    }
+
+    @Test fun leaseBusyLineNamesTheBootingQueueFormAndAnEmptyMatch() {
+        val booting = busyLine(Selector(transport = "emulator"),
+            """{"busy":[],"matching":1,"timedOut":false,"booting":1}""")
+        assertTrue("1 emulator(s) booting" in booting, booting)
+        assertTrue("corral lease --timeout S --type emulator -- <cmd>" in booting, booting)
+        assertEquals("corral: no connected device matches [model=Nope]",
+            busyLine(Selector(model = "Nope"), """{"busy":[],"matching":0}"""))
+    }
+
+    @Test fun leaseBusyLineToleratesAnUnexpectedBody() {
+        val line = busyLine(Selector(), "<html>proxy error</html>")
+        assertTrue("no free device matches" in line, line)
+    }
+
     // --- row 33 F7: the doctor's unreachable-daemon hint names the platform's own supervisor ------
 
     @Test fun daemonDownHintIsPlatformAppropriate() {

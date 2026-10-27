@@ -39,9 +39,10 @@ the same device.
   forwarded (`CORRAL_EMULATOR_LAUNCHER=direct` forces the child-process path; unset auto-detects).
 - **Emulator boot gate & stop** — a freshly started AVD appears in the pool **unbooted** — not
   claimable until Android reports `sys.boot_completed=1`; a plain `corral claim --type emulator`
-  teaches that `corral wait --type emulator` queues until boot, and the queued ticket is served the
-  moment the flip lands. Stop is refused while the AVD is leased unless `--force` / `{"force":true}`
-  is given — the CLI and REST take a force; the MCP `stop_emulator` (and `free`) do not. Stopping
+  teaches that `corral lease --timeout S --type emulator -- <cmd>` queues until boot and then holds
+  the AVD for the command, and the queued ticket is served the moment the flip lands. Stop is
+  refused while the AVD is leased unless `--force` / `{"force":true}` is given — the CLI and REST
+  take a force; the MCP `stop_emulator` (and `free`) do not. Stopping
   an emulator releases its lease, and an emulator lease is dropped when its serial leaves the pool,
   while physical/WiFi leases survive a replug. `GET /api/emulators` carries an AVD's last log line
   as `error` only when its last run exited non-zero — a late boot failure or crash. A run that ends

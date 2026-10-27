@@ -24,6 +24,7 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.jar.JarFile
 import kotlin.system.exitProcess
@@ -202,6 +203,30 @@ internal fun launchFailure(program: String?, resolved: Boolean?, detail: String)
 }
 
 /**
+ * Stop [proc] and everything it started. Only a signal sent to this CLI's pid alone needs it: Ctrl-C
+ * and GNU `timeout` signal the whole process group, so the child already sees those. A supervisor's
+ * `kill <pid>` or `pkill -f 'corral lease'` does not reach the child, and without this the lease
+ * would go back (it is tied to this process) while the command keeps driving the device — the next
+ * waiter would start on a device still in use (review 45 §4).
+ *
+ * TERM for the tree, a short grace so a command can clean up, then KILL what is left. Bounded, so a
+ * shutdown hook cannot outlive a supervisor's own kill deadline. Returns true when the child was
+ * still running (a normal exit, where the command already ended, does nothing).
+ */
+internal fun stopChildTree(proc: Process, graceMillis: Long = 2000): Boolean {
+    if (!proc.isAlive) return false
+    val tree = proc.toHandle().descendants().toList() + proc.toHandle()
+    tree.forEach { runCatching { it.destroy() } }
+    val termDeadline = System.nanoTime() + graceMillis * 1_000_000
+    while (System.nanoTime() < termDeadline && tree.any { it.isAlive }) Thread.sleep(20)
+    val left = tree.filter { it.isAlive }
+    left.forEach { runCatching { it.destroyForcibly() } }
+    val killDeadline = System.nanoTime() + graceMillis * 1_000_000
+    while (System.nanoTime() < killDeadline && left.any { it.isAlive }) Thread.sleep(20)
+    return true
+}
+
+/**
  * Run the wrapped child, then hand the lease back no matter how it ends: a start failure and a
  * non-zero exit both fall through the finally. A start failure is an IOException (program missing)
  * or an IllegalArgumentException — a JVM started with `-Djdk.lang.Process.allowAmbiguousCommands=false`
@@ -209,15 +234,28 @@ internal fun launchFailure(program: String?, resolved: Boolean?, detail: String)
  * is still a launch failure, so it gets the same teaching message and 127. Both are reported as
  * such, so a program that cannot be started never reads as an unreachable daemon. [release] is
  * owner-scoped (see release), so a foreign lease is never touched.
+ *
+ * A signal that ends this process runs the shutdown hook, not the finally: it stops the child's
+ * tree FIRST and only then releases, so the device is never handed over while the command still
+ * runs. On the normal path the child is already reaped, the hook is removed, and the release is
+ * exactly what it was before.
  */
 internal fun runLeased(
     cmd: List<String>,
     resolved: Boolean?,
     build: () -> ProcessBuilder,
     release: () -> Unit,
-): Int =
-    try {
-        build().inheritIO().start().waitFor()
+): Int {
+    val child = AtomicReference<Process?>(null)
+    val released = AtomicBoolean(false)
+    val releaseOnce = { if (released.compareAndSet(false, true)) release() }
+    val stopHook = Thread({
+        child.get()?.let { runCatching { stopChildTree(it) } }
+        releaseOnce()
+    }, "corral-stop-child")
+    runCatching { Runtime.getRuntime().addShutdownHook(stopHook) }   // a signal mid-startup: no hook, the finally still releases
+    return try {
+        build().inheritIO().start().also { child.set(it) }.waitFor()
     } catch (e: IOException) {
         System.err.println(launchFailure(cmd.firstOrNull(), resolved, launchDetail(e)))
         127
@@ -225,8 +263,10 @@ internal fun runLeased(
         System.err.println(launchFailure(cmd.firstOrNull(), resolved, launchDetail(e)))
         127
     } finally {
-        release()
+        runCatching { Runtime.getRuntime().removeShutdownHook(stopHook) }   // fails while already shutting down; the hook then releases
+        releaseOnce()
     }
+}
 
 /**
  * `corral lease`'s own flags, split from the command. Everything after `--` is the command, so a
@@ -235,7 +275,7 @@ internal fun runLeased(
  */
 internal data class LeaseCliArgs(val all: Boolean, val timeoutSeconds: Long?, val cmd: List<String>)
 
-/** null = a usage error: unknown flag, missing/not-a-number timeout, or `--all` with `--timeout`. */
+/** null = a usage error: unknown flag, missing/negative/not-a-number timeout, or `--all` with `--timeout`. */
 internal fun parseLeaseArgs(args: List<String>): LeaseCliArgs? {
     var all = false
     var timeout: Long? = null
@@ -245,11 +285,11 @@ internal fun parseLeaseArgs(args: List<String>): LeaseCliArgs? {
             args[i] == "--" -> { i++; break }
             args[i] == "--all" -> { all = true; i++ }
             args[i] == "--timeout" -> {
-                timeout = args.getOrNull(i + 1)?.toLongOrNull() ?: return null
+                timeout = args.getOrNull(i + 1)?.toLongOrNull()?.takeIf { it >= 0 } ?: return null
                 i += 2
             }
             args[i].startsWith("--timeout=") -> {
-                timeout = args[i].substringAfter("=").toLongOrNull() ?: return null
+                timeout = args[i].substringAfter("=").toLongOrNull()?.takeIf { it >= 0 } ?: return null
                 i++
             }
             else -> return null
@@ -767,12 +807,13 @@ object CorralCli {
                 val (sel, rest0) = parseSelector(args.drop(1).toTypedArray())
                 val leaseArgs = parseLeaseArgs(rest0) ?: usage(2)
                 val cmd = leaseArgs.cmd
-                if (cmd.isEmpty()) {
-                    System.err.println("usage: corral lease [--all | --timeout S] [selector] -- <cmd>")
-                    exitProcess(2)
-                }
+                if (cmd.isEmpty()) usage(2)
                 val isGradle = cmd.firstOrNull()?.let { File(it).name } in setOf("gradle", "gradlew")
-                val queueSeconds = leaseArgs.timeoutSeconds?.takeIf { it > 0 }
+                val requested = leaseArgs.timeoutSeconds
+                // The daemon caps a ticket at MAX_WAIT_S; say so instead of letting "601" read as honest.
+                if (requested != null && requested > MAX_WAIT_S)
+                    System.err.println("corral: --timeout $requested clamped to ${MAX_WAIT_S}s (max $MAX_WAIT_S)")
+                val queueSeconds = requested?.takeIf { it > 0 }?.coerceAtMost(MAX_WAIT_S)
                 when {
                     leaseArgs.all -> {
                         val claimed = mutableListOf<String>()
@@ -898,7 +939,7 @@ object CorralCli {
         println("usage: corral devices|status|queue|owner|doctor|check [--owner <o>] [<serial>...]" +
             "|update [--apply]" +
             "|claim [--all|<serial>] [selector]|free [--all|<serial>]|renew <serial>" +
-            "|wait [--timeout S (max 600)] [selector]|lease [--all | --timeout S] [selector] -- <cmd>" +
+            "|wait [--timeout S (max 600)] [selector]|lease [--all | --timeout S (max 600)] [selector] -- <cmd>" +
             "|gate [--owner o] -- <adb args>" +
             "|screenshot <serial> [--out F]|events" +
             "|avd [list|start A|stop A [--force]]" +

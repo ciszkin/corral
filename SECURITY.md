@@ -35,8 +35,19 @@ bypass:
   `connected*AndroidTest` tasks because AGP bypasses the adb binary — bypassed
   by a build that does not use the installed Gradle gate.
 
-None of these layers is a security boundary against a hostile local process;
-they are guardrails for cooperating agents and humans.
+Two more bypasses are common enough to name, because they are the ones a
+developer hits without meaning to:
+
+- **ddmlib clients that talk to the adb server on `:5037` directly.** Android
+  Studio's Run/deploy, Logcat and Device Explorer do exactly this: no adb
+  binary, no Gradle install task, so all three layers miss them.
+- **`platform-tools/adb.real`**, the real binary that sits beside the SDK shim.
+  Anything that names it by absolute path is outside the shim layer (and, when
+  it does not go through `PATH`, the wrapper too).
+
+None of these layers — including the two above — is a security boundary against
+a hostile local process; they are guardrails for cooperating agents and humans,
+and a client that goes around adb entirely is outside all of them.
 
 ## The update channel's outbound surface
 

@@ -29,9 +29,12 @@ knowledge of the project.
 Windows is an **install target**: `install.sh` has a Windows branch that writes the
 `.bat` shims to `%USERPROFILE%\bin`, installs a Gradle gate, and runs the daemon from
 a per-user `CorralDaemon` Scheduled Task (there is no systemd and no `~/bin` shell
-shim). The desktop console is verified on Windows with JDK 25. The full checklist was
-host-verified on one Windows box. macOS is not an install target: the daemon and CLI
-are portable Java, but there is no installer, service or host verification for it.
+shim). The desktop console is verified on Windows with JDK 25, and Windows was
+host-verified on one box for the install and uninstall paths, the per-user
+`CorralDaemon` Scheduled Task, the `.bat` shims (including a call in flight across
+an install), and the process-ancestry identity walk. macOS is not an install
+target: the daemon and CLI are portable Java, but there is no installer, service
+or host verification for it.
 
 Two Windows nuances remain, and both are reported by the installer rather than hidden:
 
@@ -186,9 +189,11 @@ corral avd stop Pixel_7_API_34          # refused while leased; --force override
 ```
 
 A freshly started AVD joins the pool **unbooted** and is not claimable until
-Android reports boot complete. `corral wait --type emulator` queues until the
-flip lands, and the queued ticket is served the moment it does; a plain
-`corral claim --type emulator` teaches you the same. When the daemon runs as
+Android reports boot complete. `corral lease --timeout S --type emulator -- <cmd>`
+queues until the flip lands, then runs the command **holding** that AVD; a plain
+`corral claim --type emulator` teaches you the same. (`corral wait --type emulator`
+waits for the flip too, but it hands the lease back when it exits, so it is the
+poll-then-decide form — wrap work in `lease --timeout`.) When the daemon runs as
 the installed `corral.service` unit, each AVD runs in its own transient
 `systemd-run --user` unit that survives a daemon restart, with its output at
 `~/.corral/emulator-<avd>.log`. Stopping an emulator releases its lease.

@@ -228,6 +228,43 @@ class CorralCliExecTest {
         assertTrue(released, "a non-zero exit must still free the lease")
     }
 
+    // --- review 45 §4: a signal sent to the CLI's pid alone must not leave the command running ---
+    // (Ctrl-C and GNU `timeout` already signal the whole group; a supervisor's `kill <pid>` does not.)
+
+    @Test fun stopChildTreeStopsTheCommandAndItsChildren() {
+        val proc = ProcessBuilder("sh", "-c", "sleep 300 & wait").start()
+        val descendants = waitForDescendants(proc)
+        assertTrue(descendants.isNotEmpty(), "the shell must have a running child to stop")
+        assertTrue(stopChildTree(proc, graceMillis = 500))
+        assertFalse(proc.isAlive, "the wrapped command itself must be stopped")
+        assertTrue(descendants.none { it.isAlive }, "every descendant must be stopped too")
+    }
+
+    @Test fun stopChildTreeForcesWhatIgnoresTerm() {
+        // `trap '' TERM` also leaves every exec'd child ignoring it, so only the forcible step ends this.
+        val proc = ProcessBuilder("sh", "-c", "trap '' TERM; sleep 300 & wait").start()
+        val descendants = waitForDescendants(proc)
+        assertTrue(descendants.isNotEmpty(), "the shell must have a running child to stop")
+        assertTrue(stopChildTree(proc, graceMillis = 300))
+        assertFalse(proc.isAlive, "the shell ignored TERM and must still be stopped")
+        assertTrue(descendants.none { it.isAlive }, "the ignoring child must still be stopped too")
+    }
+
+    @Test fun stopChildTreeDoesNothingWhenTheCommandAlreadyFinished() {
+        val proc = ProcessBuilder("sh", "-c", "exit 0").start()
+        proc.waitFor()
+        assertFalse(stopChildTree(proc), "a reaped command is not killed again on the normal path")
+    }
+
+    private fun waitForDescendants(proc: Process): List<ProcessHandle> {
+        repeat(100) {
+            val d = proc.toHandle().descendants().toList()
+            if (d.isNotEmpty()) return d
+            Thread.sleep(20)
+        }
+        return emptyList()
+    }
+
     // --- row 38: `lease`'s own flags are checked BEFORE a device is claimed, and its busy answer is
     // --- the friendly line (holders + the queueing form), never the raw server JSON.
 
@@ -261,6 +298,12 @@ class CorralCliExecTest {
         assertNull(parseLeaseArgs(listOf("--timeout", "--", "true")))
         assertNull(parseLeaseArgs(listOf("--timeout", "soon", "--", "true")))
         assertNull(parseLeaseArgs(listOf("--all", "--timeout", "30", "--", "true")))
+    }
+
+    @Test fun leaseArgsRejectNegativeTimeouts() {
+        // `--timeout -5` used to read as "don't wait" and fail as busy; it is a usage error (rc 2).
+        assertNull(parseLeaseArgs(listOf("--timeout", "-5", "--", "true")))
+        assertNull(parseLeaseArgs(listOf("--timeout=-5", "--", "true")))
     }
 
     @Test fun leaseBusyLineNamesHoldersAndTheQueueingForm() {

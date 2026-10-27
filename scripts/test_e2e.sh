@@ -295,6 +295,74 @@ check_lease_timeout_gives_up() {
     && ! grep -q RAN "$TMP/hold-timedout.out"
 }
 
+# --- review 45 §4: a SIGTERM sent to the CLI's pid ALONE stops the command before the lease goes
+# back, so the next waiter never starts on a device still being driven. Ctrl-C and GNU `timeout`
+# signal the whole process group and were never affected; a supervisor's `kill <pid>` (or
+# `pkill -f 'corral lease'`) reaches only the CLI, and the wrapped command has to be stopped here.
+running() { # running <pid>: alive and not a zombie
+  [ -r "/proc/$1/stat" ] || return 1
+  [ "$(sed 's/^.*) //' "/proc/$1/stat" | cut -d' ' -f1)" != Z ]
+}
+check_lease_sigterm_stops_child() {
+  claim_two || return 1
+  cat > "$TMP/erin-child.sh" <<'SH'
+echo $$ > "$1"
+sleep 300 &
+echo $! > "$2"
+wait
+SH
+  rm -f "$TMP/erin-child.pid" "$TMP/erin-grandchild.pid" "$TMP/carol-started"
+  CORRAL_OWNER=erin corral lease --serial dev1 --timeout 60 -- \
+    sh "$TMP/erin-child.sh" "$TMP/erin-child.pid" "$TMP/erin-grandchild.pid" >"$TMP/sigterm-erin.out" 2>&1 &
+  local erin=$! i held=0 served=0 gone=0 child grand
+  for i in $(seq 1 50); do
+    curl -s "$CORRAL_URL/api/queue" | grep -q '"owner":"erin"' && break; sleep 0.1
+  done
+  CORRAL_OWNER=carol corral lease --serial dev1 --timeout 60 -- \
+    sh -c "echo started > '$TMP/carol-started'; sleep 2" >"$TMP/sigterm-carol.out" 2>&1 &
+  local carol=$!
+  for i in $(seq 1 50); do
+    curl -s "$CORRAL_URL/api/queue" | grep -q '"owner":"carol"' && break; sleep 0.1
+  done
+  corral free dev1 >/dev/null 2>&1                    # alice frees it: erin (first) is served
+  for i in $(seq 1 60); do
+    if [ "$(status_owner dev1)" = erin ] && [ -s "$TMP/erin-grandchild.pid" ]; then held=1; break; fi
+    sleep 0.05
+  done
+  if [ "$held" != 1 ]; then
+    kill -9 "$erin" "$carol" 2>/dev/null; free_all; return 1
+  fi
+  child=$(cat "$TMP/erin-child.pid"); grand=$(cat "$TMP/erin-grandchild.pid")
+  kill -TERM "$erin" 2>/dev/null                        # the supervisor's kill: the CLI's pid only
+  for i in $(seq 1 200); do
+    [ -e "$TMP/carol-started" ] && { served=1; break; }
+    sleep 0.05
+  done
+  # The one assertion that matters: when carol's command starts, erin's tree is already gone.
+  if ! running "$child" && ! running "$grand"; then gone=1; fi
+  kill -9 "$child" "$grand" 2>/dev/null                 # only reachable on a regression; keep the box clean
+  wait "$erin" 2>/dev/null; wait "$carol" 2>/dev/null
+  free_all
+  [ "$served" = 1 ] && [ "$gone" = 1 ]
+}
+
+# --- review 45 §6: `lease`'s input handling says what it does. A negative timeout is a usage error
+# (rc 2, usage on stdout — claim's convention, not the old stderr line), the 600 s cap is stated in
+# the usage AND at the moment it bites, and a missing command uses the same stream.
+check_lease_input_handling() {
+  free_all
+  local out err rc
+  out=$(corral lease --serial dev1 --timeout -5 -- true 2>"$TMP/nits-neg.err"); rc=$?
+  err=$(cat "$TMP/nits-neg.err")
+  [ "$rc" = 2 ] && [ -z "$err" ] && printf '%s' "$out" | grep -q '^usage: corral ' || return 1
+  printf '%s' "$out" | grep -q 'lease \[--all | --timeout S (max 600)\]' || return 1
+  out=$(corral lease --serial dev1 -- 2>"$TMP/nits-missing.err"); rc=$?
+  err=$(cat "$TMP/nits-missing.err")
+  [ "$rc" = 2 ] && [ -z "$err" ] && printf '%s' "$out" | grep -q '^usage: corral ' || return 1
+  out=$(CORRAL_OWNER=nits corral lease --serial dev1 --timeout 601 -- true 2>"$TMP/nits-clamp.err"); rc=$?
+  [ "$rc" = 0 ] && grep -q 'clamped to 600s' "$TMP/nits-clamp.err"
+}
+
 # --- 5.8: a SIGKILLed `corral wait` is pruned by pid at dispatch; next served < 3s ---
 check_5_8() {
   claim_two || return 1
@@ -987,6 +1055,8 @@ check "5.8 SIGKILLed corral wait: next waiter served < 3s (pid prune)" check_5_8
 check "F1 served corral wait hands its lease back on exit" check_f1_handback
 check "44§3 queueing lease: the first waiter HOLDS the device, the next ticket gets it on exit" check_lease_timeout_holds
 check "44§3 queueing lease: a deadline gives up without running the command" check_lease_timeout_gives_up
+check "45§4 SIGTERM to the CLI stops its command before the next ticket is served" check_lease_sigterm_stops_child
+check "45§6 lease input: negative timeout rc 2, usage on stdout, the 600s cap stated" check_lease_input_handling
 check "5.9/5.11 quiet REST/MCP waiter skipped within staleness window, not offer hold" check_5_9
 if [ "${SLOW:-0}" = 1 ]; then
   check "1.14 poll-silence drop leaves corral queue within POLL_SILENCE_S + slack" check_1_14

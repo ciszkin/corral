@@ -98,6 +98,13 @@ mirror "$REPO_ROOT/README.md" "README.md"
 [ -f "$REPO_ROOT/SECURITY.md" ] || { echo "ERROR: missing $REPO_ROOT/SECURITY.md" >&2; exit 1; }
 mirror "$REPO_ROOT/SECURITY.md" "SECURITY.md"
 
+# The agent skill: the bundle ships it so a coding agent on the target host can read how to USE
+# Corral (the same file the house installs to ~/.agents/skills/corral on agent boxes). Nested —
+# the skill convention is one directory per skill, SKILL.md inside, named for the skill.
+[ -f "$REPO_ROOT/skills/corral/SKILL.md" ] || { echo "ERROR: missing $REPO_ROOT/skills/corral/SKILL.md" >&2; exit 1; }
+mkdir -p "$BUNDLE/skills/corral"
+mirror "$REPO_ROOT/skills/corral/SKILL.md" "skills/corral/SKILL.md"
+
 # The shipped cutover document is the TRACKED repo-root CUTOVER.md. scripts/cutover.md (the long
 # internal checklist) is NOT in git, so a bundle built from it is empty in CI and in the release
 # workflow — and the README's [CUTOVER.md](CUTOVER.md#updates) link then goes nowhere again. It ships

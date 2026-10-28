@@ -72,7 +72,9 @@ import kotlinx.serialization.json.decodeFromJsonElement
 
 @Serializable data class CancelledResponse(val cancelled: Boolean)
 
-@Serializable data class RenewRequest(val owner: String, val ttlSeconds: Long = 1800)
+@Serializable data class RenewRequest(val owner: String, val ttlSeconds: Long = 1800,
+                                      /** Command pids the holder is reporting; empty leaves the lease's own list alone. */
+                                      val pids: List<Long> = emptyList())
 
 @OptIn(ExperimentalSerializationApi::class)
 @Serializable data class ConfigRules(
@@ -603,7 +605,7 @@ fun Application.corralModule(env: AppEnv) {
         post("/api/leases/{serial}/renew") {
             if (call.rejectsForeignOrigin()) return@post
             val req = call.receive<RenewRequest>()
-            try { call.respond(env.leases.renew(call.parameters["serial"]!!, req.owner, req.ttlSeconds)) }
+            try { call.respond(env.leases.renew(call.parameters["serial"]!!, req.owner, req.ttlSeconds, req.pids)) }
             catch (e: IllegalStateException) { call.respond(HttpStatusCode.Conflict, mapOf("error" to e.message)) }
         }
     }

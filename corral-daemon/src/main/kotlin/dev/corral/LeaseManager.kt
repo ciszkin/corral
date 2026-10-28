@@ -166,11 +166,18 @@ class LeaseManager(private val devices: () -> List<Device>,
         Unit
     }
 
-    suspend fun renew(serial: String, owner: String, ttl: Long = 1800): Lease = mutex.withLock {
+    /**
+     * Extend a lease's TTL, and (row 42, review 46 §2) register the pids of the command it is running.
+     * A SIGKILLed CLI runs no hook, so the command outlives it; [pids] lets the prune see that. The
+     * caller reports immediately after `start()`, and an empty list leaves the registered pids alone.
+     */
+    suspend fun renew(serial: String, owner: String, ttl: Long = 1800,
+                      pids: List<Long> = emptyList()): Lease = mutex.withLock {
         reclaimIfNeeded(serial)
         val l = leases[serial] ?: throw IllegalStateException("no lease on $serial")
         if (l.owner != owner) throw IllegalStateException("lease on $serial is not yours")
-        l.copy(expiresAt = clock() + ttl, pendingAccept = false)
+        l.copy(expiresAt = clock() + ttl, pendingAccept = false,
+               pids = if (pids.isEmpty()) l.pids else pids)
             .also { leases[serial] = it; db?.upsertLease(it) }
     }
 
@@ -287,7 +294,13 @@ class LeaseManager(private val devices: () -> List<Device>,
             } }
     }
 
-    private fun isDead(l: Lease) = isDeadPid(l.pid)
+    /**
+     * A lease whose holder is gone. The holder's own pid is not the whole truth: the command it
+     * started (registered in [Lease.pids]) outlives a SIGKILLed CLI, so the lease is dead only once
+     * every registered pid is gone too. The TTL still bounds it — this frees earlier, never later.
+     */
+    private fun isDead(l: Lease) =
+        isDeadPid(l.pid) && l.pids.none { it != 0L && ProcessHandle.of(it).isPresent }
     private fun isDeadPid(pid: Long) = pid != 0L && ProcessHandle.of(pid).isEmpty
 
     private fun busyFor(selector: Selector, timedOut: Boolean = false): LeaseBusyException {

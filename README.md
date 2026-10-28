@@ -14,7 +14,10 @@ the same device.
   client polls it; a matching device is offered to the longest-waiting ticket in arrival
   order. `corral lease --timeout S -- <cmd>` is the queue-and-hold form: it waits in that
   queue, then runs the command with the served device leased until the command exits, so
-  the first waiter keeps the device and the next ticket gets the next one. `corral wait`
+  the first waiter keeps the device and the next ticket gets the next one. `SIGTERM`,
+  `SIGINT` and `SIGHUP` stop the command's tree before the lease goes back; a `SIGKILL`ed
+  CLI cannot, so the lease also carries the command's pid and holds the device while that
+  command lives (bounded by the TTL — this is not SIGKILL safety). `corral wait`
   is the polling client that returns its lease when the wait process exits (poll, then
   decide), and `corral queue` lists outstanding tickets. A `corral claim`'s TTL is the
   hold and its owner string is the identity, so a claim outlives the process that made it.
@@ -50,7 +53,9 @@ the same device.
   no `error`: `stop` rotates the log to `~/.corral/emulator-<avd>.log.1` (keeping the evidence) and
   clears the exit status, and every start writes a fresh log.
 - **Exclusive leases** — TTL + holder-PID liveness: a crashed holder frees a device
-  instantly (when a pid is recorded) or within a bounded TTL; leases survive daemon
+  instantly (when a pid is recorded) or within a bounded TTL; a lease also carries the
+  pids of the command its CLI started, so a killed CLI does not free a device its command
+  is still driving. Leases survive daemon
   restarts via SQLite (WAL), with an append-only audit log.
 - **Per-agent identity** — lease owners are per agent session, not per unix user. One
   declared identifier (`CORRAL_OWNER`) wins; otherwise the owner derives from process

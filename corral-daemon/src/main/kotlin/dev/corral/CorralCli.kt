@@ -238,12 +238,14 @@ internal fun stopChildTree(proc: Process, graceMillis: Long = 2000): Boolean {
  * A signal that ends this process runs the shutdown hook, not the finally: it stops the child's
  * tree FIRST and only then releases, so the device is never handed over while the command still
  * runs. On the normal path the child is already reaped, the hook is removed, and the release is
- * exactly what it was before.
+ * exactly what it was before. SIGKILL runs no hook at all, so [onStart] gets the started child to
+ * register its pid with the daemon (row 42, review 46 §2); a failure there never fails the command.
  */
 internal fun runLeased(
     cmd: List<String>,
     resolved: Boolean?,
     build: () -> ProcessBuilder,
+    onStart: (Process) -> Unit = {},
     release: () -> Unit,
 ): Int {
     val child = AtomicReference<Process?>(null)
@@ -255,7 +257,7 @@ internal fun runLeased(
     }, "corral-stop-child")
     runCatching { Runtime.getRuntime().addShutdownHook(stopHook) }   // a signal mid-startup: no hook, the finally still releases
     return try {
-        build().inheritIO().start().also { child.set(it) }.waitFor()
+        build().inheritIO().start().also { child.set(it); runCatching { onStart(it) } }.waitFor()
     } catch (e: IOException) {
         System.err.println(launchFailure(cmd.firstOrNull(), resolved, launchDetail(e)))
         127
@@ -506,6 +508,23 @@ object CorralCli {
         }
     }
 
+    /**
+     * Tell the daemon which pids are still driving [serial] — this CLI and the command it just
+     * started. A SIGKILLed CLI runs no shutdown hook, so without this the daemon would prune the
+     * lease on the CLI's dead pid and hand a still-busy device to the next ticket (review 46 §2).
+     * Owner-scoped by the renew, bounded, and best-effort: an unreachable daemon leaves the old
+     * pid/TTL machinery in charge and never changes what the command returns.
+     */
+    private fun registerPids(serial: String, pids: List<Long>) {
+        runCatching {
+            http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/$serial/renew"))
+                .timeout(Duration.ofSeconds(2))
+                .method("POST", HttpRequest.BodyPublishers.ofString(
+                    Json.encodeToString(RenewRequest(owner = owner, pids = pids))))
+                .header("Content-Type", "application/json").build(), HttpResponse.BodyHandlers.ofString())
+        }
+    }
+
     /** Claim one free device; retries on a raced busy (409 {"busy":...}), null when none free. */
     private fun claimFree(owner: String, pid: Long, selector: Selector = Selector()): String? {
         repeat(5) {
@@ -587,7 +606,9 @@ object CorralCli {
     /**
      * Run [cmd] holding [serial]: `ANDROID_SERIAL` and `CORRAL_OWNER` exported, the configured adb's
      * directory on PATH, and the lease returned however the command ends. This CLI process outlives
-     * the child, so the pid recorded on the lease keeps it held for exactly the command's lifetime.
+     * the child, so the pid recorded on the lease keeps it held for exactly the command's lifetime —
+     * and for a CLI that is SIGKILLed instead of signalled, the child's own pid is registered with
+     * the daemon as soon as it starts (review 46 §2).
      */
     private fun runHolding(serial: String, cmd: List<String>): Int {
         var resolved: Boolean? = null
@@ -597,7 +618,9 @@ object CorralCli {
                 environment()["ANDROID_SERIAL"] = serial
                 environment()["CORRAL_OWNER"] = owner
             }.withAdbOnPath()
-        }) { release(serial) }
+        }, onStart = { child -> registerPids(serial, listOf(ProcessHandle.current().pid(), child.pid())) }) {
+            release(serial)
+        }
     }
 
     @JvmStatic
@@ -830,6 +853,8 @@ object CorralCli {
                             ProcessBuilder(launchArgv).apply {
                                 environment()["CORRAL_OWNER"] = owner
                             }.withAdbOnPath()
+                        }, onStart = { child ->
+                            claimed.forEach { registerPids(it, listOf(pid, child.pid())) }
                         }) { claimed.forEach { release(it) } }
                         exitProcess(rc)
                     }

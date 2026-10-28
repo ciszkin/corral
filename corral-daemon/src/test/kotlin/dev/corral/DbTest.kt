@@ -57,6 +57,14 @@ class DbTest {
         assertEquals(77, db.loadLeases().single().offeredAt)
     }
 
+    /** Row 42: the registered command pids survive a daemon restart with the lease they protect. */
+    @Test fun registeredPidsRoundTrip() {
+        val dir = createTempDirectory("corral")
+        val db = Db(dir.resolve("t.db"))
+        db.upsertLease(Lease("dev1", "agentA", 12, 99, pids = listOf(34, 56)))
+        assertEquals(listOf(34L, 56L), db.loadLeases().single().pids)
+    }
+
     @Test fun migratesLegacyDbWithoutOfferedAt() {
         val dir = createTempDirectory("corral")
         val f = dir.resolve("legacy.db")

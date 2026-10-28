@@ -1006,6 +1006,46 @@ class ApiTest {
         assertTrue(r.bodyAsText().contains("\"expiresAt\""))
     }
 
+    /**
+     * Row 42 (review 46 §2): a SIGKILLed CLI leaves its command running. The daemon must keep the
+     * lease while a pid the CLI registered is alive, so raw JSON on purpose — the field is additive
+     * and a daemon that ignores it frees the device while the command drives it.
+     */
+    @Test fun registeredChildPidKeepsTheLeaseAfterTheCliPidIsGone() = withApi { c ->
+        val cli = sleepingProcess(); val child = sleepingProcess()
+        try {
+            val live = child.pid()
+            c.post("/api/leases") { contentType(ContentType.Application.Json)
+                setBody("""{"selector":{"serial":"dev1"},"owner":"agentA","pid":${cli.pid()}}""") }
+            val r = c.post("/api/leases/dev1/renew") { contentType(ContentType.Application.Json)
+                setBody("""{"owner":"agentA","pids":[$live]}""") }
+            assertEquals(HttpStatusCode.OK, r.status)
+            assertTrue(r.bodyAsText().contains("\"pids\":[$live]"), "carried verbatim: ${r.bodyAsText()}")
+            cli.destroyForcibly(); cli.waitFor()          // the CLI's pid alone is gone; the command is not
+            // the next claim sweeps first: the CLI's pid is gone, the child's is not, so nothing is freed
+            val busy = c.post("/api/leases") { contentType(ContentType.Application.Json)
+                setBody("""{"selector":{"serial":"dev1"},"owner":"agentB"}""") }
+            assertEquals(HttpStatusCode.Conflict, busy.status)
+        } finally { cli.destroyForcibly(); child.destroyForcibly() }
+    }
+
+    @Test fun leaseFreesOnceEveryRegisteredPidIsGone() = withApi { c ->
+        val cli = sleepingProcess(); val child = sleepingProcess()
+        try {
+            c.post("/api/leases") { contentType(ContentType.Application.Json)
+                setBody("""{"selector":{"serial":"dev1"},"owner":"agentA","pid":${cli.pid()}}""") }
+            c.post("/api/leases/dev1/renew") { contentType(ContentType.Application.Json)
+                setBody("""{"owner":"agentA","pids":[${child.pid()}]}""") }
+            cli.destroyForcibly(); child.destroyForcibly(); cli.waitFor(); child.waitFor()
+            val r = c.post("/api/leases") { contentType(ContentType.Application.Json)
+                setBody("""{"selector":{"serial":"dev1"},"owner":"agentB"}""") }
+            assertEquals(HttpStatusCode.OK, r.status)
+        } finally { cli.destroyForcibly(); child.destroyForcibly() }
+    }
+
+    /** A process that stays alive until it is killed: real pid liveness, no guessing. */
+    private fun sleepingProcess() = ProcessBuilder("sh", "-c", "exec sleep 300").start()
+
     @Test fun renewRefusesForeigner() = withApi { c ->
         c.post("/api/leases") { contentType(ContentType.Application.Json)
             setBody("""{"selector":{"serial":"dev1"},"owner":"agentA"}""") }

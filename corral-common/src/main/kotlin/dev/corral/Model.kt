@@ -26,7 +26,10 @@ data class Device(val serial: String, val state: String,
 @Serializable
 data class Lease(val serial: String, val owner: String, val pid: Long = 0,
                  val expiresAt: Long, val pendingAccept: Boolean = false,
-                 val offeredAt: Long = 0)
+                 val offeredAt: Long = 0,
+                 /** Pids the holder registered as still driving this device — the command it started.
+                  *  Survives the holder's own pid, so a SIGKILLed CLI does not free a live device. */
+                 val pids: List<Long> = emptyList())
 
 @Serializable data class DeviceStatus(val serial: String, val lease: Lease?, val booted: Boolean = true)
 

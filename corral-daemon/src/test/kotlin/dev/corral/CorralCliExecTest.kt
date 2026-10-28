@@ -228,6 +228,23 @@ class CorralCliExecTest {
         assertTrue(released, "a non-zero exit must still free the lease")
     }
 
+    // --- row 42 (review 46 §2): the CLI hands the daemon the pid of the command it started, so a
+    // SIGKILLed CLI's lease lives while that command does. ---
+
+    @Test fun runLeasedReportsTheCommandItStarted() {
+        var seen: Process? = null
+        val rc = runLeased(listOf("sh"), null, { ProcessBuilder("sh", "-c", "exit 3") },
+            onStart = { seen = it }) { }
+        assertEquals(3, rc)
+        assertEquals(3, seen!!.waitFor(), "the reported process is the wrapped command itself")
+    }
+
+    @Test fun aFailedPidRegistrationNeverFailsTheCommand() {
+        val rc = runLeased(listOf("sh"), null, { ProcessBuilder("sh", "-c", "exit 4") },
+            onStart = { error("daemon unreachable") }) { }
+        assertEquals(4, rc, "an unreachable daemon must never change the command's own result")
+    }
+
     // --- review 45 §4: a signal sent to the CLI's pid alone must not leave the command running ---
     // (Ctrl-C and GNU `timeout` already signal the whole group; a supervisor's `kill <pid>` does not.)
 

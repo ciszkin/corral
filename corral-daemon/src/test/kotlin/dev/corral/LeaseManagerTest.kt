@@ -96,6 +96,39 @@ class LeaseManagerTest {
         assertTrue(e is IllegalStateException)
     }
 
+    // Row 42 (review 46 §2): the CLI reports the command it started, so a SIGKILLed CLI's lease
+    // lives while that command does, and frees once both are gone. Real pids, killed for real.
+    @Test fun liveRegisteredChildPidKeepsALeaseWhoseCliIsGone() = runTest {
+        val mgr = freshMgr()
+        val cli = ProcessBuilder("sh", "-c", "exec sleep 300").start()
+        val child = ProcessBuilder("sh", "-c", "exec sleep 300").start()
+        mgr.claim("dev1", "agentA", pid = cli.pid(), ttl = 99999)
+        mgr.renew("dev1", "agentA", pids = listOf(child.pid()))
+        cli.destroyForcibly(); cli.waitFor()                       // the CLI is SIGKILLed; its child is not
+        assertTrue(runCatching { mgr.claim("dev1", "agentB") }.exceptionOrNull() is LeaseBusyException,
+            "a live registered pid must keep the CLI's lease")
+        assertEquals(listOf(child.pid()), mgr.snapshot["dev1"]!!.pids)
+        child.destroyForcibly(); child.waitFor()
+    }
+
+    @Test fun leaseFreedWhenTheCliPidAndEveryRegisteredPidAreGone() = runTest {
+        val mgr = freshMgr()
+        val cli = ProcessBuilder("sh", "-c", "exec sleep 300").start()
+        val child = ProcessBuilder("sh", "-c", "exec sleep 300").start()
+        mgr.claim("dev1", "agentA", pid = cli.pid(), ttl = 99999)
+        mgr.renew("dev1", "agentA", pids = listOf(child.pid()))
+        cli.destroyForcibly(); child.destroyForcibly(); cli.waitFor(); child.waitFor()
+        assertEquals("dev1", mgr.claim("dev1", "agentB")?.serial)
+    }
+
+    @Test fun renewWithoutPidsLeavesTheRegisteredOnesAlone() = runTest {
+        val mgr = freshMgr()
+        val child = ProcessHandle.current().pid()
+        mgr.claim("dev1", "agentA", pid = child, ttl = 10)
+        mgr.renew("dev1", "agentA", pids = listOf(child))
+        assertEquals(listOf(child), mgr.renew("dev1", "agentA", ttl = 20).pids)
+    }
+
     @Test fun sweepRemovesExpiredKeepsLive() = runTest {
         val mgr = freshMgr()
         mgr.claim("dev1", "agentA", ttl = 10)

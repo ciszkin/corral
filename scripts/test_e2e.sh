@@ -346,6 +346,57 @@ SH
   [ "$served" = 1 ] && [ "$gone" = 1 ]
 }
 
+# --- review 46 §2: SIGKILL runs no hook, so the CLI's command is orphaned and still driving the
+# device. The CLI registers the child's pid when it starts it, so the daemon must NOT serve the next
+# ticket while that child lives — and must free the device once the child is gone. Against the
+# pre-change daemon this row fails twice: /api/status carries no "pids", and carol is served ~3s
+# after the kill while erin's child is still running.
+check_lease_sigkill_keeps_orphan() {
+  claim_two || return 1
+  cat > "$TMP/kill-child.sh" <<'SH'
+echo $$ > "$1"
+exec sleep 300
+SH
+  rm -f "$TMP/kill-child.pid" "$TMP/kill-carol-started"
+  CORRAL_OWNER=erin corral lease --serial dev1 --timeout 60 -- \
+    sh "$TMP/kill-child.sh" "$TMP/kill-child.pid" >"$TMP/kill-erin.out" 2>&1 &
+  local erin=$! i held=0 alive=0 notserved=0 freed=0 child
+  for i in $(seq 1 50); do
+    curl -s "$CORRAL_URL/api/queue" | grep -q '"owner":"erin"' && break; sleep 0.1
+  done
+  CORRAL_OWNER=carol corral lease --serial dev1 --timeout 60 -- \
+    sh -c "echo started > '$TMP/kill-carol-started'; sleep 2" >"$TMP/kill-carol.out" 2>&1 &
+  local carol=$!
+  for i in $(seq 1 50); do
+    curl -s "$CORRAL_URL/api/queue" | grep -q '"owner":"carol"' && break; sleep 0.1
+  done
+  corral free dev1 >/dev/null 2>&1                    # alice frees it: erin (first) is served
+  for i in $(seq 1 60); do
+    if [ "$(status_owner dev1)" = erin ] && [ -s "$TMP/kill-child.pid" ] \
+       && curl -s "$CORRAL_URL/api/status" | grep -q '"pids":\[[0-9]'; then held=1; break; fi
+    sleep 0.05
+  done
+  if [ "$held" != 1 ]; then
+    kill -9 "$erin" "$carol" 2>/dev/null; free_all; return 1
+  fi
+  child=$(cat "$TMP/kill-child.pid")
+  kill -9 "$erin" 2>/dev/null; wait "$erin" 2>/dev/null   # the CLI only: no hook can run
+  # Past the daemon's 10s expiry sweep, so "not served" is a real hold, not a slow reconcile; the
+  # pre-change daemon prunes on the CLI's pid alone and has served carol long before this.
+  sleep 12
+  running "$child" && alive=1
+  [ ! -e "$TMP/kill-carol-started" ] && notserved=1
+  kill -9 "$child" 2>/dev/null                             # the orphan finally goes
+  for i in $(seq 1 300); do
+    [ -e "$TMP/kill-carol-started" ] && { freed=1; break; }
+    sleep 0.05
+  done
+  kill -9 "$carol" 2>/dev/null; wait "$carol" 2>/dev/null
+  free_all
+  [ "$alive" = 1 ] && [ "$notserved" = 1 ] && [ "$freed" = 1 ]
+}
+
+
 # --- review 45 §6: `lease`'s input handling says what it does. A negative timeout is a usage error
 # (rc 2, usage on stdout — claim's convention, not the old stderr line), the 600 s cap is stated in
 # the usage AND at the moment it bites, and a missing command uses the same stream.
@@ -1056,6 +1107,7 @@ check "F1 served corral wait hands its lease back on exit" check_f1_handback
 check "44§3 queueing lease: the first waiter HOLDS the device, the next ticket gets it on exit" check_lease_timeout_holds
 check "44§3 queueing lease: a deadline gives up without running the command" check_lease_timeout_gives_up
 check "45§4 SIGTERM to the CLI stops its command before the next ticket is served" check_lease_sigterm_stops_child
+check "46§2 SIGKILL to the CLI keeps its orphan's device; freed when the orphan goes" check_lease_sigkill_keeps_orphan
 check "45§6 lease input: negative timeout rc 2, usage on stdout, the 600s cap stated" check_lease_input_handling
 check "5.9/5.11 quiet REST/MCP waiter skipped within staleness window, not offer hold" check_5_9
 if [ "${SLOW:-0}" = 1 ]; then

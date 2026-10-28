@@ -167,6 +167,7 @@ MARKER_DAEMON_BAT='rem corral daemon launcher'
 # hard-coded list there is exactly the lie row 15 set out to remove).
 REMOVED=""
 KEPT_SHIMS=""
+KEPT_SKILL=""
 note_removed() { REMOVED="$REMOVED$1, "; }
 remove_shim() { # remove_shim <path> <marker> <label>
   [[ -e "$1" ]] || return 0
@@ -175,6 +176,14 @@ remove_shim() { # remove_shim <path> <marker> <label>
   else
     KEPT_SHIMS="$KEPT_SHIMS $1"
   fi
+}
+
+# The agent skill ships in the bundle as skills/corral/SKILL.md; a source checkout keeps it at the
+# repo root. A bundle copy wins when both exist (the bundle's install.sh is the one running).
+resolve_skill() {
+  if [[ -f "$SCRIPT_DIR/skills/corral/SKILL.md" ]]; then echo "$SCRIPT_DIR/skills/corral/SKILL.md"; return 0; fi
+  if [[ -f "$REPO_ROOT/skills/corral/SKILL.md" ]]; then echo "$REPO_ROOT/skills/corral/SKILL.md"; return 0; fi
+  return 1
 }
 
 if [[ $UNINSTALL -eq 1 ]]; then
@@ -362,6 +371,19 @@ EOF
     rm -f "$ICON"; note_removed "Corral icon"
   fi
   rm -f "$ICON.sha"
+  # The agent skill is ours only while it is byte-identical to the shipped copy: an agent may have
+  # edited it, and that edit is not ours to throw away. ~/.agents/skills is left in place — it is
+  # what declared this host an agent host in the first place.
+  SKILL_DST="$TARGET_HOME/.agents/skills/corral/SKILL.md"
+  if [[ -e "$SKILL_DST" ]]; then
+    if SKILL_SRC=$(resolve_skill) && cmp -s "$SKILL_SRC" "$SKILL_DST"; then
+      rm -f "$SKILL_DST"
+      rmdir "$TARGET_HOME/.agents/skills/corral" 2>/dev/null || true
+      note_removed "the corral agent skill (~/.agents/skills/corral/SKILL.md)"
+    else
+      KEPT_SKILL="$SKILL_DST"
+    fi
+  fi
   if command -v update-desktop-database >/dev/null 2>&1; then
     update-desktop-database "$TARGET_HOME/.local/share/applications" >/dev/null 2>&1 || true
   fi
@@ -402,6 +424,9 @@ EOF
   fi
   if [[ -n "$KEPT_SHIMS" ]]; then
     echo "Left alone (not installed by corral; unrecognised shim content):$KEPT_SHIMS"
+  fi
+  if [[ -n "$KEPT_SKILL" ]]; then
+    echo "Left alone (edited since install, or its shipped copy is unavailable — not byte-identical): $KEPT_SKILL"
   fi
   if [[ "$REMOVED" == *"~/bin/adb,"* ]]; then
     echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
@@ -742,6 +767,20 @@ else
     || { echo "ERROR: cannot install the executable adb wrapper at $BIN_DIR/adb." >&2; exit 1; }
   replace_file "$SCRIPT_DIR/corral" "$BIN_DIR/corral" "the corral shim" 755 \
     || { echo "ERROR: cannot install the corral shim at $BIN_DIR/corral." >&2; exit 1; }
+fi
+
+# The agent skill: a host declares an agent harness by already having ~/.agents/skills. Never create
+# ~/.agents from nothing, and replace the file atomically like the shims so a running agent reads a
+# whole file. Claude Code discovers skills under ~/.claude/skills/<name>/ instead (see the summary).
+if [[ -d "$TARGET_HOME/.agents/skills" ]]; then
+  if ! SKILL_SRC=$(resolve_skill); then
+    echo "ERROR: skills/corral/SKILL.md missing from the bundle; the agent skill was NOT installed." >&2
+    exit 1
+  fi
+  mkdir -p "$TARGET_HOME/.agents/skills/corral"
+  replace_file "$SKILL_SRC" "$TARGET_HOME/.agents/skills/corral/SKILL.md" "the corral agent skill" \
+    || { echo "ERROR: cannot install the agent skill at $TARGET_HOME/.agents/skills/corral/SKILL.md." >&2; exit 1; }
+  echo "Installed the corral agent skill (~/.agents/skills/corral/SKILL.md; Claude Code reads ~/.claude/skills/corral/)"
 fi
 
 if want_ui && [[ $IS_WINDOWS -eq 1 ]]; then

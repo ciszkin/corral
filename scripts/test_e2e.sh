@@ -414,6 +414,19 @@ check_lease_input_handling() {
   [ "$rc" = 0 ] && grep -q 'clamped to 600s' "$TMP/nits-clamp.err"
 }
 
+# --- review 47 §4 (carried from 46): `wait` gets the same input handling as `lease` — a negative
+# timeout is a usage error (rc 2, usage on stdout), and the 600 s cap is stated when it bites. ---
+check_wait_input_handling() {
+  free_all
+  local out err rc
+  out=$(corral wait --serial dev1 --timeout -5 2>"$TMP/wnits-neg.err"); rc=$?
+  err=$(cat "$TMP/wnits-neg.err")
+  [ "$rc" = 2 ] && [ -z "$err" ] && printf '%s' "$out" | grep -q '^usage: corral ' || return 1
+  printf '%s' "$out" | grep -q 'wait \[--timeout S (max 600)\]' || return 1
+  out=$(CORRAL_OWNER=wnits corral wait --serial dev1 --timeout 601 2>"$TMP/wnits-clamp.err"); rc=$?
+  [ "$rc" = 0 ] && [ -n "$out" ] && grep -q 'clamped to 600s' "$TMP/wnits-clamp.err"
+}
+
 # --- 5.8: a SIGKILLed `corral wait` is pruned by pid at dispatch; next served < 3s ---
 check_5_8() {
   claim_two || return 1
@@ -1109,6 +1122,7 @@ check "44§3 queueing lease: a deadline gives up without running the command" ch
 check "45§4 SIGTERM to the CLI stops its command before the next ticket is served" check_lease_sigterm_stops_child
 check "46§2 SIGKILL to the CLI keeps its orphan's device; freed when the orphan goes" check_lease_sigkill_keeps_orphan
 check "45§6 lease input: negative timeout rc 2, usage on stdout, the 600s cap stated" check_lease_input_handling
+check "47§4 wait input: negative timeout rc 2, usage on stdout, the 600s cap stated" check_wait_input_handling
 check "5.9/5.11 quiet REST/MCP waiter skipped within staleness window, not offer hold" check_5_9
 if [ "${SLOW:-0}" = 1 ]; then
   check "1.14 poll-silence drop leaves corral queue within POLL_SILENCE_S + slack" check_1_14

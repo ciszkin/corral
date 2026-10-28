@@ -35,7 +35,7 @@ with the served device leased until the command exits:
 
 ```sh
 corral lease --timeout 120 -- ./gradlew connectedAndroidTest
-corral lease --type emulator -- adb install app.apk
+corral lease --timeout 180 --type emulator -- adb install app.apk
 corral lease --timeout 60 --model Pixel_7 -- adb shell input keyevent 3
 ```
 
@@ -48,9 +48,12 @@ corral lease --timeout 60 --model Pixel_7 -- adb shell input keyevent 3
 - With no `--timeout`, a busy pool prints a self-teaching line naming the holders and this exact
   `--timeout` form on stderr and exits 1.
 
-The command sees: `ANDROID_SERIAL=<serial>`, `CORRAL_OWNER=<your identity>`, and the configured
-adb's directory prepended to `PATH` (so a bare `adb` inside the command resolves even in a
-session that has no platform-tools on `PATH`).
+The command sees: `ANDROID_SERIAL=<serial>`, `CORRAL_OWNER=<your identity>`, and — when the CLI
+can find an adb itself — that adb's directory prepended to `PATH`. The lookup is the CLI's own
+environment, never the daemon's config: `CORRAL_REAL_ADB` or `CORRAL_ADB`, then `ANDROID_HOME` /
+`ANDROID_SDK_ROOT` (and `%LOCALAPPDATA%\Android\Sdk` on Windows), then `~/Android/Sdk`. With none
+of those, nothing is prepended and a bare `adb` inside the command does not resolve at all, so set
+`CORRAL_ADB` on the CLI's environment if the daemon's adb lives elsewhere.
 
 **Or claim, use, free** when the work spans several commands or processes:
 
@@ -73,7 +76,8 @@ serial=$(corral wait --timeout 60)   # blocks until a matching device is offered
 
 It prints the serial and hands the lease back when the wait process exits, so the next ticket can
 take the device while you are still working on it. Use it only when you need to know which device
-you would get before deciding what to do.
+you would get before deciding what to do. `--timeout` takes the same 600 s cap (clamped with a
+warning) and the same rejection of a negative value as `lease`.
 
 **Selectors** for `claim`, `wait` and `lease` (empty = any usable device; they compose):
 
@@ -87,10 +91,10 @@ you would get before deciding what to do.
 (host health).
 
 **Identity.** `corral owner` prints `CORRAL_OWNER` if set, else a process-ancestry string
-(`proc:<comm>:<pid>:<starttime>`), else `user:$USER`. If your harness outlives a single process
-(per-prompt or per-tool-call), set `CORRAL_OWNER` to a stable name and keep it across commands —
-the gate only honours the lease of the owner that made it, so a drifting identity makes your own
-device read as someone else's.
+(`proc:<comm>:<pid>:<starttime>`), else `user:$USER`. If your harness starts a new process per
+prompt (so the ancestry changes between calls), set `CORRAL_OWNER` to a stable name and keep it
+across commands — the gate only honours the lease of the owner that made it, so a drifting identity
+makes your own device read as someone else's.
 
 ## The gate — why an adb call can be refused
 
@@ -112,19 +116,25 @@ Lease it first:
 status: corral status
 ```
 
-or `corral: lease check failed for emulator-5554: no live lease on emulator-5554` / `… is leased
-by <owner>`. The answer is to wrap the work in a lease, or to work on the device you do hold — not
-to retry the call, and not to find another adb.
+or `corral: lease check failed for devA: {"allowed":false,"reason":"no live lease on devA"}` / a
+`reason` naming the holder (`"devA is leased by <owner>, <n>s left"`). The reason is the daemon's
+raw JSON, so match on the `reason` substring; an exact match on the printed line does not work. The
+answer is to wrap the work in a lease, or to work on the device you do hold — not to retry the
+call, and not to find another adb.
 
 The read-only allowlist is the `readonly=` line of `~/.config/corral/rules` (override
 `CORRAL_RULES`); by default it is `devices,start-server,kill-server,track-devices,version,help` —
-the commands that never touch a device. A command on that list runs with no lease. `-s <serial>`
-and `ANDROID_SERIAL` are always lease-checked whatever the file says, and a missing rules file
-fails closed (every unpinned call is refused). `corral gate -- <adb args>` runs the same
-classification the wrapper does — that is how the Windows `.bat` twin reaches it — if you need to
-test one call. Do not edit that file to make your command pass: adding a device-touching name
-(`shell`, `install`, `push`, `pull`, `logcat`, …) disables the unpinned guard for it, for everyone
-on the host.
+the commands the gate lets through without a lease. That is **not** the same as harmless:
+`kill-server` and `start-server` act on the adb **server**, not on one device — `kill-server` drops
+every session's connection to every device at once, including another agent's `am instrument`,
+`logcat` or Gradle connected test; the gate allows an unleased `kill-server` even while someone
+else holds a device. Run either only when `corral status` shows no live leases, and otherwise ask
+the human. `-s <serial>` and `ANDROID_SERIAL` are always lease-checked whatever the file says, and
+a missing rules file fails closed: **every** call is refused — pinned, unpinned and read-only
+alike. `corral gate -- <adb args>` runs the same classification the wrapper does — that is how the
+Windows `.bat` twin reaches it — if you need to test one call. Do not edit that file to make your
+command pass: adding a device-touching name (`shell`, `install`, `push`, `pull`, `logcat`, …)
+disables the unpinned guard for it, for everyone on the host.
 
 **Documented bypasses — know them, don't use them.** The layers have known holes, and the threat
 model is cooperating agents, not a hostile local process:
@@ -185,8 +195,10 @@ reachability and device count, wedged emulators and their remedy, the SDK shim, 
 update state. Read it like this:
 
 - `daemon: ok (… 0 device(s))` plus a `devices: hint` line — the adb server's device list can go
-  empty after an `adb reconnect`; `adb kill-server && adb start-server` recovers. Only believe
-  "nothing is plugged in" after that, or ask the human.
+  empty after an `adb reconnect`; `adb kill-server && adb start-server` recovers, but both act on
+  the server, not one device, and `kill-server` drops every session's connection to every device.
+  Check `corral status` first and run them only when it shows no live leases; otherwise ask the
+  human. Only believe "nothing is plugged in" after that.
 - `sdk adb shim: skipped - unmanaged adb path (…)` — the configured adb is not the SDK shim, so the
   shim layer is not covering that path; the wrapper and the Gradle gate still are.
 - `rules: FAIL` — the rules file is missing or incomplete, so the gate is failing closed. Restart
@@ -202,10 +214,14 @@ Then, in order:
 4. A wedged emulator is named by doctor even when it has no pool serial yet.
 
 Windows: the CLI is `corral.bat`, and a `.bat`/`.cmd` caller must write `call corral …` — without
-`call`, cmd.exe transfers control to the shim and the caller's remaining lines never run. Doctor's
-`systemctl` hint is a dead end there; Windows runs a per-user `CorralDaemon` Scheduled Task.
+`call`, cmd.exe transfers control to the shim and the caller's remaining lines never run. Doctor
+names the platform's own hint: the `CorralDaemon` Scheduled Task (`schtasks /query /tn CorralDaemon`)
+on Windows, `systemctl --user status corral` on Linux.
 
 Where the docs are: `CUTOVER.md` in the install bundle (or the repo) is the adoption guide —
 requirements, install, core loop, selectors, Gradle, emulators, config, doctor, updates, uninstall,
 known limits; `README.md` in the repo describes the design; `SECURITY.md` holds the threat model
-and the bypass list; `scripts/corral-rules` is the default gate rules file.
+and the bypass list. The default gate rules file is `corral-rules` beside the installer in the
+bundle (`scripts/corral-rules` in a source checkout), installed as `~/.config/corral/rules`. This
+skill lives at `~/.agents/skills/corral/SKILL.md` on the house install; Claude Code reads
+`~/.claude/skills/<name>/` instead, so copy it there if that is your harness.

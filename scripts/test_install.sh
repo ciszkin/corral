@@ -77,6 +77,9 @@ UNIT="$TMPHOME/.config/systemd/user/corral.service"
 RULES="$TMPHOME/.config/corral/rules"
 DAEMON_ENV="$TMPHOME/.config/corral/daemon.env"
 GATE="$TMPHOME/.gradle/init.d/corral-gate.gradle.kts"
+# The shipped skill: beside install.sh in a bundle, at the repo root in a source checkout.
+SKILL_SRC="$SRC/skills/corral/SKILL.md"; [ -f "$SKILL_SRC" ] || SKILL_SRC="$ROOT/skills/corral/SKILL.md"
+SKILL_DST="$TMPHOME/.agents/skills/corral/SKILL.md"
 
 # ===== first install =====
 install_run >"$TMP/install1.log" 2>&1; rc=$?
@@ -92,6 +95,10 @@ check "9.1 unit has no sdkman path" bash -c "! grep -q sdkman '$UNIT'"
 check "9.2 ~/bin/adb installed + executable" test -x "$TMPHOME/bin/adb"
 check "9.2 ~/bin/corral installed + executable" test -x "$TMPHOME/bin/corral"
 check "9.2 ~/bin/adb is the corral wrapper" grep -q 'corral adb wrapper' "$TMPHOME/bin/adb"
+
+# 44: the skill lands only where an agent host declares itself, by having ~/.agents/skills. A host
+# without it must not grow a ~/.agents tree from nothing.
+check "44 skill: ~/.agents is never created from nothing" test ! -e "$TMPHOME/.agents"
 
 # 9.4 SDK shim
 check "9.4 SDK adb is now the corral wrapper" grep -q 'corral adb wrapper' "$SDK/adb"
@@ -124,6 +131,9 @@ replace_sites=$(grep -c 'replace_file "\$JAR"\|replace_file "\$UI_JAR"' "$SRC/in
 check "jars: all three jar install sites go through replace_file" test "$replace_sites" -eq 3
 
 # ===== 9.3 idempotence: second install =====
+# 44: give the sandbox an agent host's marker (~/.agents/skills) before the re-run, so this install
+# has to place the skill; the rows below assert both the bytes and the atomic mechanism.
+mkdir -p "$TMPHOME/.agents/skills"
 jar_inode_before=$(ls -i "$TMPHOME/.corral/corral-daemon-all.jar" | cut -d' ' -f1)
 install_run >"$TMP/install2.log" 2>&1; rc2=$?
 dump_on_fail "$rc2" "$TMP/install2.log"
@@ -133,6 +143,14 @@ check "9.3 re-run replaces the jar by rename (new inode, review 42 §1)" test \
 check "9.3 the replaced jar is the source jar" cmp -s "$JAR" "$TMPHOME/.corral/corral-daemon-all.jar"
 check "9.3 no replacement temp file is left behind" bash -c \
   "! ls '$TMPHOME/.corral' | grep -q '\.new\.'"
+check "44 skill: lands at ~/.agents/skills/corral/SKILL.md" test -f "$SKILL_DST"
+check "44 skill: byte-identical to the shipped copy" cmp -s "$SKILL_SRC" "$SKILL_DST"
+check "44 skill: install names the skill and both harness paths" bash -c \
+  "grep -qF 'Installed the corral agent skill' '$TMP/install2.log' && grep -qF '~/.claude/skills/corral/' '$TMP/install2.log'"
+check "44 skill: no replacement temp file is left behind" bash -c \
+  "[ -f '$SKILL_DST' ] && ! ls '$TMPHOME/.agents/skills/corral' | grep -q '\.new\.'"
+check "44 skill: install goes through replace_file, never cp in place" bash -c \
+  "grep -qF 'replace_file \"\$SKILL_SRC\" \"\$TARGET_HOME/.agents/skills/corral/SKILL.md\"' '$SRC/install.sh' && ! grep -qF 'cp \"\$SKILL_SRC\"' '$SRC/install.sh'"
 check "9.6 user rules edit survives re-run" grep -q 'sandbox sentinel edit' "$RULES"
 check "9.9 daemon.env edit survives re-run" grep -q 'sandbox daemon.env sentinel edit' "$DAEMON_ENV"
 check "9.3 artifacts intact after re-run" bash -c \
@@ -239,6 +257,7 @@ check "SDK shim replace fails: it says absolute-path adb calls are not gated" \
   grep -q 'NOT lease-gated' "$TMP/shimfail.log"
 
 # 9.7/9.8 uninstall
+skill_before=0; [ -f "$SKILL_DST" ] && skill_before=1
 uninstall_run >"$TMP/uninstall.log" 2>&1; rcu=$?
 dump_on_fail "$rcu" "$TMP/uninstall.log"
 check "9.7 uninstall exits 0" test "$rcu" -eq 0
@@ -250,6 +269,9 @@ check "9.7 gradle gate removed" test ! -e "$GATE"
 check "9.7 gradle-tasks removed" test ! -e "$TMPHOME/.config/corral/gradle-tasks"
 check "9.7 rules removed" test ! -e "$RULES"
 check "9.7 daemon.env removed" test ! -e "$DAEMON_ENV"
+check "44 skill: uninstall removes the installed copy" bash -c \
+  "[ '$skill_before' = 1 ] && [ ! -e '$SKILL_DST' ] && grep -qF 'the corral agent skill' '$TMP/uninstall.log'"
+check "44 skill: uninstall leaves ~/.agents/skills itself alone" test -d "$TMPHOME/.agents/skills"
 check "9.8 SDK adb restored from adb.real" grep -q 'fake-sdk-adb' "$SDK/adb"
 check "9.8 adb.real consumed" test ! -e "$SDK/adb.real"
 
@@ -1173,6 +1195,27 @@ check "uninstall provenance: an untouched shim of ours (~/bin/corral-ui) is stil
 # The summary must name the kept shims only under 'Left alone', never under 'Removed:'.
 check "uninstall provenance: the Removed: line never claims the kept shims were removed" bash -c \
   "! grep '^Removed:' '$TMP/up-uninstall.log' | grep -qE '~/bin/(adb|corral),'"
+
+# ===== 44: uninstall removes the skill ONLY while it is byte-identical to the shipped copy =====
+# An agent may edit its skill; that edit belongs to the agent, exactly like a hand-written shim.
+TMPHOME_SK="$TMP/home-skill-edit"; SDK_SK="$TMPHOME_SK/Android/Sdk/platform-tools"
+mkdir -p "$SDK_SK" "$TMPHOME_SK/bin" "$TMPHOME_SK/.agents/skills"; : > "$TMPHOME_SK/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "sk-sdk-adb $@"' > "$SDK_SK/adb"; chmod +x "$SDK_SK/adb"
+env HOME="$TMPHOME_SK" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_SK/adb" --jar "$JAR" --home "$TMPHOME_SK" --no-ui >"$TMP/skill-install.log" 2>&1
+dump_on_fail "$?" "$TMP/skill-install.log"
+check "44 skill: the edited-skill sandbox got a skill to edit" grep -qF 'Installed the corral agent skill' \
+  "$TMP/skill-install.log"
+printf '\n# edited by the agent\n' >> "$TMPHOME_SK/.agents/skills/corral/SKILL.md"
+env HOME="$TMPHOME_SK" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_SK" --uninstall \
+  >"$TMP/skill-uninstall.log" 2>&1; rcsu=$?
+dump_on_fail "$rcsu" "$TMP/skill-uninstall.log"
+check "44 skill: uninstall keeps a skill the agent edited" grep -q 'edited by the agent' \
+  "$TMPHOME_SK/.agents/skills/corral/SKILL.md"
+check "44 skill: it says the edited skill was left alone" grep -q 'edited since install' \
+  "$TMP/skill-uninstall.log"
+check "44 skill: the Removed: line does not claim the edited skill" bash -c \
+  "! grep '^Removed:' '$TMP/skill-uninstall.log' | grep -q 'agent skill'"
 
 # ===== Windows uninstall: remove our .bat shims, never the POSIX names, keep a user's files =====
 # The exact QA repro: simulated-Windows install -> plant ~/bin/adb and a hand-edited corral.bat ->

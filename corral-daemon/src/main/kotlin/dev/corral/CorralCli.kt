@@ -880,8 +880,15 @@ object CorralCli {
             "wait" -> {
                 val (sel, rest) = parseSelector(args.drop(1).toTypedArray())
                 val i = rest.indexOf("--timeout")
-                val waitSeconds = if (i >= 0) rest.getOrNull(i + 1)?.toLongOrNull() ?: usage(2) else 600L
-                if (waitSeconds <= 0) { println(claimOne(sel, holderPid())); return }
+                val requested = if (i >= 0) rest.getOrNull(i + 1)?.toLongOrNull() ?: usage(2) else 600L
+                // Same input handling as `lease`: a negative value is a usage error, and the daemon's
+                // MAX_WAIT_S cap is stated at the moment it bites instead of silently shortening the wait.
+                if (requested < 0) usage(2)
+                val waitSeconds = if (requested > MAX_WAIT_S) {
+                    System.err.println("corral: --timeout $requested clamped to ${MAX_WAIT_S}s (max $MAX_WAIT_S)")
+                    MAX_WAIT_S
+                } else requested
+                if (waitSeconds == 0L) { println(claimOne(sel, holderPid())); return }
                 // A served lease outlives this process only as long as the process does: hand it back on
                 // exit (normal or signal-driven; a SIGKILL leaves the TTL/pid-prune machinery in charge).
                 // Use `lease --timeout` when the device must stay held to run a command.

@@ -73,6 +73,9 @@ re-run. It:
 - shims the SDK's `platform-tools/adb` so absolute-path callers are gated too
   (`--no-sdk-shim` to skip);
 - installs a Gradle `init.d` gate that pre-flights device-touching tasks;
+- installs the `corral` agent skill (how an agent should lease devices and read the gate) to
+  `~/.agents/skills/corral/SKILL.md` when `~/.agents/skills` already exists — the house harness
+  discovers it from there, while Claude Code reads `~/.claude/skills/<name>/` instead;
 - optionally installs the desktop console with `--ui` (the default when a
   `corral-ui-all.jar` is present) or `--no-ui`.
 
@@ -126,9 +129,12 @@ corral lease --timeout 120 --model Pixel_7 -- adb install app.apk
 offered, then runs the command **holding** that device until the command exits. A
 matching device is offered to the longest-waiting ticket that is still polling, so
 waiting is FIFO by arrival — and because the lease lives for the command's lifetime,
-the device cannot move on to the next ticket while the command runs. A command that
-crashes still frees its device through the usual TTL/pid machinery, and a ticket that
-times out runs nothing.
+the device cannot move on to the next ticket while the command runs. The one
+exception is SIGKILL to the `corral lease` process itself: the JVM runs no shutdown
+hook, so the command is orphaned and keeps running while the dead-pid prune frees the
+device after about 3 seconds and serves the next ticket. Send TERM (not KILL) and give
+it a few seconds. A command that crashes still frees its device through the usual
+TTL/pid machinery, and a ticket that times out runs nothing.
 
 How the hold ends matters to whoever writes the kill policy. On `SIGTERM`, `SIGINT` or
 `SIGHUP`, `corral lease` stops the command's whole process tree and only then hands the

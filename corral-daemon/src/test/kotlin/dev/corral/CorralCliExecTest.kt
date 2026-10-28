@@ -3,6 +3,9 @@ package dev.corral
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -243,6 +246,63 @@ class CorralCliExecTest {
         val rc = runLeased(listOf("sh"), null, { ProcessBuilder("sh", "-c", "exit 4") },
             onStart = { error("daemon unreachable") }) { }
         assertEquals(4, rc, "an unreachable daemon must never change the command's own result")
+    }
+
+    // --- review 48 §3: the CLI renews while the command runs, so the TTL bounds only a CLI that
+    // stopped renewing. The knob and the beat interval are pinned here; the e2e row proves the hold. ---
+
+    @Test fun leaseTtlComesFromTheKnobAndDefaultsTo1800() {
+        assertEquals(1800, leaseTtlSeconds(null))
+        assertEquals(1800, leaseTtlSeconds(""))
+        assertEquals(1800, leaseTtlSeconds("not-a-number"))
+        assertEquals(1800, leaseTtlSeconds("0"))
+        assertEquals(1800, leaseTtlSeconds("-5"))
+        assertEquals(15, leaseTtlSeconds("15"))
+        assertEquals(MAX_LEASE_TTL_SECONDS, leaseTtlSeconds("86401"))
+        assertEquals(MAX_LEASE_TTL_SECONDS, leaseTtlSeconds("9223372036854775807"),
+            "an absurd TTL must be clamped, never overflowed into a negative beat period")
+    }
+
+    @Test fun heartbeatBeatsEveryThirdOfTheTtlAndNeverFasterThanASecond() {
+        assertEquals(600_000, heartbeatMillis(1800))
+        assertEquals(5_000, heartbeatMillis(15))
+        assertEquals(1_000, heartbeatMillis(3))
+        assertEquals(1_000, heartbeatMillis(1))
+        assertEquals(28_800_000, heartbeatMillis(MAX_LEASE_TTL_SECONDS))
+    }
+
+    @Test fun stopReturnsPromptlyEvenWhenAnInterruptedBeatClearsTheFlag() {
+        // Model the real renew: renewLease's own runCatching swallows InterruptedException, so the
+        // interrupt flag is cleared and only the stopped state can end the loop. A stop that relies
+        // on the flag alone would hang here; the bounded join is asserted from a side thread so a
+        // regression fails instead of hanging the test JVM.
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val beats = AtomicInteger(0)
+        val heartbeat = LeaseHeartbeat(1) {
+            beats.incrementAndGet()
+            entered.countDown()
+            try { release.await() } catch (_: InterruptedException) { /* the CLI's renew does this */ }
+        }
+        heartbeat.start()
+        assertTrue(entered.await(2, TimeUnit.SECONDS), "the first beat must start within 2 s")
+        val stopper = Thread({ heartbeat.stop() }, "test-heartbeat-stop").apply {
+            isDaemon = true
+            start()
+        }
+        stopper.join(2_500)
+        assertFalse(stopper.isAlive, "stop() must return within its bounded join")
+        assertFalse(heartbeat.isRunning(), "the beat thread must be gone when stop() returns")
+        val beatsAtStop = beats.get()
+        release.countDown()
+        assertEquals(beatsAtStop, beats.get(), "no beat may start after stop() returned")
+    }
+
+    @Test fun aFailedHeartbeatNeverFailsTheCommand() {
+        val heartbeat = LeaseHeartbeat(1) { error("daemon unreachable") }
+        val rc = runLeased(listOf("sh"), null, { ProcessBuilder("sh", "-c", "sleep 1.2; exit 5") },
+            heartbeat = heartbeat) { }
+        assertEquals(5, rc, "a failed beat must never change the command's own result")
     }
 
     // --- review 45 §4: a signal sent to the CLI's pid alone must not leave the command running ---

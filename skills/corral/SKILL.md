@@ -41,8 +41,9 @@ corral lease --timeout 60 --model Pixel_7 -- adb shell input keyevent 3
 
 - Everything after `--` is your command; nothing before it is ever run as a program.
 - The command's own output is the only output on the success path.
-- The device is held from before the command starts until after it exits, then released. A
-  command that crashes or is signalled still releases (see *Signals*).
+- The device is held from before the command starts until after it exits, then released. The CLI
+  renews the lease while the command runs, so the TTL bounds only a CLI that stopped renewing (see
+  *Signals*). A command that crashes or is signalled still releases.
 - `--timeout S` caps the queue wait (max 600, clamped with a warning; a negative value is a usage
   error). Omit it to fail at once when the pool is busy. A timed-out ticket runs nothing.
 - With no `--timeout`, a busy pool prints a self-teaching line naming the holders and this exact
@@ -157,13 +158,13 @@ grace, forced kill for the survivors, then the release. Measured ~360 ms for a p
 for a tree that ignores TERM. So a supervisor's normal stop is safe — the next waiter starts on an
 idle device.
 
-**SIGKILL is not covered.** The JVM runs no shutdown hooks, so the command is orphaned and keeps
-running while the daemon's dead-pid prune frees the device after about 3 s and serves the next
-ticket — two sessions on one device. This is what `kill -9`, a supervisor escalating past its grace
-period (`timeout -k`, a stop timeout) or the OOM killer choosing the CLI's JVM produces. Send TERM
-and give it a few seconds; the orphan's own PATH adb calls are refused once the next agent holds
-the device, but an in-flight Gradle build (AGP talks to `:5037`) or a running `am instrument` is
-not.
+**SIGKILL runs no shutdown hook, but it no longer frees the device.** The JVM cannot clean up, so
+the command is orphaned and keeps running. The lease also carries the pid of the command the CLI
+started, and the daemon holds the device while that command lives, up to the lease's TTL. The CLI
+renews the lease while the command runs, so the TTL bounds only a CLI that stopped renewing —
+exactly the SIGKILL case. Send TERM and give it a few seconds; the orphan's own PATH adb calls are
+refused once the device is finally released, but an in-flight Gradle build (AGP talks to `:5037`)
+or a running `am instrument` is not.
 
 ## Emulators
 
@@ -223,5 +224,8 @@ requirements, install, core loop, selectors, Gradle, emulators, config, doctor, 
 known limits; `README.md` in the repo describes the design; `SECURITY.md` holds the threat model
 and the bypass list. The default gate rules file is `corral-rules` beside the installer in the
 bundle (`scripts/corral-rules` in a source checkout), installed as `~/.config/corral/rules`. This
-skill lives at `~/.agents/skills/corral/SKILL.md` on the house install; Claude Code reads
-`~/.claude/skills/<name>/` instead, so copy it there if that is your harness.
+skill lives at `~/.agents/skills/corral/SKILL.md` on the house install, and `corral update --apply`
+refreshes that file. Claude Code reads `~/.claude/skills/<name>/` instead — prefer a **symlink**
+where your harness supports one (`~/.claude/skills/corral` → `~/.agents/skills/corral`, the layout
+the `skills` CLI uses), so one file stays current. If you must copy it there, refresh the copy
+after every `corral update --apply`: a copy goes stale, and uninstall never removes it.

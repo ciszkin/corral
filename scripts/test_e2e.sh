@@ -116,6 +116,14 @@ stop_daemon() {
 
 free_all() { corral free --all >/dev/null 2>&1; }
 claim_two() { corral claim dev1 >/dev/null 2>&1 && corral claim dev2 >/dev/null 2>&1; }
+claim_until_free() { # claim_until_free <serial>: a previous row's orphan may still hold it for a moment
+  local i
+  for i in $(seq 1 200); do
+    corral claim "$1" >/dev/null 2>&1 && return 0
+    sleep 0.05
+  done
+  return 1
+}
 queue_empty() { [ "$(curl -s "$CORRAL_URL/api/queue")" = "[]" ]; }
 wait_queue_not_empty() {
   local i; for i in $(seq 1 50); do queue_empty || return 0; sleep 0.1; done; return 1
@@ -377,7 +385,9 @@ SH
     sleep 0.05
   done
   if [ "$held" != 1 ]; then
-    kill -9 "$erin" "$carol" 2>/dev/null; free_all; return 1
+    kill -9 "$erin" "$carol" 2>/dev/null
+    [ -s "$TMP/kill-child.pid" ] && kill -9 "$(cat "$TMP/kill-child.pid")" 2>/dev/null   # never orphan the row's own child
+    free_all; return 1
   fi
   child=$(cat "$TMP/kill-child.pid")
   kill -9 "$erin" 2>/dev/null; wait "$erin" 2>/dev/null   # the CLI only: no hook can run
@@ -396,6 +406,63 @@ SH
   [ "$alive" = 1 ] && [ "$notserved" = 1 ] && [ "$freed" = 1 ]
 }
 
+
+# --- review 48 §3: a `corral lease` command that outlives the lease's TTL used to lose the device
+# to the next ticket while it still ran. The CLI renews while the command runs, so with a 15 s knob
+# the hold is still erin's well past 15 s and carol is served only when erin's CLI exits. The
+# owner's own renew also cuts the TTL to 8 s, which a CLI with no heartbeat never recovers from —
+# the pre-change row therefore loses the device, not merely the knob assertion below.
+check_lease_heartbeat_outlives_ttl() {
+  # A previous row's killed-but-still-running command can hold dev1 for a moment; wait it out.
+  claim_until_free dev1 && claim_until_free dev2 || return 1
+  cat > "$TMP/beat-child.sh" <<'SH'
+echo $$ > "$1"
+exec sleep 300
+SH
+  rm -f "$TMP/beat-child.pid" "$TMP/beat-carol-started"
+  CORRAL_OWNER=erin CORRAL_LEASE_TTL_SECONDS=15 corral lease --serial dev1 --timeout 60 -- \
+    sh "$TMP/beat-child.sh" "$TMP/beat-child.pid" >"$TMP/beat-erin.out" 2>&1 &
+  local erin=$! i held=0 knob=0 still_held=0 notserved=0 served=0 child expires now left
+  for i in $(seq 1 50); do
+    curl -s "$CORRAL_URL/api/queue" | grep -q '"owner":"erin"' && break; sleep 0.1
+  done
+  CORRAL_OWNER=carol CORRAL_LEASE_TTL_SECONDS=15 corral lease --serial dev1 --timeout 60 -- \
+    sh -c "echo started > '$TMP/beat-carol-started'; sleep 2" >"$TMP/beat-carol.out" 2>&1 &
+  local carol=$!
+  for i in $(seq 1 50); do
+    curl -s "$CORRAL_URL/api/queue" | grep -q '"owner":"carol"' && break; sleep 0.1
+  done
+  corral free dev1 >/dev/null 2>&1                    # alice frees it: erin (first) is served
+  for i in $(seq 1 100); do
+    if [ "$(status_owner dev1)" = erin ] && [ -s "$TMP/beat-child.pid" ]; then held=1; break; fi
+    sleep 0.05
+  done
+  if [ "$held" != 1 ]; then
+    kill -9 "$erin" "$carol" 2>/dev/null
+    [ -s "$TMP/beat-child.pid" ] && kill -9 "$(cat "$TMP/beat-child.pid")" 2>/dev/null
+    free_all; return 1
+  fi
+  child=$(cat "$TMP/beat-child.pid")
+  expires=$(curl -s "$CORRAL_URL/api/status" | grep -o "\"serial\":\"dev1\",\"lease\":{[^}]*}" \
+    | grep -o '"expiresAt":[0-9]*' | cut -d: -f2)
+  now=$(date +%s); left=$((expires - now))
+  [ -n "$expires" ] && [ "$left" -le 15 ] && knob=1
+  # One owner renew shortens the TTL: only a heartbeat brings it back before it expires.
+  curl -s -X POST "$CORRAL_URL/api/leases/dev1/renew" -H 'Content-Type: application/json' \
+    -d '{"owner":"erin","ttlSeconds":8}' >/dev/null
+  sleep 20                                            # well past both the 8 s and the 15 s TTLs
+  [ "$(status_owner dev1)" = erin ] && running "$child" && kill -0 "$erin" 2>/dev/null && still_held=1
+  [ ! -e "$TMP/beat-carol-started" ] && notserved=1
+  kill -TERM "$erin" 2>/dev/null                      # the normal stop: child tree, then the release
+  for i in $(seq 1 200); do
+    [ -e "$TMP/beat-carol-started" ] && { served=1; break; }
+    sleep 0.05
+  done
+  kill -9 "$child" "$carol" 2>/dev/null
+  wait "$erin" 2>/dev/null; wait "$carol" 2>/dev/null
+  free_all
+  [ "$knob" = 1 ] && [ "$still_held" = 1 ] && [ "$notserved" = 1 ] && [ "$served" = 1 ]
+}
 
 # --- review 45 §6: `lease`'s input handling says what it does. A negative timeout is a usage error
 # (rc 2, usage on stdout — claim's convention, not the old stderr line), the 600 s cap is stated in
@@ -1121,6 +1188,11 @@ check "44§3 queueing lease: the first waiter HOLDS the device, the next ticket 
 check "44§3 queueing lease: a deadline gives up without running the command" check_lease_timeout_gives_up
 check "45§4 SIGTERM to the CLI stops its command before the next ticket is served" check_lease_sigterm_stops_child
 check "46§2 SIGKILL to the CLI keeps its orphan's device; freed when the orphan goes" check_lease_sigkill_keeps_orphan
+if [ "${SLOW:-0}" = 1 ]; then
+  check "48§3 a lease outliving its TTL keeps the device: the CLI renews while the command runs" check_lease_heartbeat_outlives_ttl
+else
+  skip "48§3 the CLI renewal keeps the device past a shortened TTL"
+fi
 check "45§6 lease input: negative timeout rc 2, usage on stdout, the 600s cap stated" check_lease_input_handling
 check "47§4 wait input: negative timeout rc 2, usage on stdout, the 600s cap stated" check_wait_input_handling
 check "5.9/5.11 quiet REST/MCP waiter skipped within staleness window, not offer hold" check_5_9

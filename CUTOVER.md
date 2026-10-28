@@ -128,13 +128,13 @@ corral lease --timeout 120 --model Pixel_7 -- adb install app.apk
 `corral lease --timeout S` registers a ticket, blocks until a matching device is
 offered, then runs the command **holding** that device until the command exits. A
 matching device is offered to the longest-waiting ticket that is still polling, so
-waiting is FIFO by arrival — and because the lease lives for the command's lifetime,
-the device cannot move on to the next ticket while the command runs. The one
-exception is SIGKILL to the `corral lease` process itself: the JVM runs no shutdown
-hook, so the command is orphaned and keeps running while the dead-pid prune frees the
-device after about 3 seconds and serves the next ticket. Send TERM (not KILL) and give
-it a few seconds. A command that crashes still frees its device through the usual
-TTL/pid machinery, and a ticket that times out runs nothing.
+waiting is FIFO by arrival — and because the lease lives for the command's lifetime
+(the CLI renews it while the command runs), the device cannot move on to the next
+ticket while the command runs. The one exception is SIGKILL to the `corral lease`
+process itself: the JVM runs no shutdown hook, so the CLI cannot clean up — the next
+paragraph covers how the hold ends in that case. Send TERM (not KILL) and give it a
+few seconds. A command that crashes still frees its device through the usual TTL/pid
+machinery, and a ticket that times out runs nothing.
 
 How the hold ends matters to whoever writes the kill policy. On `SIGTERM`, `SIGINT` or
 `SIGHUP`, `corral lease` stops the command's whole process tree and only then hands the
@@ -143,13 +143,14 @@ the next ticket starts on an idle device. `SIGKILL` is the exception — a JVM r
 shutdown hooks for it, so the CLI cannot clean up and the command is orphaned and keeps
 driving the device. The daemon sees the CLI's pid die, but the lease also carries the
 pid of the command the CLI started, so the device stays held while that command lives,
-up to the lease's TTL. That is bounded, not prevented: once the TTL runs out (or an
-operator force-frees the device) the device moves on — the orphan's own `adb` calls
-through Corral's wrapper are refused from then on, but a client that bypasses the
-wrapper — an in-flight `./gradlew connectedAndroidTest`, an `am instrument` already
-running — keeps going. Prefer `SIGTERM`, and if a supervisor has to escalate to
-`SIGKILL`, kill the command with it (the process group, or the command's pid) rather
-than the CLI alone.
+up to the lease's TTL. The CLI renews the lease while the command runs, so the TTL
+bounds only a CLI that stopped renewing — exactly this SIGKILL case. That is bounded,
+not prevented: once the TTL runs out (or an operator force-frees the device) the device
+moves on — the orphan's own `adb` calls through Corral's wrapper are refused from then
+on, but a client that bypasses the wrapper — an in-flight `./gradlew
+connectedAndroidTest`, an `am instrument` already running — keeps going. Prefer
+`SIGTERM`, and if a supervisor has to escalate to `SIGKILL`, kill the command with it
+(the process group, or the command's pid) rather than the CLI alone.
 
 `corral wait` uses the same queue but is the poll-then-decide form: it blocks until
 served, prints the serial, and returns the lease when the wait process exits. Use it

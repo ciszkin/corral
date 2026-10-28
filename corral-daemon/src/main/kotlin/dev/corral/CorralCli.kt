@@ -227,6 +227,57 @@ internal fun stopChildTree(proc: Process, graceMillis: Long = 2000): Boolean {
 }
 
 /**
+ * The TTL every lease this CLI requests gets. `CORRAL_LEASE_TTL_SECONDS` is the one knob — the
+ * `lease` claim, a queued ticket, `--all`, `claim` and `renew` all use it — and the default stays
+ * 1800 s. A value that is not a positive number is ignored rather than guessed at, and an absurd
+ * one is clamped to [MAX_LEASE_TTL_SECONDS] so the beat arithmetic cannot overflow.
+ *
+ * `shortcut:` a TTL of a few seconds cannot honour TTL/3 plus the renew POST's 2 s timeout; the
+ * knob is for short test holds, not a promise that every tiny value survives a slow daemon.
+ */
+internal const val MAX_LEASE_TTL_SECONDS = 86_400L
+
+internal fun leaseTtlSeconds(env: String? = System.getenv("CORRAL_LEASE_TTL_SECONDS")): Long =
+    env?.toLongOrNull()?.takeIf { it > 0 }?.coerceAtMost(MAX_LEASE_TTL_SECONDS) ?: 1800L
+
+/** How often the heartbeat beats: a third of the TTL, never faster than once a second. */
+internal fun heartbeatMillis(ttlSeconds: Long): Long = (ttlSeconds / 3).coerceAtLeast(1) * 1000
+
+/**
+ * Keeps the CLI's lease alive while the command runs (review 48 §3): without a beat the TTL expires
+ * mid-run and the device moves to the next ticket while the command still drives it. A daemon
+ * thread, so it never keeps the JVM alive after the command ends; [stop] runs before the release,
+ * so a beat cannot race a freed device. Best-effort like the pid registration: a failed beat is
+ * ignored and never changes the command's exit code, and a daemon restart loses at most one beat.
+ *
+ * [stop] is a state, not just an interrupt: an interruptible `renew` can throw `InterruptedException`
+ * and clear its own flag (the CLI's HTTP renew swallows that), so the loop checks [stopped] and the
+ * join is bounded. That keeps a daemon-outage beat from hanging the release or the shutdown hook.
+ */
+internal class LeaseHeartbeat(ttlSeconds: Long, private val renew: () -> Unit) {
+    @Volatile private var stopped = false
+
+    private val thread = Thread({
+        while (!stopped) {
+            try { Thread.sleep(heartbeatMillis(ttlSeconds)) }
+            catch (_: InterruptedException) { return@Thread }
+            if (stopped) return@Thread
+            runCatching { renew() }
+        }
+    }, "corral-lease-heartbeat").apply { isDaemon = true }
+
+    fun start() = thread.start()
+
+    fun stop() {
+        stopped = true
+        thread.interrupt()
+        runCatching { thread.join(2_000) }   // bounded: a stuck renew must never hold the release
+    }
+
+    internal fun isRunning() = thread.isAlive
+}
+
+/**
  * Run the wrapped child, then hand the lease back no matter how it ends: a start failure and a
  * non-zero exit both fall through the finally. A start failure is an IOException (program missing)
  * or an IllegalArgumentException — a JVM started with `-Djdk.lang.Process.allowAmbiguousCommands=false`
@@ -246,16 +297,19 @@ internal fun runLeased(
     resolved: Boolean?,
     build: () -> ProcessBuilder,
     onStart: (Process) -> Unit = {},
+    heartbeat: LeaseHeartbeat? = null,
     release: () -> Unit,
 ): Int {
     val child = AtomicReference<Process?>(null)
     val released = AtomicBoolean(false)
     val releaseOnce = { if (released.compareAndSet(false, true)) release() }
     val stopHook = Thread({
+        heartbeat?.stop()   // never beat after the release, even on a signal
         child.get()?.let { runCatching { stopChildTree(it) } }
         releaseOnce()
     }, "corral-stop-child")
     runCatching { Runtime.getRuntime().addShutdownHook(stopHook) }   // a signal mid-startup: no hook, the finally still releases
+    heartbeat?.start()
     return try {
         build().inheritIO().start().also { child.set(it); runCatching { onStart(it) } }.waitFor()
     } catch (e: IOException) {
@@ -265,6 +319,7 @@ internal fun runLeased(
         System.err.println(launchFailure(cmd.firstOrNull(), resolved, launchDetail(e)))
         127
     } finally {
+        heartbeat?.stop()
         runCatching { Runtime.getRuntime().removeShutdownHook(stopHook) }   // fails while already shutting down; the hook then releases
         releaseOnce()
     }
@@ -509,18 +564,19 @@ object CorralCli {
     }
 
     /**
-     * Tell the daemon which pids are still driving [serial] — this CLI and the command it just
-     * started. A SIGKILLed CLI runs no shutdown hook, so without this the daemon would prune the
+     * Renew [serial] and register the pids still driving it — this CLI and the command it runs.
+     * A SIGKILLed CLI runs no shutdown hook, so without the pid list the daemon would prune the
      * lease on the CLI's dead pid and hand a still-busy device to the next ticket (review 46 §2).
-     * Owner-scoped by the renew, bounded, and best-effort: an unreachable daemon leaves the old
-     * pid/TTL machinery in charge and never changes what the command returns.
+     * The heartbeat calls the same endpoint while the command runs, so the TTL of a live CLI never
+     * runs out (review 48 §3). Owner-scoped by the renew, bounded, and best-effort: an unreachable
+     * daemon leaves the old pid/TTL machinery in charge and never changes what the command returns.
      */
-    private fun registerPids(serial: String, pids: List<Long>) {
+    private fun renewLease(serial: String, pids: List<Long>) {
         runCatching {
             http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/$serial/renew"))
                 .timeout(Duration.ofSeconds(2))
                 .method("POST", HttpRequest.BodyPublishers.ofString(
-                    Json.encodeToString(RenewRequest(owner = owner, pids = pids))))
+                    Json.encodeToString(RenewRequest(owner = owner, ttlSeconds = leaseTtlSeconds(), pids = pids))))
                 .header("Content-Type", "application/json").build(), HttpResponse.BodyHandlers.ofString())
         }
     }
@@ -529,7 +585,7 @@ object CorralCli {
     private fun claimFree(owner: String, pid: Long, selector: Selector = Selector()): String? {
         repeat(5) {
             val r = trySend("POST", "/api/leases",
-                Json.encodeToString(ClaimRequest(selector = selector, owner = owner, pid = pid, ttlSeconds = 1800)))
+                Json.encodeToString(ClaimRequest(selector = selector, owner = owner, pid = pid, ttlSeconds = leaseTtlSeconds())))
             if (r.statusCode() == 200)
                 return Json.parseToJsonElement(r.body()).jsonObject["serial"]!!.jsonPrimitive.content
             if (r.body().contains("\"busy\"")) return@repeat // raced; try again
@@ -541,7 +597,7 @@ object CorralCli {
     /** Claim one device now; on 409 print a plain message (not the raw busy JSON) and exit 1. */
     private fun claimOne(selector: Selector, pid: Long): String {
         val r = trySend("POST", "/api/leases",
-            Json.encodeToString(ClaimRequest(selector = selector, owner = owner, pid = pid, ttlSeconds = 1800)))
+            Json.encodeToString(ClaimRequest(selector = selector, owner = owner, pid = pid, ttlSeconds = leaseTtlSeconds())))
         if (r.statusCode() == 200)
             return Json.parseToJsonElement(r.body()).jsonObject["serial"]!!.jsonPrimitive.content
         System.err.println(busyLine(selector, r.body()))
@@ -578,7 +634,7 @@ object CorralCli {
         // Own pid: killing this CLI frees the ticket at once (the daemon skips dead pids).
         val ticket = send("POST", "/api/leases",
             Json.encodeToString(ClaimRequest(selector = sel, owner = owner,
-                pid = ProcessHandle.current().pid(), ttlSeconds = 1800, waitSeconds = waitSeconds))).str("ticket")
+                pid = ProcessHandle.current().pid(), ttlSeconds = leaseTtlSeconds(), waitSeconds = waitSeconds))).str("ticket")
         val served = AtomicReference<String?>(null)
         Runtime.getRuntime().addShutdownHook(Thread {
             runCatching {
@@ -608,17 +664,23 @@ object CorralCli {
      * directory on PATH, and the lease returned however the command ends. This CLI process outlives
      * the child, so the pid recorded on the lease keeps it held for exactly the command's lifetime —
      * and for a CLI that is SIGKILLed instead of signalled, the child's own pid is registered with
-     * the daemon as soon as it starts (review 46 §2).
+     * the daemon as soon as it starts (review 46 §2). A heartbeat renews the lease while the command
+     * runs, so the TTL bounds only a CLI that stopped renewing (review 48 §3).
      */
     private fun runHolding(serial: String, cmd: List<String>): Int {
         var resolved: Boolean? = null
         val launchArgv = commandArgv(cmd, onResolved = { resolved = it })
+        val pids = AtomicReference(listOf(ProcessHandle.current().pid()))
+        val heartbeat = LeaseHeartbeat(leaseTtlSeconds()) { renewLease(serial, pids.get()) }
         return runLeased(cmd, resolved, {
             ProcessBuilder(launchArgv).apply {
                 environment()["ANDROID_SERIAL"] = serial
                 environment()["CORRAL_OWNER"] = owner
             }.withAdbOnPath()
-        }, onStart = { child -> registerPids(serial, listOf(ProcessHandle.current().pid(), child.pid())) }) {
+        }, onStart = { child ->
+            pids.set(listOf(ProcessHandle.current().pid(), child.pid()))
+            renewLease(serial, pids.get())
+        }, heartbeat = heartbeat) {
             release(serial)
         }
     }
@@ -823,7 +885,8 @@ object CorralCli {
             }
             "renew" -> {
                 val serial = args.getOrNull(1) ?: usage(2)
-                send("POST", "/api/leases/$serial/renew", Json.encodeToString(RenewRequest(owner = owner)))
+                send("POST", "/api/leases/$serial/renew",
+                    Json.encodeToString(RenewRequest(owner = owner, ttlSeconds = leaseTtlSeconds())))
                 println("renewed $serial")
             }
             "lease" -> {
@@ -849,12 +912,16 @@ object CorralCli {
                         val argv = cmd + gradleFlag
                         var resolved: Boolean? = null
                         val launchArgv = commandArgv(argv, onResolved = { resolved = it })
+                        val pids = AtomicReference(listOf(pid))
                         val rc = runLeased(argv, resolved, {
                             ProcessBuilder(launchArgv).apply {
                                 environment()["CORRAL_OWNER"] = owner
                             }.withAdbOnPath()
                         }, onStart = { child ->
-                            claimed.forEach { registerPids(it, listOf(pid, child.pid())) }
+                            pids.set(listOf(pid, child.pid()))
+                            claimed.forEach { renewLease(it, pids.get()) }
+                        }, heartbeat = LeaseHeartbeat(leaseTtlSeconds()) {
+                            claimed.forEach { renewLease(it, pids.get()) }
                         }) { claimed.forEach { release(it) } }
                         exitProcess(rc)
                     }
@@ -867,7 +934,7 @@ object CorralCli {
                     }
                     else -> {
                         val r = trySend("POST", "/api/leases",
-                            Json.encodeToString(ClaimRequest(selector = sel, owner = owner, pid = pid, ttlSeconds = 1800)))
+                            Json.encodeToString(ClaimRequest(selector = sel, owner = owner, pid = pid, ttlSeconds = leaseTtlSeconds())))
                         if (r.statusCode() != 200) {
                             System.err.println(busyLine(sel, r.body()))
                             exitProcess(1)

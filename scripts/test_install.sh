@@ -99,6 +99,9 @@ check "9.2 ~/bin/adb is the corral wrapper" grep -q 'corral adb wrapper' "$TMPHO
 # 44: the skill lands only where an agent host declares itself, by having ~/.agents/skills. A host
 # without it must not grow a ~/.agents tree from nothing.
 check "44 skill: ~/.agents is never created from nothing" test ! -e "$TMPHOME/.agents"
+# 48: a host without ~/.agents/skills gets one honest line instead of silence from the installer.
+check "48 skill: a host without ~/.agents/skills gets one honest summary line" bash -c \
+  "grep -qF 'Agent skill not installed: no ~/.agents/skills' '$TMP/install1.log' && grep -qF '~/.claude/skills/corral/' '$TMP/install1.log'"
 
 # 9.4 SDK shim
 check "9.4 SDK adb is now the corral wrapper" grep -q 'corral adb wrapper' "$SDK/adb"
@@ -145,6 +148,8 @@ check "9.3 no replacement temp file is left behind" bash -c \
   "! ls '$TMPHOME/.corral' | grep -q '\.new\.'"
 check "44 skill: lands at ~/.agents/skills/corral/SKILL.md" test -f "$SKILL_DST"
 check "44 skill: byte-identical to the shipped copy" cmp -s "$SKILL_SRC" "$SKILL_DST"
+check "48 skill: install records the shipped copy's hash beside the skill" bash -c \
+  "[ -f '$SKILL_DST.sha' ] && [ \"\$(sha256sum '$SKILL_DST' | cut -d' ' -f1)\" = \"\$(cat '$SKILL_DST.sha')\" ] && [ \"\$(sha256sum '$SKILL_SRC' | cut -d' ' -f1)\" = \"\$(cat '$SKILL_DST.sha')\" ]"
 check "44 skill: install names the skill and both harness paths" bash -c \
   "grep -qF 'Installed the corral agent skill' '$TMP/install2.log' && grep -qF '~/.claude/skills/corral/' '$TMP/install2.log'"
 check "44 skill: no replacement temp file is left behind" bash -c \
@@ -270,7 +275,7 @@ check "9.7 gradle-tasks removed" test ! -e "$TMPHOME/.config/corral/gradle-tasks
 check "9.7 rules removed" test ! -e "$RULES"
 check "9.7 daemon.env removed" test ! -e "$DAEMON_ENV"
 check "44 skill: uninstall removes the installed copy" bash -c \
-  "[ '$skill_before' = 1 ] && [ ! -e '$SKILL_DST' ] && grep -qF 'the corral agent skill' '$TMP/uninstall.log'"
+  "[ '$skill_before' = 1 ] && [ ! -e '$SKILL_DST' ] && [ ! -e '$SKILL_DST.sha' ] && grep -qF 'the corral agent skill' '$TMP/uninstall.log'"
 check "44 skill: uninstall leaves ~/.agents/skills itself alone" test -d "$TMPHOME/.agents/skills"
 check "9.8 SDK adb restored from adb.real" grep -q 'fake-sdk-adb' "$SDK/adb"
 check "9.8 adb.real consumed" test ! -e "$SDK/adb.real"
@@ -1098,10 +1103,11 @@ else
   # guide no longer has). Everything else stays byte-pinned, including the whole install summary
   # around it. BOTH hint pairs — the pre-change pair and the new pair — are deleted from BOTH sides,
   # so the hint is pinned by its own assertion in the docs block below; nothing about it may be left
-  # unpinned.
-  hint_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\)'
-  sed -e "/$hint_re/d" "$TMP/posix-pre.log" > "$TMP/posix-pre.log.cmp"
-  sed -e "/$hint_re/d" "$TMP/posix-new.log" > "$TMP/posix-new.log.cmp"
+  # unpinned. The same for the row-48 honesty line a host without ~/.agents/skills now gets; that
+  # line is pinned by its own assertion above.
+  drop_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\|Agent skill not installed: no ~\)'
+  sed -e "/$drop_re/d" "$TMP/posix-pre.log" > "$TMP/posix-pre.log.cmp"
+  sed -e "/$drop_re/d" "$TMP/posix-new.log" > "$TMP/posix-new.log.cmp"
   check "POSIX: every message matches the pre-change installer (byte-for-byte, minus the rewritten guide hint)" \
     cmp -s "$TMP/posix-pre.log.cmp" "$TMP/posix-new.log.cmp"
   check "POSIX: installed files + contents match the pre-change installer" cmp -s "$TMP/posix-pre.files" "$TMP/posix-new.files"
@@ -1216,6 +1222,44 @@ check "44 skill: it says the edited skill was left alone" grep -q 'edited since 
   "$TMP/skill-uninstall.log"
 check "44 skill: the Removed: line does not claim the edited skill" bash -c \
   "! grep '^Removed:' '$TMP/skill-uninstall.log' | grep -q 'agent skill'"
+check "48 skill: a kept skill keeps its recorded hash" test -f "$TMPHOME_SK/.agents/skills/corral/SKILL.md.sha"
+
+# ===== 48: uninstall after an update that changed the skill (the pass-48 defect) =====
+# `corral update --apply` installs from the NEW bundle, so uninstall compares against a copy the user
+# never had. Uninstall from v1 after v2 was applied must remove the v2 skill it recorded at install.
+# Two minimal bundles: every file symlinked from $SRC, the skill their own.
+mkskillbundle() { # mkskillbundle <dir> <skill text>
+  local dir="$1" text="$2" f
+  mkdir -p "$dir/skills/corral"
+  for f in "$SRC"/*; do
+    [ -d "$f" ] && continue
+    ln -s "$f" "$dir/$(basename "$f")"
+  done
+  printf '%s\n' "$text" > "$dir/skills/corral/SKILL.md"
+}
+TMPHOME_V="$TMP/home-skill-update"; SDK_V="$TMPHOME_V/Android/Sdk/platform-tools"
+mkdir -p "$SDK_V" "$TMPHOME_V/bin" "$TMPHOME_V/.agents/skills"; : > "$TMPHOME_V/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "v-sdk-adb $@"' > "$SDK_V/adb"; chmod +x "$SDK_V/adb"
+BUNDLE_V1="$TMP/bundle-v1"; BUNDLE_V2="$TMP/bundle-v2"
+mkskillbundle "$BUNDLE_V1" "# corral skill, v1"
+mkskillbundle "$BUNDLE_V2" "# corral skill, v2"
+env HOME="$TMPHOME_V" PATH="$STUB:$PATH" bash "$BUNDLE_V1/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_V/adb" --jar "$JAR" --home "$TMPHOME_V" --no-ui >"$TMP/skill-v1-install.log" 2>&1; rcv1=$?
+dump_on_fail "$rcv1" "$TMP/skill-v1-install.log"
+check "48 skill: v1 installed its skill" grep -qF 'corral skill, v1' \
+  "$TMPHOME_V/.agents/skills/corral/SKILL.md"
+env HOME="$TMPHOME_V" PATH="$STUB:$PATH" bash "$BUNDLE_V2/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_V/adb" --jar "$JAR" --home "$TMPHOME_V" --no-ui >"$TMP/skill-v2-install.log" 2>&1; rcv2=$?
+dump_on_fail "$rcv2" "$TMP/skill-v2-install.log"
+check "48 skill: the update's bundle replaced it with v2 and recorded v2's hash" bash -c \
+  "grep -qF 'corral skill, v2' '$TMPHOME_V/.agents/skills/corral/SKILL.md' && [ \"\$(sha256sum '$TMPHOME_V/.agents/skills/corral/SKILL.md' | cut -d' ' -f1)\" = \"\$(cat '$TMPHOME_V/.agents/skills/corral/SKILL.md.sha')\" ]"
+env HOME="$TMPHOME_V" PATH="$STUB:$PATH" bash "$BUNDLE_V1/install.sh" --home "$TMPHOME_V" --uninstall \
+  >"$TMP/skill-v1-uninstall.log" 2>&1; rcvu=$?
+dump_on_fail "$rcvu" "$TMP/skill-v1-uninstall.log"
+check "48 skill: uninstall from v1 removes the v2 skill (nobody edited it)" bash -c \
+  "[ ! -e '$TMPHOME_V/.agents/skills/corral/SKILL.md' ] && [ ! -e '$TMPHOME_V/.agents/skills/corral/SKILL.md.sha' ]"
+check "48 skill: and its summary names the skill as removed" bash -c \
+  "grep '^Removed:' '$TMP/skill-v1-uninstall.log' | grep -q 'agent skill'"
 
 # ===== Windows uninstall: remove our .bat shims, never the POSIX names, keep a user's files =====
 # The exact QA repro: simulated-Windows install -> plant ~/bin/adb and a hand-edited corral.bat ->
@@ -2421,6 +2465,18 @@ check "daemon guard: no row ever asked to stop a daemon outside its sandbox" tes
 # repo README beside the repo's CUTOVER.md.
 DOCDIR="$ROOT"; [ -f "$SRC/README.md" ] && DOCDIR="$SRC"
 check "docs: the README's cutover doc is a file named exactly as linked" test -f "$DOCDIR/CUTOVER.md"
+# 48/49: the skill and CUTOVER must not drift back to the old "SIGKILL frees it in ~3 s" story, and
+# both must say the CLI renews while the command runs (row 48).
+check "49 docs: the shipped skill has no stale 'about 3 s' SIGKILL hand-over" bash -c \
+  "! grep -qE 'about 3 s(econds)?' '$SKILL_SRC'"
+check "49 docs: CUTOVER has no stale 'about 3 s' SIGKILL hand-over" bash -c \
+  "! grep -qE 'about 3 s(econds)?' '$DOCDIR/CUTOVER.md'"
+check "48 docs: the skill says the CLI renews the lease while the command runs" grep -qF \
+  'renews the lease while the command runs' "$SKILL_SRC"
+check "48 docs: CUTOVER says the CLI renews the lease while the command runs" grep -qF \
+  'The CLI renews the lease while the command runs' "$DOCDIR/CUTOVER.md"
+check "50 docs: the skill prefers a symlink over a copy for Claude Code" grep -qF \
+  'prefer a **symlink**' "$SKILL_SRC"
 # The listing, not the path: on a case-insensitive filesystem (macOS) `cutover.md` IS `CUTOVER.md`,
 # so `test ! -e` fails there — the one platform where a name mismatch is invisible. An exact-name
 # listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.

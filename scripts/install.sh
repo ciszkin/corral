@@ -371,12 +371,19 @@ EOF
     rm -f "$ICON"; note_removed "Corral icon"
   fi
   rm -f "$ICON.sha"
-  # The agent skill is ours only while it is byte-identical to the shipped copy: an agent may have
-  # edited it, and that edit is not ours to throw away. ~/.agents/skills is left in place — it is
-  # what declared this host an agent host in the first place.
+  # The agent skill is ours only while it still matches the hash recorded at install: an agent may
+  # have edited it, and that edit is not ours to throw away. The recorded hash is what survives an
+  # update — `corral update --apply` installs from the NEW bundle, so comparing against the bundle
+  # running the uninstall would keep a skill nobody edited (review 48 §4). A skill from an older
+  # installer has no `.sha`; fall back to the byte comparison, and keep the `.sha` of a kept skill.
+  # ~/.agents/skills is left in place — it is what declared this host an agent host.
   SKILL_DST="$TARGET_HOME/.agents/skills/corral/SKILL.md"
   if [[ -e "$SKILL_DST" ]]; then
-    if SKILL_SRC=$(resolve_skill) && cmp -s "$SKILL_SRC" "$SKILL_DST"; then
+    if [[ -f "$SKILL_DST.sha" && "$(sha256sum "$SKILL_DST" 2>/dev/null | cut -d' ' -f1)" = "$(cat "$SKILL_DST.sha")" ]]; then
+      rm -f "$SKILL_DST" "$SKILL_DST.sha"
+      rmdir "$TARGET_HOME/.agents/skills/corral" 2>/dev/null || true
+      note_removed "the corral agent skill (~/.agents/skills/corral/SKILL.md)"
+    elif [[ ! -f "$SKILL_DST.sha" ]] && SKILL_SRC=$(resolve_skill) && cmp -s "$SKILL_SRC" "$SKILL_DST"; then
       rm -f "$SKILL_DST"
       rmdir "$TARGET_HOME/.agents/skills/corral" 2>/dev/null || true
       note_removed "the corral agent skill (~/.agents/skills/corral/SKILL.md)"
@@ -771,7 +778,9 @@ fi
 
 # The agent skill: a host declares an agent harness by already having ~/.agents/skills. Never create
 # ~/.agents from nothing, and replace the file atomically like the shims so a running agent reads a
-# whole file. Claude Code discovers skills under ~/.claude/skills/<name>/ instead (see the summary).
+# whole file. Record the shipped copy's hash beside it, the same way the icon records $ICON.sha, so
+# an uninstall after `corral update --apply` can tell "ours, unchanged" from "edited" (review 48 §4).
+# Claude Code discovers skills under ~/.claude/skills/<name>/ instead (see the summary).
 if [[ -d "$TARGET_HOME/.agents/skills" ]]; then
   if ! SKILL_SRC=$(resolve_skill); then
     echo "ERROR: skills/corral/SKILL.md missing from the bundle; the agent skill was NOT installed." >&2
@@ -780,7 +789,10 @@ if [[ -d "$TARGET_HOME/.agents/skills" ]]; then
   mkdir -p "$TARGET_HOME/.agents/skills/corral"
   replace_file "$SKILL_SRC" "$TARGET_HOME/.agents/skills/corral/SKILL.md" "the corral agent skill" \
     || { echo "ERROR: cannot install the agent skill at $TARGET_HOME/.agents/skills/corral/SKILL.md." >&2; exit 1; }
+  sha256sum "$SKILL_SRC" | cut -d' ' -f1 > "$TARGET_HOME/.agents/skills/corral/SKILL.md.sha"
   echo "Installed the corral agent skill (~/.agents/skills/corral/SKILL.md; Claude Code reads ~/.claude/skills/corral/)"
+else
+  echo "Agent skill not installed: no ~/.agents/skills; Claude Code reads ~/.claude/skills/corral/"
 fi
 
 if want_ui && [[ $IS_WINDOWS -eq 1 ]]; then

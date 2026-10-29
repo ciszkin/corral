@@ -29,6 +29,29 @@ import java.util.concurrent.atomic.AtomicReference
 import java.util.jar.JarFile
 import kotlin.system.exitProcess
 
+/**
+ * The bounds on the CLI's own HTTP calls to the daemon. Every call carries one: a daemon that
+ * accepts the connection and never answers must never park the CLI — neither the normal exit
+ * path nor the shutdown hook (row 52).
+ *
+ * - [EXIT_PATH_TIMEOUT_SECONDS] for the calls that run while the CLI is leaving: the release, the
+ *   heartbeat's renew, the ticket cancel, and the `free`/`renew` verbs (the same endpoints the
+ *   release and the renew use). They must never hold the exit, so they get the short bound the
+ *   renew has always had.
+ * - [DAEMON_CALL_TIMEOUT_SECONDS] for the calls that answer at once (a claim, a ticket poll, a
+ *   read): the bound `get` has always used.
+ * - [EMULATOR_CALL_TIMEOUT_SECONDS] for the emulator start/stop: an AVD takes minutes to boot, so
+ *   a seconds-long bound would cut a legitimate boot short.
+ * - [UPDATE_CHECK_TIMEOUT_SECONDS] for the daemon's cached update check, [SCREENSHOT_TIMEOUT_SECONDS]
+ *   for a device screenshot, and [EVENTS_CONNECT_TIMEOUT_SECONDS] for the events socket handshake.
+ */
+internal const val EXIT_PATH_TIMEOUT_SECONDS = 2L
+internal const val DAEMON_CALL_TIMEOUT_SECONDS = 5L
+internal const val EMULATOR_CALL_TIMEOUT_SECONDS = 600L
+internal const val UPDATE_CHECK_TIMEOUT_SECONDS = 15L
+internal const val SCREENSHOT_TIMEOUT_SECONDS = 30L
+internal const val EVENTS_CONNECT_TIMEOUT_SECONDS = 10L
+
 /** Percent-encodes a path segment; spaces must be `%20`, not the form-encoding `+`. */
 internal fun pathSegment(s: String): String =
     URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20")
@@ -505,13 +528,13 @@ object CorralCli {
     private val http = HttpClient.newHttpClient()
 
     private fun get(path: String) = http.send(
-        HttpRequest.newBuilder(URI.create("$url$path")).timeout(Duration.ofSeconds(5)).GET().build(),
+        HttpRequest.newBuilder(URI.create("$url$path")).timeout(Duration.ofSeconds(DAEMON_CALL_TIMEOUT_SECONDS)).GET().build(),
         HttpResponse.BodyHandlers.ofString()).let(::ok).body()
 
     /** The daemon's cached update check for the plumbing verbs; null when unreachable or non-200. */
     private fun fetchUpdate(): UpdateInfo? = runCatching {
         val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/update"))
-            .timeout(Duration.ofSeconds(15)).GET().build(), HttpResponse.BodyHandlers.ofString())
+            .timeout(Duration.ofSeconds(UPDATE_CHECK_TIMEOUT_SECONDS)).GET().build(), HttpResponse.BodyHandlers.ofString())
         if (r.statusCode() == 200) corralJson.decodeFromString<UpdateInfo>(r.body()) else null
     }.getOrNull()
 
@@ -520,7 +543,7 @@ object CorralCli {
         val resp = http.send(
             HttpRequest.newBuilder(URI.create("$url/api/devices/${URLEncoder.encode(serial, StandardCharsets.UTF_8)}/screenshot" +
                 "?owner=${URLEncoder.encode(owner, StandardCharsets.UTF_8)}"))
-                .timeout(Duration.ofSeconds(30)).GET().build(),
+                .timeout(Duration.ofSeconds(SCREENSHOT_TIMEOUT_SECONDS)).GET().build(),
             HttpResponse.BodyHandlers.ofByteArray())
         if (resp.statusCode() != 200) {
             System.err.println(String(resp.body(), StandardCharsets.UTF_8)
@@ -536,27 +559,44 @@ object CorralCli {
         exitProcess(0)
     }
 
-    private fun send(method: String, path: String, body: String, timeoutSeconds: Long = 0) = http.send(
+    /**
+     * A POST/DELETE to the daemon, always bounded. [timeoutSeconds] is a bound, not a hint:
+     * `HttpRequest.Builder.timeout` rejects a zero duration, so no call can be left unbounded —
+     * that is the whole point (row 52).
+     */
+    private fun send(method: String, path: String, body: String,
+                     timeoutSeconds: Long = DAEMON_CALL_TIMEOUT_SECONDS) = http.send(
         HttpRequest.newBuilder(URI.create("$url$path"))
             .method(method, HttpRequest.BodyPublishers.ofString(body))
             .header("Content-Type", "application/json")
-            .let { b -> if (timeoutSeconds > 0) b.timeout(Duration.ofSeconds(timeoutSeconds)) else b }
+            .timeout(Duration.ofSeconds(timeoutSeconds))
             .build(),
         HttpResponse.BodyHandlers.ofString()).let(::ok).body()
 
-    private fun trySend(method: String, path: String, body: String) = http.send(
+    /** The same call without the `>= 400` abort: the caller reads the status itself. */
+    private fun trySend(method: String, path: String, body: String,
+                        timeoutSeconds: Long = DAEMON_CALL_TIMEOUT_SECONDS) = http.send(
         HttpRequest.newBuilder(URI.create("$url$path"))
             .method(method, HttpRequest.BodyPublishers.ofString(body))
-            .header("Content-Type", "application/json").build(),
+            .header("Content-Type", "application/json")
+            .timeout(Duration.ofSeconds(timeoutSeconds))
+            .build(),
         HttpResponse.BodyHandlers.ofString())
 
     private fun ok(r: HttpResponse<String>) = r.also {
         if (it.statusCode() >= 400) { System.err.println(it.body()); exitProcess(1) }
     }
 
+    /**
+     * Hand the lease back. Bounded like the renew: this runs on the exit path and in the
+     * shutdown hook, so a daemon that accepts the connection and never answers must not park the
+     * CLI after the command has already finished (row 52). The lease is then freed by the
+     * daemon's own TTL/pid machinery — the designed fallback, not a loss.
+     */
     private fun release(serial: String) {
         runCatching {
             val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/$serial"))
+                .timeout(Duration.ofSeconds(EXIT_PATH_TIMEOUT_SECONDS))
                 .method("DELETE", HttpRequest.BodyPublishers.ofString(Json.encodeToString(FreeRequest(owner = owner))))
                 .header("Content-Type", "application/json").build(), HttpResponse.BodyHandlers.ofString())
             if (r.statusCode() >= 400) System.err.println(r.body())
@@ -574,7 +614,7 @@ object CorralCli {
     private fun renewLease(serial: String, pids: List<Long>) {
         runCatching {
             http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/$serial/renew"))
-                .timeout(Duration.ofSeconds(2))
+                .timeout(Duration.ofSeconds(EXIT_PATH_TIMEOUT_SECONDS))
                 .method("POST", HttpRequest.BodyPublishers.ofString(
                     Json.encodeToString(RenewRequest(owner = owner, ttlSeconds = leaseTtlSeconds(), pids = pids))))
                 .header("Content-Type", "application/json").build(), HttpResponse.BodyHandlers.ofString())
@@ -641,7 +681,7 @@ object CorralCli {
                 val s = served.get()
                 if (s != null) { if (releaseOnExit) release(s) }
                 else http.send(HttpRequest.newBuilder(URI.create("$url/api/leases/tickets/$ticket"))
-                    .timeout(Duration.ofSeconds(2))
+                    .timeout(Duration.ofSeconds(EXIT_PATH_TIMEOUT_SECONDS))
                     .method("DELETE", HttpRequest.BodyPublishers.ofString(
                         Json.encodeToString(TicketCancelRequest(owner = owner))))
                     .header("Content-Type", "application/json")
@@ -726,7 +766,9 @@ object CorralCli {
                 while (true) {
                     val closed = CountDownLatch(1)
                     try {
-                        http.newWebSocketBuilder().buildAsync(target, object : WebSocket.Listener {
+                        http.newWebSocketBuilder()
+                            .connectTimeout(Duration.ofSeconds(EVENTS_CONNECT_TIMEOUT_SECONDS))
+                            .buildAsync(target, object : WebSocket.Listener {
                             override fun onText(webSocket: WebSocket, data: CharSequence, last: Boolean) =
                                 CompletableFuture.completedFuture(webSocket).also { webSocket.request(1); println(data) }
                             override fun onError(webSocket: WebSocket, error: Throwable) { closed.countDown() }
@@ -743,7 +785,8 @@ object CorralCli {
             "doctor" -> {
                 var problems = 0
                 val pool: List<Device>? = try {
-                    val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/devices")).GET().build(),
+                    val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/devices"))
+                        .timeout(Duration.ofSeconds(DAEMON_CALL_TIMEOUT_SECONDS)).GET().build(),
                         HttpResponse.BodyHandlers.ofString())
                     if (r.statusCode() == 200) decodeDeviceList(r.body()) else null
                 } catch (_: Exception) { null }
@@ -793,7 +836,7 @@ object CorralCli {
                 // informational: an available update is not a failure, and an unknown must not read as current
                 val info = runCatching {
                     val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/update"))
-                        .timeout(Duration.ofSeconds(15)).GET().build(), HttpResponse.BodyHandlers.ofString())
+                        .timeout(Duration.ofSeconds(UPDATE_CHECK_TIMEOUT_SECONDS)).GET().build(), HttpResponse.BodyHandlers.ofString())
                     if (r.statusCode() == 200) corralJson.decodeFromString<UpdateInfo>(r.body()) else null
                 }.getOrNull()
                 println(updateLine(info))
@@ -875,18 +918,24 @@ object CorralCli {
                         .map { it.jsonObject["serial"]!!.jsonPrimitive.content }
                     if (owned.isEmpty()) println("no leases owned by $owner")
                     else {
-                        owned.forEach { send("DELETE", "/api/leases/$it", Json.encodeToString(FreeRequest(owner = owner))) }
+                        // The release's own endpoint and body, so it gets the release's bound.
+                        owned.forEach {
+                            send("DELETE", "/api/leases/$it", Json.encodeToString(FreeRequest(owner = owner)),
+                                timeoutSeconds = EXIT_PATH_TIMEOUT_SECONDS)
+                        }
                         println("freed: ${owned.joinToString(", ")}")
                     }
                 } else {
-                    send("DELETE", "/api/leases/$target", Json.encodeToString(FreeRequest(owner = owner)))
+                    send("DELETE", "/api/leases/$target", Json.encodeToString(FreeRequest(owner = owner)),
+                        timeoutSeconds = EXIT_PATH_TIMEOUT_SECONDS)
                     println("freed $target")
                 }
             }
             "renew" -> {
                 val serial = args.getOrNull(1) ?: usage(2)
                 send("POST", "/api/leases/$serial/renew",
-                    Json.encodeToString(RenewRequest(owner = owner, ttlSeconds = leaseTtlSeconds())))
+                    Json.encodeToString(RenewRequest(owner = owner, ttlSeconds = leaseTtlSeconds())),
+                    timeoutSeconds = EXIT_PATH_TIMEOUT_SECONDS)
                 println("renewed $serial")
             }
             "lease" -> {
@@ -1000,13 +1049,15 @@ object CorralCli {
                     }
                     "start" -> {
                         val avd = args.getOrNull(2) ?: usage(2)
-                        println(send("POST", "/api/emulators/${pathSegment(avd)}/start", "{}"))
+                        // An AVD takes minutes to boot: the emulator bound is generous on purpose.
+                        println(send("POST", "/api/emulators/${pathSegment(avd)}/start", "{}",
+                            timeoutSeconds = EMULATOR_CALL_TIMEOUT_SECONDS))
                     }
                     "stop" -> {
                         val avd = args.getOrNull(2) ?: usage(2)
                         val force = args.drop(3).any { it == "--force" }
                         println(send("POST", "/api/emulators/${pathSegment(avd)}/stop",
-                            Json.encodeToString(StopBody(force))))
+                            Json.encodeToString(StopBody(force)), timeoutSeconds = EMULATOR_CALL_TIMEOUT_SECONDS))
                     }
                     else -> usage(2)
                 }

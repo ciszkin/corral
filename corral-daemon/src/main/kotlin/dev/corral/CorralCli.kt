@@ -251,17 +251,44 @@ internal fun stopChildTree(proc: Process, graceMillis: Long = 2000): Boolean {
 
 /**
  * The TTL every lease this CLI requests gets. `CORRAL_LEASE_TTL_SECONDS` is the one knob — the
- * `lease` claim, a queued ticket, `--all`, `claim` and `renew` all use it — and the default stays
- * 1800 s. A value that is not a positive number is ignored rather than guessed at, and an absurd
- * one is clamped to [MAX_LEASE_TTL_SECONDS] so the beat arithmetic cannot overflow.
- *
- * `shortcut:` a TTL of a few seconds cannot honour TTL/3 plus the renew POST's 2 s timeout; the
- * knob is for short test holds, not a promise that every tiny value survives a slow daemon.
+ * `lease` claim, a queued ticket, `--all`, `claim`, `wait` and `renew` all use it — and the default
+ * stays 1800 s. The knob is for short test holds, not a promise that every tiny value survives: a
+ * TTL below [MIN_LEASE_TTL_SECONDS] cannot honour TTL/3 plus the renew POST's 2 s timeout, so it is
+ * raised to the floor (the beat is then at least 3 s). An absurd value is clamped to
+ * [MAX_LEASE_TTL_SECONDS] so the beat arithmetic cannot overflow, and a value that is not a positive
+ * integer falls back to the default. Each of those replacements says so on stderr, once per process,
+ * exactly as `--timeout` does; only an unset (or empty) knob is silent (review 49 §5a).
  */
+internal const val DEFAULT_LEASE_TTL_SECONDS = 1800L
+internal const val MIN_LEASE_TTL_SECONDS = 10L
 internal const val MAX_LEASE_TTL_SECONDS = 86_400L
 
-internal fun leaseTtlSeconds(env: String? = System.getenv("CORRAL_LEASE_TTL_SECONDS")): Long =
-    env?.toLongOrNull()?.takeIf { it > 0 }?.coerceAtMost(MAX_LEASE_TTL_SECONDS) ?: 1800L
+private val warnedLeaseTtl = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+private fun warnLeaseTtl(message: String) {
+    if (warnedLeaseTtl.add(message)) System.err.println(message)
+}
+
+internal fun leaseTtlSeconds(
+    env: String? = System.getenv("CORRAL_LEASE_TTL_SECONDS"),
+    warn: (String) -> Unit = ::warnLeaseTtl,
+): Long {
+    val raw = env?.trim()
+    if (raw.isNullOrEmpty()) return DEFAULT_LEASE_TTL_SECONDS
+    val parsed = raw.toLongOrNull()
+    if (parsed == null || parsed <= 0L) {
+        warn("corral: CORRAL_LEASE_TTL_SECONDS=$raw is not a positive integer; using ${DEFAULT_LEASE_TTL_SECONDS}s")
+        return DEFAULT_LEASE_TTL_SECONDS
+    }
+    if (parsed < MIN_LEASE_TTL_SECONDS) {
+        warn("corral: CORRAL_LEASE_TTL_SECONDS=$raw is below the ${MIN_LEASE_TTL_SECONDS}s floor; using ${MIN_LEASE_TTL_SECONDS}s")
+        return MIN_LEASE_TTL_SECONDS
+    }
+    if (parsed > MAX_LEASE_TTL_SECONDS) {
+        warn("corral: CORRAL_LEASE_TTL_SECONDS=$raw clamped to ${MAX_LEASE_TTL_SECONDS}s (max $MAX_LEASE_TTL_SECONDS)")
+        return MAX_LEASE_TTL_SECONDS
+    }
+    return parsed
+}
 
 /** How often the heartbeat beats: a third of the TTL, never faster than once a second. */
 internal fun heartbeatMillis(ttlSeconds: Long): Long = (ttlSeconds / 3).coerceAtLeast(1) * 1000

@@ -168,6 +168,8 @@ MARKER_DAEMON_BAT='rem corral daemon launcher'
 REMOVED=""
 KEPT_SHIMS=""
 KEPT_SKILL=""
+KEPT_CLAUDE_LINK=""
+KEPT_CLAUDE_LINK_WITH_SKILL=""
 note_removed() { REMOVED="$REMOVED$1, "; }
 remove_shim() { # remove_shim <path> <marker> <label>
   [[ -e "$1" ]] || return 0
@@ -371,6 +373,26 @@ EOF
     rm -f "$ICON"; note_removed "Corral icon"
   fi
   rm -f "$ICON.sha"
+  # The skill recommends ~/.claude/skills/corral as a symlink into ~/.agents/skills/corral. When the
+  # skill is removed, remove that link with it, or it is left dangling; when the skill is kept (an
+  # agent edited it), the link stays too and is named below, so the edit remains reachable from the
+  # harness that reads it. Anything else at that path (a real directory, a file, a link into somewhere
+  # else) is not ours to delete and is named. Tested BEFORE the target is removed, so "resolves into"
+  # is a real resolution, not a guess at a path that no longer exists. `readlink -f` is the same tool
+  # detect_java already relies on (review 49 §5b).
+  CLAUDE_SKILL="$TARGET_HOME/.claude/skills/corral"
+  CLAUDE_LINK_OURS=0
+  if [[ -L "$CLAUDE_SKILL" ]]; then
+    link_to=$(readlink -f "$CLAUDE_SKILL" 2>/dev/null || true)
+    skill_to=$(readlink -f "$TARGET_HOME/.agents/skills/corral" 2>/dev/null || true)
+    if [[ -n "$link_to" && -n "$skill_to" && "$link_to" = "$skill_to" ]]; then
+      CLAUDE_LINK_OURS=1
+    else
+      KEPT_CLAUDE_LINK="$CLAUDE_SKILL"
+    fi
+  elif [[ -e "$CLAUDE_SKILL" ]]; then
+    KEPT_CLAUDE_LINK="$CLAUDE_SKILL"
+  fi
   # The agent skill is ours only while it still matches the hash recorded at install: an agent may
   # have edited it, and that edit is not ours to throw away. The recorded hash is what survives an
   # update — `corral update --apply` installs from the NEW bundle, so comparing against the bundle
@@ -378,6 +400,7 @@ EOF
   # installer has no `.sha`; fall back to the byte comparison, and keep the `.sha` of a kept skill.
   # ~/.agents/skills is left in place — it is what declared this host an agent host.
   SKILL_DST="$TARGET_HOME/.agents/skills/corral/SKILL.md"
+  SKILL_KEPT=0
   if [[ -e "$SKILL_DST" ]]; then
     if [[ -f "$SKILL_DST.sha" && "$(sha256sum "$SKILL_DST" 2>/dev/null | cut -d' ' -f1)" = "$(cat "$SKILL_DST.sha")" ]]; then
       rm -f "$SKILL_DST" "$SKILL_DST.sha"
@@ -388,7 +411,21 @@ EOF
       rmdir "$TARGET_HOME/.agents/skills/corral" 2>/dev/null || true
       note_removed "the corral agent skill (~/.agents/skills/corral/SKILL.md)"
     else
+      SKILL_KEPT=1
       KEPT_SKILL="$SKILL_DST"
+    fi
+  fi
+  if [[ $CLAUDE_LINK_OURS -eq 1 ]]; then
+    # The link's fate follows the skill's: an edited skill is not ours to throw away, and severing
+    # it from the only harness that reads ~/.claude/skills would honour the letter of row 54 and
+    # break its promise. Only a removed skill (or a dangling link with no skill at all) takes the
+    # link with it; a kept skill keeps the link, named below (review 49 pass-49 follow-up).
+    if [[ $SKILL_KEPT -eq 1 ]]; then
+      KEPT_CLAUDE_LINK_WITH_SKILL="$CLAUDE_SKILL"
+    elif rm -f "$CLAUDE_SKILL" 2>/dev/null && [[ ! -e "$CLAUDE_SKILL" && ! -L "$CLAUDE_SKILL" ]]; then
+      note_removed "the Claude Code skill symlink (~/.claude/skills/corral)"
+    else
+      KEPT_CLAUDE_LINK="$CLAUDE_SKILL"
     fi
   fi
   if command -v update-desktop-database >/dev/null 2>&1; then
@@ -434,6 +471,12 @@ EOF
   fi
   if [[ -n "$KEPT_SKILL" ]]; then
     echo "Left alone (edited since install, or its shipped copy is unavailable — not byte-identical): $KEPT_SKILL"
+  fi
+  if [[ -n "$KEPT_CLAUDE_LINK" ]]; then
+    echo "Left alone (not a symlink into ~/.agents/skills/corral): $KEPT_CLAUDE_LINK"
+  fi
+  if [[ -n "$KEPT_CLAUDE_LINK_WITH_SKILL" ]]; then
+    echo "Left alone (its skill was kept, so the link into it stays): $KEPT_CLAUDE_LINK_WITH_SKILL"
   fi
   if [[ "$REMOVED" == *"~/bin/adb,"* ]]; then
     echo "Note: if ~/bin was the only place adb resolved from, restore the real adb onto PATH."
@@ -786,11 +829,32 @@ if [[ -d "$TARGET_HOME/.agents/skills" ]]; then
     echo "ERROR: skills/corral/SKILL.md missing from the bundle; the agent skill was NOT installed." >&2
     exit 1
   fi
+  SKILL_DST="$TARGET_HOME/.agents/skills/corral/SKILL.md"
   mkdir -p "$TARGET_HOME/.agents/skills/corral"
-  replace_file "$SKILL_SRC" "$TARGET_HOME/.agents/skills/corral/SKILL.md" "the corral agent skill" \
-    || { echo "ERROR: cannot install the agent skill at $TARGET_HOME/.agents/skills/corral/SKILL.md." >&2; exit 1; }
-  sha256sum "$SKILL_SRC" | cut -d' ' -f1 > "$TARGET_HOME/.agents/skills/corral/SKILL.md.sha"
-  echo "Installed the corral agent skill (~/.agents/skills/corral/SKILL.md; Claude Code reads ~/.claude/skills/corral/)"
+  new=$(sha256sum "$SKILL_SRC" | cut -d' ' -f1)
+  # The icon's three branches, for the same reason (review 49 §4): ours and unchanged is refreshed;
+  # anything already equal to this bundle is adopted by writing the sidecar (a legacy install, or a
+  # file already up to date); anything else was edited by an agent and is not ours to overwrite.
+  if [[ ! -f "$SKILL_DST" ]]; then
+    replace_file "$SKILL_SRC" "$SKILL_DST" "the corral agent skill" \
+      || { echo "ERROR: cannot install the agent skill at $SKILL_DST." >&2; exit 1; }
+    printf '%s\n' "$new" > "$SKILL_DST.sha"
+    echo "Installed the corral agent skill (~/.agents/skills/corral/SKILL.md; Claude Code reads ~/.claude/skills/corral/)"
+  elif [[ -f "$SKILL_DST.sha" && "$(sha256sum "$SKILL_DST" 2>/dev/null | cut -d' ' -f1)" = "$(cat "$SKILL_DST.sha")" ]]; then
+    replace_file "$SKILL_SRC" "$SKILL_DST" "the corral agent skill" \
+      || { echo "ERROR: cannot refresh the agent skill at $SKILL_DST." >&2; exit 1; }
+    printf '%s\n' "$new" > "$SKILL_DST.sha"
+    echo "Refreshed the corral agent skill (~/.agents/skills/corral/SKILL.md; Claude Code reads ~/.claude/skills/corral/)"
+  elif [[ "$(sha256sum "$SKILL_DST" 2>/dev/null | cut -d' ' -f1)" = "$new" ]]; then
+    printf '%s\n' "$new" > "$SKILL_DST.sha"
+    echo "Adopted the corral agent skill (~/.agents/skills/corral/SKILL.md; already equal to the bundle's copy; Claude Code reads ~/.claude/skills/corral/)"
+  else
+    # An edited skill stops receiving updates until someone reconciles it — the same trade-off the
+    # icon makes. Drop the sidecar rather than leave a hash that no longer describes the file; with
+    # no sidecar, uninstall falls back to the byte comparison and still keeps the edit.
+    rm -f "$SKILL_DST.sha"
+    echo "Left alone (edited since install, or its shipped copy is unavailable — not byte-identical): $SKILL_DST"
+  fi
 else
   echo "Agent skill not installed: no ~/.agents/skills; Claude Code reads ~/.claude/skills/corral/"
 fi

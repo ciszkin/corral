@@ -106,6 +106,14 @@ A claim's TTL is the hold, and its owner string is the identity, so a claim
 outlives the process that made it. `corral free --all` drops everything you
 own.
 
+Every lease the CLI asks for has a TTL; the default is 1800 seconds (30
+minutes). `CORRAL_LEASE_TTL_SECONDS` overrides it for `claim`, `wait`, `lease`
+and `renew` (the `lease` CLI then renews at a third of it). It is meant for test
+hosts that need a short hold: a value below 10 seconds is raised to 10, one
+above 86400 seconds is clamped to 86400, and a value that is not a positive
+integer falls back to 1800. Each of those three prints a warning on stderr;
+only an unset knob is silent.
+
 Or let a wrapper do the claim/free around one command:
 
 ```sh
@@ -339,7 +347,9 @@ This stops and disables the `corral` user service, removes the unit, the adb
 wrapper, the `corral` and `corral-ui` shims, the desktop launcher and icon, the
 Gradle `init.d` gate, and the `~/.config/corral` files, and removes `~/.corral`
 (the daemon jar and its SQLite database). Your Android SDK and your `PATH`
-edits in the shell rc files are left alone.
+edits in the shell rc files are left alone. An agent-edited skill keeps both its
+file and the link at `~/.claude/skills/corral` that points at it; both are named
+under "Left alone".
 
 ## Known limits
 

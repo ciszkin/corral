@@ -155,7 +155,7 @@ check "44 skill: install names the skill and both harness paths" bash -c \
 check "44 skill: no replacement temp file is left behind" bash -c \
   "[ -f '$SKILL_DST' ] && ! ls '$TMPHOME/.agents/skills/corral' | grep -q '\.new\.'"
 check "44 skill: install goes through replace_file, never cp in place" bash -c \
-  "grep -qF 'replace_file \"\$SKILL_SRC\" \"\$TARGET_HOME/.agents/skills/corral/SKILL.md\"' '$SRC/install.sh' && ! grep -qF 'cp \"\$SKILL_SRC\"' '$SRC/install.sh'"
+  "grep -qF 'replace_file \"\$SKILL_SRC\" \"\$SKILL_DST\"' '$SRC/install.sh' && ! grep -qF 'cp \"\$SKILL_SRC\"' '$SRC/install.sh'"
 check "9.6 user rules edit survives re-run" grep -q 'sandbox sentinel edit' "$RULES"
 check "9.9 daemon.env edit survives re-run" grep -q 'sandbox daemon.env sentinel edit' "$DAEMON_ENV"
 check "9.3 artifacts intact after re-run" bash -c \
@@ -1253,6 +1253,8 @@ env HOME="$TMPHOME_V" PATH="$STUB:$PATH" bash "$BUNDLE_V2/install.sh" --java "$F
 dump_on_fail "$rcv2" "$TMP/skill-v2-install.log"
 check "48 skill: the update's bundle replaced it with v2 and recorded v2's hash" bash -c \
   "grep -qF 'corral skill, v2' '$TMPHOME_V/.agents/skills/corral/SKILL.md' && [ \"\$(sha256sum '$TMPHOME_V/.agents/skills/corral/SKILL.md' | cut -d' ' -f1)\" = \"\$(cat '$TMPHOME_V/.agents/skills/corral/SKILL.md.sha')\" ]"
+check "54 skill: an ours-and-unchanged skill is reported as refreshed, not installed" grep -qF \
+  'Refreshed the corral agent skill' "$TMP/skill-v2-install.log"
 env HOME="$TMPHOME_V" PATH="$STUB:$PATH" bash "$BUNDLE_V1/install.sh" --home "$TMPHOME_V" --uninstall \
   >"$TMP/skill-v1-uninstall.log" 2>&1; rcvu=$?
 dump_on_fail "$rcvu" "$TMP/skill-v1-uninstall.log"
@@ -1260,6 +1262,129 @@ check "48 skill: uninstall from v1 removes the v2 skill (nobody edited it)" bash
   "[ ! -e '$TMPHOME_V/.agents/skills/corral/SKILL.md' ] && [ ! -e '$TMPHOME_V/.agents/skills/corral/SKILL.md.sha' ]"
 check "48 skill: and its summary names the skill as removed" bash -c \
   "grep '^Removed:' '$TMP/skill-v1-uninstall.log' | grep -q 'agent skill'"
+
+# ===== 54: an update must not overwrite a skill an agent edited =====
+# `corral update --apply` installs from a new bundle. Install uses the icon's three branches: ours
+# and unchanged is refreshed, an equal copy is adopted by writing the sidecar, and anything else is
+# an agent's edit that this installer must not throw away (review 49 §4).
+TMPHOME_ED="$TMP/home-skill-edited-update"; SDK_ED="$TMPHOME_ED/Android/Sdk/platform-tools"
+mkdir -p "$SDK_ED" "$TMPHOME_ED/bin" "$TMPHOME_ED/.agents/skills"; : > "$TMPHOME_ED/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "ed-sdk-adb $@"' > "$SDK_ED/adb"; chmod +x "$SDK_ED/adb"
+BUNDLE_ED1="$TMP/bundle-ed1"; BUNDLE_ED2="$TMP/bundle-ed2"
+mkskillbundle "$BUNDLE_ED1" "# corral skill, edited-v1"
+mkskillbundle "$BUNDLE_ED2" "# corral skill, edited-v2"
+SKILL_ED="$TMPHOME_ED/.agents/skills/corral/SKILL.md"
+env HOME="$TMPHOME_ED" PATH="$STUB:$PATH" bash "$BUNDLE_ED1/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_ED/adb" --jar "$JAR" --home "$TMPHOME_ED" --no-ui >"$TMP/ed-v1-install.log" 2>&1; rced1=$?
+dump_on_fail "$rced1" "$TMP/ed-v1-install.log"
+check "54 skill: v1 installed and recorded its hash" bash -c \
+  "grep -qF 'Installed the corral agent skill' '$TMP/ed-v1-install.log' && [ -f '$SKILL_ED.sha' ] && [ \"\$(sha256sum '$SKILL_ED' | cut -d' ' -f1)\" = \"\$(cat '$SKILL_ED.sha')\" ]"
+# A legacy install (or any install whose sidecar was lost) with the bundle's own bytes is adopted.
+rm -f "$SKILL_ED.sha"
+env HOME="$TMPHOME_ED" PATH="$STUB:$PATH" bash "$BUNDLE_ED1/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_ED/adb" --jar "$JAR" --home "$TMPHOME_ED" --no-ui >"$TMP/ed-adopt.log" 2>&1; rceda=$?
+dump_on_fail "$rceda" "$TMP/ed-adopt.log"
+check "54 skill: an equal copy with no sidecar is adopted, not reported as installed" bash -c \
+  "grep -qF 'Adopted the corral agent skill' '$TMP/ed-adopt.log' && [ -f '$SKILL_ED.sha' ] && [ \"\$(sha256sum '$SKILL_ED' | cut -d' ' -f1)\" = \"\$(cat '$SKILL_ED.sha')\" ]"
+printf '\n# local note: devB is the flaky one, prefer devA\n' >> "$SKILL_ED"
+# The v2 install is the `update --apply` case: a DIFFERENT bundle over the edited v1 file.
+env HOME="$TMPHOME_ED" PATH="$STUB:$PATH" bash "$BUNDLE_ED2/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_ED/adb" --jar "$JAR" --home "$TMPHOME_ED" --no-ui >"$TMP/ed-v2-install.log" 2>&1; rced2=$?
+dump_on_fail "$rced2" "$TMP/ed-v2-install.log"
+check "54 skill: the agent's edit survives a later bundle's install" bash -c \
+  "grep -qF 'local note: devB is the flaky one' '$SKILL_ED' && grep -qF 'corral skill, edited-v1' '$SKILL_ED'"
+check "54 skill: the later bundle did NOT overwrite the edit with v2" bash -c \
+  "! grep -qF 'corral skill, edited-v2' '$SKILL_ED'"
+check "54 skill: the summary names the edited skill under Left alone" bash -c \
+  "grep -q 'Left alone' '$TMP/ed-v2-install.log' && grep -qF '$SKILL_ED' '$TMP/ed-v2-install.log' && grep -qF 'edited' '$TMP/ed-v2-install.log'"
+check "54 skill: no sidecar is left claiming the edited file is the bundle's copy" test ! -e "$SKILL_ED.sha"
+env HOME="$TMPHOME_ED" PATH="$STUB:$PATH" bash "$BUNDLE_ED2/install.sh" --home "$TMPHOME_ED" --uninstall \
+  >"$TMP/ed-uninstall.log" 2>&1; rcedu=$?
+dump_on_fail "$rcedu" "$TMP/ed-uninstall.log"
+check "54 skill: uninstall still keeps the edited skill when its sidecar is gone" bash -c \
+  "grep -qF 'local note: devB is the flaky one' '$SKILL_ED' && grep -q 'edited since install' '$TMP/ed-uninstall.log'"
+
+# ===== 56: uninstall removes the Claude Code symlink only when it points at our skill =====
+# The skill recommends ~/.claude/skills/corral -> ../../.agents/skills/corral. If uninstall removes
+# the target and leaves the link, Claude Code is left with a dangling skill (review 49 §5b). A real
+# directory or a link into somewhere else is NOT ours: it survives and the summary names it.
+make_dir_link() { # make_dir_link <target> <link>; false when this host cannot make a symlink
+  rm -rf "$2"
+  ln -s "$1" "$2" 2>/dev/null
+  [ -L "$2" ] && return 0
+  rm -rf "$2"
+  if command -v cmd.exe >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
+    # A directory junction is not a symlink to Windows, but MSYS treats it as one and `rm -f` still
+    # removes the link alone. This host cannot create a real symlink without elevation.
+    cmd.exe //c mklink //J "$(cygpath -w "$2")" "$(cygpath -w "$1")" >/dev/null 2>&1
+    [ -L "$2" ] && return 0
+    rm -rf "$2"
+  fi
+  return 1
+}
+skill_link_home() { # skill_link_home <home>: install with a skill and make ~/.claude/skills
+  local home="$1" sdks="$1/Android/Sdk/platform-tools"
+  mkdir -p "$sdks" "$1/bin" "$1/.agents/skills" "$1/.claude/skills"; : > "$1/.bashrc"
+  printf '%s\n' '#!/bin/sh' "echo \"link-sdk-adb \$@\"" > "$sdks/adb"; chmod +x "$sdks/adb"
+  env HOME="$1" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+    --adb "$sdks/adb" --jar "$JAR" --home "$1" --no-ui >"$TMP/link-install-$(basename "$1").log" 2>&1
+}
+TMPHOME_CL="$TMP/home-claude-link"
+skill_link_home "$TMPHOME_CL"
+CL_LINK="$TMPHOME_CL/.claude/skills/corral"
+if make_dir_link "$TMPHOME_CL/.agents/skills/corral" "$CL_LINK"; then
+  env HOME="$TMPHOME_CL" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_CL" --uninstall \
+    >"$TMP/link-uninstall.log" 2>&1; rccl=$?
+  dump_on_fail "$rccl" "$TMP/link-uninstall.log"
+  check "56 skill: uninstall removes a ~/.claude/skills/corral link into ~/.agents/skills/corral" bash -c \
+    "[ ! -L '$CL_LINK' ] && [ ! -e '$CL_LINK' ]"
+  check "56 skill: and its summary names the removed link" grep -qF \
+    'the Claude Code skill symlink (~/.claude/skills/corral)' "$TMP/link-uninstall.log"
+else
+  echo "skip 56 skill: this host cannot create a symlink or junction; the removal branch was not exercised" >&2
+  rm -rf "$CL_LINK"
+fi
+# The row-54 interaction: an edited skill is kept, so the link into it must be kept too (and named).
+# Removing it would leave the edit on disk but severed from the only harness that reads
+# ~/.claude/skills/corral. This row fails against the pre-fix code, which removed the link regardless.
+TMPHOME_CLK="$TMP/home-claude-kept-skill-link"
+skill_link_home "$TMPHOME_CLK"
+CLK_LINK="$TMPHOME_CLK/.claude/skills/corral"
+CLK_SKILL="$TMPHOME_CLK/.agents/skills/corral/SKILL.md"
+printf '\n# edited by the agent\n' >> "$CLK_SKILL"
+if make_dir_link "$TMPHOME_CLK/.agents/skills/corral" "$CLK_LINK"; then
+  env HOME="$TMPHOME_CLK" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_CLK" --uninstall \
+    >"$TMP/link-kept-skill-uninstall.log" 2>&1; rcclk=$?
+  dump_on_fail "$rcclk" "$TMP/link-kept-skill-uninstall.log"
+  check "56 skill: an edited skill keeps both the skill and the ~/.claude/skills/corral link" bash -c \
+    "[ -f '$CLK_SKILL' ] && grep -q 'edited by the agent' '$CLK_SKILL' && [ -L '$CLK_LINK' ] && grep -q 'edited by the agent' '$CLK_LINK/SKILL.md'"
+  check "56 skill: the summary names both the kept skill and kept link under Left alone, not Removed" bash -c \
+    "grep -q 'edited since install' '$TMP/link-kept-skill-uninstall.log' && grep -qF '$CLK_SKILL' '$TMP/link-kept-skill-uninstall.log' && grep -qF '$CLK_LINK' '$TMP/link-kept-skill-uninstall.log' && ! grep '^Removed:' '$TMP/link-kept-skill-uninstall.log' | grep -qE 'agent skill|claude/skills/corral'"
+else
+  echo "skip 56 skill: this host cannot create a symlink or junction; the kept-skill link branch was not exercised" >&2
+fi
+# A real directory at that path belongs to the user: never removed, and named.
+TMPHOME_CLD="$TMP/home-claude-real-dir"
+skill_link_home "$TMPHOME_CLD"
+mkdir -p "$TMPHOME_CLD/.claude/skills/corral"; printf 'keep\n' > "$TMPHOME_CLD/.claude/skills/corral/README"
+env HOME="$TMPHOME_CLD" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_CLD" --uninstall \
+  >"$TMP/link-real-uninstall.log" 2>&1; rcclr=$?
+dump_on_fail "$rcclr" "$TMP/link-real-uninstall.log"
+check "56 skill: a real ~/.claude/skills/corral directory survives and is named under Left alone" bash -c \
+  "[ -d '$TMPHOME_CLD/.claude/skills/corral' ] && grep -q keep '$TMPHOME_CLD/.claude/skills/corral/README' && grep -q 'Left alone' '$TMP/link-real-uninstall.log' && grep -qF '$TMPHOME_CLD/.claude/skills/corral' '$TMP/link-real-uninstall.log' && ! grep '^Removed:' '$TMP/link-real-uninstall.log' | grep -q 'claude/skills/corral'"
+# A link that points somewhere else is not ours either.
+TMPHOME_CLF="$TMP/home-claude-foreign-link"
+skill_link_home "$TMPHOME_CLF"
+mkdir -p "$TMPHOME_CLF/.claude/not-corral"
+if make_dir_link "$TMPHOME_CLF/.claude/not-corral" "$TMPHOME_CLF/.claude/skills/corral"; then
+  env HOME="$TMPHOME_CLF" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_CLF" --uninstall \
+    >"$TMP/link-foreign-uninstall.log" 2>&1; rcclf=$?
+  dump_on_fail "$rcclf" "$TMP/link-foreign-uninstall.log"
+  check "56 skill: a foreign link survives and is named under Left alone" bash -c \
+    "[ -L '$TMPHOME_CLF/.claude/skills/corral' ] && grep -q 'Left alone' '$TMP/link-foreign-uninstall.log' && grep -qF '$TMPHOME_CLF/.claude/skills/corral' '$TMP/link-foreign-uninstall.log'"
+else
+  echo "skip 56 skill: this host cannot create a symlink or junction; the foreign-link branch was not exercised" >&2
+fi
 
 # ===== Windows uninstall: remove our .bat shims, never the POSIX names, keep a user's files =====
 # The exact QA repro: simulated-Windows install -> plant ~/bin/adb and a hand-edited corral.bat ->
@@ -2477,6 +2602,14 @@ check "48 docs: CUTOVER says the CLI renews the lease while the command runs" gr
   'The CLI renews the lease while the command runs' "$DOCDIR/CUTOVER.md"
 check "50 docs: the skill prefers a symlink over a copy for Claude Code" grep -qF \
   'prefer a **symlink**' "$SKILL_SRC"
+# 55: the knob every claim/wait/lease/renew reads must be documented where the TTL is, with the default
+# and the replacements it makes (and refuses) so a short test hold cannot silently lose a lease.
+check "55 docs: CUTOVER names CORRAL_LEASE_TTL_SECONDS, its default and its readers" bash -c \
+  "grep -qF 'CORRAL_LEASE_TTL_SECONDS' '$DOCDIR/CUTOVER.md' && grep -qF 'default is 1800 seconds' '$DOCDIR/CUTOVER.md' && grep -qF 'overrides it for' '$DOCDIR/CUTOVER.md' && grep -qF '\`claim\`, \`wait\`, \`lease\`' '$DOCDIR/CUTOVER.md' && grep -qF '\`renew\`' '$DOCDIR/CUTOVER.md'"
+check "55 docs: CUTOVER gives the 10 s floor, the 86400 s cap and the stderr warning" bash -c \
+  "grep -qF 'below 10 seconds is raised to 10' '$DOCDIR/CUTOVER.md' && grep -qF 'above 86400 seconds is clamped to 86400' '$DOCDIR/CUTOVER.md' && grep -qF 'warning on stderr' '$DOCDIR/CUTOVER.md'"
+check "55 docs: the shipped skill names the knob, its readers and the floor/cap" bash -c \
+  "grep -qF 'CORRAL_LEASE_TTL_SECONDS' '$SKILL_SRC' && grep -qF '\`claim\`, \`wait\`, \`lease\` and' '$SKILL_SRC' && grep -qF '\`renew\`' '$SKILL_SRC' && grep -qF 'below 10 s is raised to 10' '$SKILL_SRC' && grep -qF 'above 86400 s is clamped' '$SKILL_SRC'"
 # The listing, not the path: on a case-insensitive filesystem (macOS) `cutover.md` IS `CUTOVER.md`,
 # so `test ! -e` fails there — the one platform where a name mismatch is invisible. An exact-name
 # listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.

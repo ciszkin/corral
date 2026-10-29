@@ -252,15 +252,77 @@ class CorralCliExecTest {
     // stopped renewing. The knob and the beat interval are pinned here; the e2e row proves the hold. ---
 
     @Test fun leaseTtlComesFromTheKnobAndDefaultsTo1800() {
-        assertEquals(1800, leaseTtlSeconds(null))
-        assertEquals(1800, leaseTtlSeconds(""))
-        assertEquals(1800, leaseTtlSeconds("not-a-number"))
-        assertEquals(1800, leaseTtlSeconds("0"))
-        assertEquals(1800, leaseTtlSeconds("-5"))
-        assertEquals(15, leaseTtlSeconds("15"))
-        assertEquals(MAX_LEASE_TTL_SECONDS, leaseTtlSeconds("86401"))
-        assertEquals(MAX_LEASE_TTL_SECONDS, leaseTtlSeconds("9223372036854775807"),
+        val silent: (String) -> Unit = {}
+        assertEquals(1800, leaseTtlSeconds(null, silent))
+        assertEquals(1800, leaseTtlSeconds("", silent))
+        assertEquals(1800, leaseTtlSeconds("not-a-number", silent))
+        assertEquals(1800, leaseTtlSeconds("0", silent))
+        assertEquals(1800, leaseTtlSeconds("-5", silent))
+        assertEquals(15, leaseTtlSeconds("15", silent))
+        assertEquals(MIN_LEASE_TTL_SECONDS, leaseTtlSeconds("1", silent),
+            "a TTL the heartbeat cannot keep up with is raised to the floor, never honoured")
+        assertEquals(MIN_LEASE_TTL_SECONDS, leaseTtlSeconds("10", silent),
+            "exactly at the floor is honoured")
+        assertEquals(MAX_LEASE_TTL_SECONDS, leaseTtlSeconds("86401", silent))
+        assertEquals(MAX_LEASE_TTL_SECONDS, leaseTtlSeconds("9223372036854775807", silent),
             "an absurd TTL must be clamped, never overflowed into a negative beat period")
+    }
+
+    @Test fun leaseTtlWarnsWhenItReplacesOrClampsTheKnob() {
+        val warnings = mutableListOf<String>()
+        val collect: (String) -> Unit = { warnings += it }
+
+        assertEquals(1800, leaseTtlSeconds("abc", collect))
+        assertEquals(listOf("corral: CORRAL_LEASE_TTL_SECONDS=abc is not a positive integer; using 1800s"),
+            warnings)
+
+        warnings.clear()
+        assertEquals(1800, leaseTtlSeconds("1.5", collect))
+        assertTrue(warnings.single().contains("is not a positive integer"), warnings.toString())
+
+        warnings.clear()
+        assertEquals(MIN_LEASE_TTL_SECONDS, leaseTtlSeconds("1", collect))
+        assertEquals(listOf("corral: CORRAL_LEASE_TTL_SECONDS=1 is below the 10s floor; using 10s"),
+            warnings)
+
+        warnings.clear()
+        assertEquals(MIN_LEASE_TTL_SECONDS, leaseTtlSeconds("9", collect))
+        assertEquals(listOf("corral: CORRAL_LEASE_TTL_SECONDS=9 is below the 10s floor; using 10s"),
+            warnings)
+
+        warnings.clear()
+        assertEquals(MIN_LEASE_TTL_SECONDS, leaseTtlSeconds("10", collect))
+        assertTrue(warnings.isEmpty(), "exactly at the floor must not warn: $warnings")
+
+        warnings.clear()
+        assertEquals(MAX_LEASE_TTL_SECONDS, leaseTtlSeconds("999999", collect))
+        assertEquals(listOf("corral: CORRAL_LEASE_TTL_SECONDS=999999 clamped to 86400s (max 86400)"),
+            warnings)
+
+        warnings.clear()
+        assertEquals(15, leaseTtlSeconds("15", collect))
+        assertEquals(1800, leaseTtlSeconds(null, collect))
+        assertTrue(warnings.isEmpty(), "a valid knob and an unset knob stay silent: $warnings")
+    }
+
+    @Test fun productionWarnSinkPrintsEachDistinctWarningOncePerProcess() {
+        val err = ByteArrayOutputStream()
+        val original = System.err
+        System.setErr(PrintStream(err))
+        try {
+            assertEquals(MIN_LEASE_TTL_SECONDS, leaseTtlSeconds("3"))
+            assertEquals(MIN_LEASE_TTL_SECONDS, leaseTtlSeconds("3"),
+                "the production sink must suppress the same warning in one process")
+            assertEquals(MIN_LEASE_TTL_SECONDS, leaseTtlSeconds("4"),
+                "a different warning must not be suppressed by the first")
+        } finally {
+            System.setErr(original)
+        }
+        val lines = err.toString().lines()
+        assertEquals(1, lines.count { it == "corral: CORRAL_LEASE_TTL_SECONDS=3 is below the 10s floor; using 10s" },
+            "the same warning must be printed once per process: $lines")
+        assertEquals(1, lines.count { it == "corral: CORRAL_LEASE_TTL_SECONDS=4 is below the 10s floor; using 10s" },
+            "a different warning must still be printed: $lines")
     }
 
     @Test fun heartbeatBeatsEveryThirdOfTheTtlAndNeverFasterThanASecond() {

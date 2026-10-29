@@ -69,6 +69,10 @@ outlives the process that made it. A long session renews with `corral renew <ser
 free --all` drops every lease you own — run it in a trap or at the end of a long session: an
 abandoned claim keeps the device from everyone until its TTL expires.
 
+`CORRAL_LEASE_TTL_SECONDS` overrides that 30-minute TTL for `claim`, `wait`, `lease` and
+`renew` (a test-host knob: below 10 s is raised to 10, above 86400 s is clamped, and a value
+that is not a positive integer falls back to 1800 — each with a warning on stderr).
+
 **`corral wait` is the poll-then-decide form, not the one to prefer:**
 
 ```sh

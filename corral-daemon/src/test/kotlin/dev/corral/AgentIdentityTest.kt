@@ -125,6 +125,7 @@ class AgentIdentityTest {
         assertEquals("bash", commKey("BASH.EXE"))
         assertEquals("my.sh", commKey("my.sh"))          // only `.exe` is special
         assertEquals("", commKey(".exe"))
+        assertEquals("a.exe", commKey("a.exe.exe"))      // ONE suffix, not all: not `a`
         assertEquals("claude", commKey("claude"))
     }
 

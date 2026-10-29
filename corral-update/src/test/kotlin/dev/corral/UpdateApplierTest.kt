@@ -6,6 +6,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletionException
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -48,8 +49,9 @@ class UpdateApplierTest {
 
         assertEquals(
             listOf(
-                listOf("unzip", "-o", "/tmp/corral-update/corral-1.2.3.zip", "-d", "/tmp/corral-update/bundle"),
-                listOf("bash", "/tmp/corral-update/bundle/install.sh", "--ui"),
+                listOf("unzip", "-o", workDir.resolve("corral-1.2.3.zip").toString(),
+                    "-d", workDir.resolve("bundle").toString()),
+                listOf("bash", workDir.resolve("bundle").resolve("install.sh").toString(), "--ui"),
                 listOf("systemctl", "--user", "restart", "corral"),
                 listOf("java", "-cp", "/home/u/.corral/corral-ui-all.jar", "dev.corral.ui.CorralUiKt"),
             ),
@@ -118,10 +120,13 @@ class UpdateApplierTest {
 
     @Test fun cliApplyWithAnUncreatableScratchDirFailsHonestly() {
         // A regular file where the scratch parent should be: creating the dir must fail, not throw.
+        // platformRefusal is pinned null because this row is about the scratch path: on a host
+        // without systemd (Windows) forCli() would refuse earlier and never reach it.
         val blocked = Files.createTempFile("corral-blocked", ".tmp")
         val workDir = blocked.resolve("scratch")
 
-        val result = UpdateApplier.forCli("v1.2.3", home = newWorkDir(), repo = "ciszkin/corral", workDir = workDir).run()
+        val result = applier(workDir = workDir, refusal = null,
+            components = InstalledComponents(daemon = false, ui = false)).run()
 
         assertTrue(result is ApplyResult.Failed, "expected a clean Failed, got $result")
         val reason = (result as ApplyResult.Failed).reason
@@ -204,7 +209,9 @@ class UpdateApplierTest {
         val result = applier(workDir, execute = { argv ->
             ran += argv
             when (argv.first()) {
-                "unzip" -> ProcessBuilder(argv).inheritIO().start().waitFor()
+                // The row tests the applier's pipeline, not the host's unzip: extract with the JDK
+                // so it also runs on a Windows box that has no `unzip` binary.
+                "unzip" -> { extract(Path.of(argv[2]), Path.of(argv[4])); 0 }
                 "bash" -> { installShExistedAtInstall = Files.exists(Path.of(argv[1])); 0 }
                 else -> 0
             }
@@ -213,6 +220,16 @@ class UpdateApplierTest {
         assertTrue(result is ApplyResult.Completed, "expected completion, got $result")
         assertTrue(installShExistedAtInstall, "the bundle must be extracted before install.sh runs")
         assertEquals(listOf("unzip", "bash", "systemctl"), ran.map { it.first() })
+    }
+
+    private fun extract(zip: Path, dest: Path) {
+        ZipFile(zip.toFile()).use { archive ->
+            archive.entries().asSequence().filterNot { it.isDirectory }.forEach { entry ->
+                val out = dest.resolve(entry.name)
+                Files.createDirectories(out.parent)
+                archive.getInputStream(entry).use { Files.copy(it, out) }
+            }
+        }
     }
 
     private fun zipWith(vararg entries: Pair<String, String>): Path {

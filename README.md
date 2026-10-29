@@ -68,7 +68,8 @@ the same device.
   `~/.config/corral/rules` file as the gate lists; a file from an older install without
   those keys simply keeps the built-in defaults (add the keys to customize). Membership
   ignores case and one trailing `.exe` on **both** sides, so a list written once per
-  program (`bash`) matches `bash.exe` too and either spelling is accepted. The pid is
+  program (`bash`) matches `bash.exe` too and either spelling is accepted. The trade: on
+  Linux a file literally named `bash.exe` is skipped too — accepted. The pid is
   only a liveness *hint*, recorded
   when the process actually spans the work — so a harness whose session outlives a single
   process (per-prompt or per-tool-call) sets `CORRAL_OWNER` and gets a durable identity.

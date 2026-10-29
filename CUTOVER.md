@@ -165,7 +165,8 @@ process; otherwise Corral derives an owner from process ancestry and falls
 back to `user:$USER`. Membership in the ancestry `shell_skip`/`init_floor`
 lists ignores case and one trailing `.exe` on **both** sides, so a list entry
 written once per program (`bash`) also matches `bash.exe`, and either spelling
-is accepted.
+is accepted. On Linux a file literally named `bash.exe` is therefore skipped as
+well — an accepted trade.
 
 ## Selectors
 

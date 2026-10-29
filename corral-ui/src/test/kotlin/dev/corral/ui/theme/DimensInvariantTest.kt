@@ -16,7 +16,7 @@ class DimensInvariantTest {
         val offenders = sourceRoot.toFile().walkTopDown()
             .filter { it.isFile && it.extension == "kt" }
             .filter { literal.containsMatchIn(it.readText()) }
-            .map { sourceRoot.relativize(it.toPath()).toString() }
+            .map { sourceRoot.relativize(it.toPath()).toString().replace('\\', '/') }  // Windows separators
             .filter { it !in allowed }
             .toList()
         assertTrue(offenders.isEmpty(), "hardcoded dimensions outside Dimens: $offenders")

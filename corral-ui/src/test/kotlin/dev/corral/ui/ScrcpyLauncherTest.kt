@@ -16,12 +16,25 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 
 class ScrcpyLauncherTest {
+    /**
+     * A fake scrcpy the JVM can actually spawn on this host. Windows has no shebang: a `.bat` is
+     * what CreateProcess (and therefore ProcessBuilder) accepts, so the suite is honest on the
+     * Windows box that gates releases instead of failing there for a POSIX-only reason.
+     */
+    private fun fakeScrcpy(dir: java.nio.file.Path, posix: String, windows: String): java.nio.file.Path {
+        val win = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
+        val file = dir.resolve(if (win) "fake-scrcpy.bat" else "fake-scrcpy")
+        Files.writeString(file, if (win) windows else posix)
+        file.toFile().setExecutable(true)
+        return file
+    }
+
     @Test fun spawnsReadOnlyScrcpyPinnedToTheSerial() = runTest {
         val dir = createTempDirectory("scrcpy")
         val log = dir.resolve("invocations")
-        val fakeScript = dir.resolve("fake-scrcpy")
-        Files.writeString(fakeScript, "#!/usr/bin/env bash\necho \"$*\" >> '$log'\n")
-        fakeScript.toFile().setExecutable(true)
+        val fakeScript = fakeScrcpy(dir,
+            posix = "#!/usr/bin/env bash\necho \"$*\" >> '$log'\n",
+            windows = "@echo off\r\necho %* >> \"$log\"\r\n")
 
         val p = ScrcpyLauncher(mapOf("CORRAL_SCRCPY" to fakeScript.toString())).launch("dev1")
 
@@ -46,9 +59,9 @@ class ScrcpyLauncherTest {
 
     @Test fun earlyNonZeroExitIsReported() = runTest {
         val dir = createTempDirectory("scrcpy")
-        val fakeScript = dir.resolve("fake-scrcpy")
-        Files.writeString(fakeScript, "#!/usr/bin/env bash\nexit 3\n")
-        fakeScript.toFile().setExecutable(true)
+        val fakeScript = fakeScrcpy(dir,
+            posix = "#!/usr/bin/env bash\nexit 3\n",
+            windows = "@echo off\r\nexit /b 3\r\n")
 
         val e = assertFailsWith<IllegalStateException> {
             ScrcpyLauncher(mapOf("CORRAL_SCRCPY" to fakeScript.toString())).launch("dev1")
@@ -58,9 +71,9 @@ class ScrcpyLauncherTest {
 
     @Test fun longLivedScrcpyDoesNotBlockTheCallerThread() = runBlocking {
         val dir = createTempDirectory("scrcpy")
-        val fakeScript = dir.resolve("fake-scrcpy")
-        Files.writeString(fakeScript, "#!/usr/bin/env bash\nexec sleep 30\n")   // outlives the early-exit window
-        fakeScript.toFile().setExecutable(true)
+        val fakeScript = fakeScrcpy(dir,
+            posix = "#!/usr/bin/env bash\nexec sleep 30\n",   // outlives the early-exit window
+            windows = "@echo off\r\nping -n 5 127.0.0.1 >NUL\r\n")
         val launcher = ScrcpyLauncher(mapOf("CORRAL_SCRCPY" to fakeScript.toString()))
 
         // one thread: the probe is queued BEHIND launch on it, so a launch() that blocks the

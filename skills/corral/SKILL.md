@@ -71,7 +71,8 @@ abandoned claim keeps the device from everyone until its TTL expires.
 
 `CORRAL_LEASE_TTL_SECONDS` overrides that 30-minute TTL for `claim`, `wait`, `lease` and
 `renew` (a test-host knob: below 10 s is raised to 10, above 86400 s is clamped, and a value
-that is not a positive integer falls back to 1800 — each with a warning on stderr).
+that is not a positive integer — including one too large for a 64-bit integer — falls back to
+1800; each replacement warns on stderr, while an unset or blank value is silent).
 
 **`corral wait` is the poll-then-decide form, not the one to prefer:**
 
@@ -229,7 +230,10 @@ known limits; `README.md` in the repo describes the design; `SECURITY.md` holds 
 and the bypass list. The default gate rules file is `corral-rules` beside the installer in the
 bundle (`scripts/corral-rules` in a source checkout), installed as `~/.config/corral/rules`. This
 skill lives at `~/.agents/skills/corral/SKILL.md` on the house install, and `corral update --apply`
-refreshes that file. Claude Code reads `~/.claude/skills/<name>/` instead — prefer a **symlink**
-where your harness supports one (`~/.claude/skills/corral` → `~/.agents/skills/corral`, the layout
-the `skills` CLI uses), so one file stays current. If you must copy it there, refresh the copy
-after every `corral update --apply`: a copy goes stale, and uninstall never removes it.
+refreshes that file only while it is unedited. A local edit (adding a note, say) opts this copy out:
+updates leave it alone, and restoring the shipped bytes by hand does not rejoin them. To take updates
+again, delete the file and re-run `install.sh` (or `corral update --apply`). Claude Code reads
+`~/.claude/skills/<name>/` instead — prefer a **symlink** where your harness supports one
+(`~/.claude/skills/corral` → `~/.agents/skills/corral`, the layout the `skills` CLI uses), so one
+file stays current. If you must copy it there, refresh the copy after every `corral update --apply`:
+a copy goes stale, and uninstall never removes it.

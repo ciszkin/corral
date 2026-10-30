@@ -110,9 +110,9 @@ Every lease the CLI asks for has a TTL; the default is 1800 seconds (30
 minutes). `CORRAL_LEASE_TTL_SECONDS` overrides it for `claim`, `wait`, `lease`
 and `renew` (the `lease` CLI then renews at a third of it). It is meant for test
 hosts that need a short hold: a value below 10 seconds is raised to 10, one
-above 86400 seconds is clamped to 86400, and a value that is not a positive
-integer falls back to 1800. Each of those three prints a warning on stderr;
-only an unset knob is silent.
+above 86400 seconds is clamped to 86400, and anything else that is not a
+positive integer — including a value too large for a 64-bit integer — falls back
+to 1800. Each replacement prints a warning on stderr; an unset or blank knob is silent.
 
 Or let a wrapper do the claim/free around one command:
 

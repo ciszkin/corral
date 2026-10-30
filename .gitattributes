@@ -20,5 +20,7 @@ scripts/install.sh      text eol=lf
 scripts/make-installer.sh text eol=lf
 scripts/test_e2e.sh     text eol=lf
 scripts/test_install.sh text eol=lf
+scripts/legacy-skill-pass47.md text eol=lf
+scripts/legacy-skill-pass48.md text eol=lf
 scripts/test_wrapper.sh text eol=lf
 gradlew                 text eol=lf

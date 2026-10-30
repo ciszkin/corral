@@ -1297,12 +1297,58 @@ check "54 skill: the later bundle did NOT overwrite the edit with v2" bash -c \
   "! grep -qF 'corral skill, edited-v2' '$SKILL_ED'"
 check "54 skill: the summary names the edited skill under Left alone" bash -c \
   "grep -q 'Left alone' '$TMP/ed-v2-install.log' && grep -qF '$SKILL_ED' '$TMP/ed-v2-install.log' && grep -qF 'edited' '$TMP/ed-v2-install.log'"
+check "59 skill: the install summary says how an edited copy rejoins updates" grep -qF \
+  "Left alone (edited since install; delete it and re-run install.sh or corral update --apply to take updates again): $SKILL_ED" \
+  "$TMP/ed-v2-install.log"
 check "54 skill: no sidecar is left claiming the edited file is the bundle's copy" test ! -e "$SKILL_ED.sha"
 env HOME="$TMPHOME_ED" PATH="$STUB:$PATH" bash "$BUNDLE_ED2/install.sh" --home "$TMPHOME_ED" --uninstall \
   >"$TMP/ed-uninstall.log" 2>&1; rcedu=$?
 dump_on_fail "$rcedu" "$TMP/ed-uninstall.log"
 check "54 skill: uninstall still keeps the edited skill when its sidecar is gone" bash -c \
   "grep -qF 'local note: devB is the flaky one' '$SKILL_ED' && grep -q 'edited since install' '$TMP/ed-uninstall.log'"
+
+# ===== 58: a skill from a pass-47/48 install (no sidecar) is ours, not an edit =====
+# Those releases shipped SKILL.md without `SKILL.md.sha`, so pass 50's third branch treated the file
+# as agent-edited and never updated it again. The two fixture files are the exact copies from those
+# releases; their bytes are the hashes install.sh ships as the legacy list.
+legacy_skill_case() { # legacy_skill_case <label> <fixture>
+  local label="$1" fixture="$2" home sdk bundle skill rc
+  home="$TMP/home-legacy-$label"; sdk="$home/Android/Sdk/platform-tools"
+  mkdir -p "$sdk" "$home/bin" "$home/.agents/skills"; : > "$home/.bashrc"
+  printf '%s\n' '#!/bin/sh' 'echo "legacy-sdk-adb $@"' > "$sdk/adb"; chmod +x "$sdk/adb"
+  bundle="$TMP/bundle-legacy-$label"; mkskillbundle "$bundle" "# corral skill, pre-sidecar"
+  env HOME="$home" PATH="$STUB:$PATH" bash "$bundle/install.sh" --java "$FAKE_JAVA" \
+    --adb "$sdk/adb" --jar "$JAR" --home "$home" --no-ui >"$TMP/legacy-$label-v0.log" 2>&1; rc=$?
+  dump_on_fail "$rc" "$TMP/legacy-$label-v0.log"
+  check "58 skill ($label): the sandbox starts from an installed skill" test "$rc" -eq 0
+  skill="$home/.agents/skills/corral/SKILL.md"
+  cp "$fixture" "$skill"; rm -f "$skill.sha"
+  env HOME="$home" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+    --adb "$sdk/adb" --jar "$JAR" --home "$home" --no-ui >"$TMP/legacy-$label-update.log" 2>&1; rc=$?
+  dump_on_fail "$rc" "$TMP/legacy-$label-update.log"
+  check "58 skill ($label): a sidecar-less legacy skill is refreshed, not left alone" bash -c \
+    "grep -qF 'Refreshed the corral agent skill' '$TMP/legacy-$label-update.log' && ! grep -qF 'Left alone (edited since install' '$TMP/legacy-$label-update.log'"
+  check "58 skill ($label): the refresh writes the current bundle's copy and sidecar" bash -c \
+    "cmp -s '$SKILL_SRC' '$skill' && [ \"\$(sha256sum '$skill' | cut -d' ' -f1)\" = \"\$(cat '$skill.sha')\" ] && [ \"\$(cat '$skill.sha')\" = \"\$(sha256sum '$SKILL_SRC' | cut -d' ' -f1)\" ]"
+  cp "$fixture" "$skill"; rm -f "$skill.sha"
+  env HOME="$home" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$home" --uninstall \
+    >"$TMP/legacy-$label-uninstall.log" 2>&1; rc=$?
+  dump_on_fail "$rc" "$TMP/legacy-$label-uninstall.log"
+  check "58 skill ($label): uninstall removes a sidecar-less legacy skill as ours" \
+    test ! -e "$skill"
+  check "58 skill ($label): and names it as removed, not left alone" bash -c \
+    "grep '^Removed:' '$TMP/legacy-$label-uninstall.log' | grep -q 'agent skill' && ! grep -q 'edited since install' '$TMP/legacy-$label-uninstall.log'"
+}
+for legacy in pass47 pass48; do
+  case "$legacy" in
+    pass47) legacy_sha=fcc57a4ee0147ab6ed8ae47fd42abed4185e33c41d16f21ac2bdec22dfbe2afd;;
+    pass48) legacy_sha=cd5c665edf9a69537f6517044d2c82718ad834a3102ed1f0a536c2ecc6070914;;
+  esac
+  legacy_fixture="$SRC/legacy-skill-$legacy.md"
+  check "58 skill ($legacy): the fixture is the release's exact SKILL.md" bash -c \
+    "[ \"\$(sha256sum '$legacy_fixture' | cut -d' ' -f1)\" = '$legacy_sha' ]"
+  legacy_skill_case "$legacy" "$legacy_fixture"
+done
 
 # ===== 56: uninstall removes the Claude Code symlink only when it points at our skill =====
 # The skill recommends ~/.claude/skills/corral -> ../../.agents/skills/corral. If uninstall removes
@@ -2610,6 +2656,14 @@ check "55 docs: CUTOVER gives the 10 s floor, the 86400 s cap and the stderr war
   "grep -qF 'below 10 seconds is raised to 10' '$DOCDIR/CUTOVER.md' && grep -qF 'above 86400 seconds is clamped to 86400' '$DOCDIR/CUTOVER.md' && grep -qF 'warning on stderr' '$DOCDIR/CUTOVER.md'"
 check "55 docs: the shipped skill names the knob, its readers and the floor/cap" bash -c \
   "grep -qF 'CORRAL_LEASE_TTL_SECONDS' '$SKILL_SRC' && grep -qF '\`claim\`, \`wait\`, \`lease\` and' '$SKILL_SRC' && grep -qF '\`renew\`' '$SKILL_SRC' && grep -qF 'below 10 s is raised to 10' '$SKILL_SRC' && grep -qF 'above 86400 s is clamped' '$SKILL_SRC'"
+check "59 docs: the shipped skill says an edit opts the copy out of updates" bash -c \
+  "grep -qF 'opts this copy out' '$SKILL_SRC' && grep -qF 'updates leave it alone' '$SKILL_SRC'"
+check "59 docs: the shipped skill gives the delete-and-reinstall way back, not a byte restore" bash -c \
+  "grep -qF 'restoring the shipped bytes by hand does not rejoin' '$SKILL_SRC' && grep -qF 'delete the file and re-run' '$SKILL_SRC' && grep -qF 'corral update --apply' '$SKILL_SRC'"
+check "60 docs: CUTOVER says a blank knob is unset and an oversized value is not a positive integer" bash -c \
+  "grep -qF 'including a value too large for a 64-bit integer' '$DOCDIR/CUTOVER.md' && grep -qF 'an unset or blank knob is silent' '$DOCDIR/CUTOVER.md'"
+check "60 docs: the shipped skill says a blank value is unset and an oversized value is not a positive integer" bash -c \
+  "grep -qF 'including one too large for a 64-bit integer' '$SKILL_SRC' && grep -qF 'an unset or blank value is silent' '$SKILL_SRC'"
 # The listing, not the path: on a case-insensitive filesystem (macOS) `cutover.md` IS `CUTOVER.md`,
 # so `test ! -e` fails there — the one platform where a name mismatch is invisible. An exact-name
 # listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.

@@ -257,7 +257,8 @@ internal fun stopChildTree(proc: Process, graceMillis: Long = 2000): Boolean {
  * raised to the floor (the beat is then at least 3 s). An absurd value is clamped to
  * [MAX_LEASE_TTL_SECONDS] so the beat arithmetic cannot overflow, and a value that is not a positive
  * integer falls back to the default. Each of those replacements says so on stderr, once per process,
- * exactly as `--timeout` does; only an unset (or empty) knob is silent (review 49 §5a).
+ * exactly as `--timeout` does; only an unset or blank knob is silent. A value too large for a `Long`
+ * is not a positive integer the CLI can use, so it takes the fallback (review 49 §5a, 50 §2).
  */
 internal const val DEFAULT_LEASE_TTL_SECONDS = 1800L
 internal const val MIN_LEASE_TTL_SECONDS = 10L

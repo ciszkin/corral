@@ -188,6 +188,21 @@ resolve_skill() {
   return 1
 }
 
+# SKILL.md copies shipped before the .sha sidecar existed: pass 47 (a6f843e) and pass 48 (0b85570).
+# A sidecar-less file matching one of these is ours, not an agent's edit. A later release that ships
+# a skill without a sidecar must add its hash here too.
+LEGACY_SKILL_SHA=(
+  fcc57a4ee0147ab6ed8ae47fd42abed4185e33c41d16f21ac2bdec22dfbe2afd
+  cd5c665edf9a69537f6517044d2c82718ad834a3102ed1f0a536c2ecc6070914
+)
+is_legacy_skill_hash() { # is_legacy_skill_hash <sha256>
+  local sha="$1" known
+  for known in "${LEGACY_SKILL_SHA[@]}"; do
+    [[ "$sha" = "$known" ]] && return 0
+  done
+  return 1
+}
+
 if [[ $UNINSTALL -eq 1 ]]; then
   echo "==> Uninstalling corral"
   if [[ $SANDBOX -eq 1 ]]; then
@@ -404,6 +419,10 @@ EOF
   if [[ -e "$SKILL_DST" ]]; then
     if [[ -f "$SKILL_DST.sha" && "$(sha256sum "$SKILL_DST" 2>/dev/null | cut -d' ' -f1)" = "$(cat "$SKILL_DST.sha")" ]]; then
       rm -f "$SKILL_DST" "$SKILL_DST.sha"
+      rmdir "$TARGET_HOME/.agents/skills/corral" 2>/dev/null || true
+      note_removed "the corral agent skill (~/.agents/skills/corral/SKILL.md)"
+    elif [[ ! -f "$SKILL_DST.sha" ]] && is_legacy_skill_hash "$(sha256sum "$SKILL_DST" 2>/dev/null | cut -d' ' -f1)"; then
+      rm -f "$SKILL_DST"
       rmdir "$TARGET_HOME/.agents/skills/corral" 2>/dev/null || true
       note_removed "the corral agent skill (~/.agents/skills/corral/SKILL.md)"
     elif [[ ! -f "$SKILL_DST.sha" ]] && SKILL_SRC=$(resolve_skill) && cmp -s "$SKILL_SRC" "$SKILL_DST"; then
@@ -835,12 +854,20 @@ if [[ -d "$TARGET_HOME/.agents/skills" ]]; then
   # The icon's three branches, for the same reason (review 49 §4): ours and unchanged is refreshed;
   # anything already equal to this bundle is adopted by writing the sidecar (a legacy install, or a
   # file already up to date); anything else was edited by an agent and is not ours to overwrite.
+  # A sidecar-less pass-47/48 copy is a fourth case: its known hash says it is ours, so refresh it.
   if [[ ! -f "$SKILL_DST" ]]; then
     replace_file "$SKILL_SRC" "$SKILL_DST" "the corral agent skill" \
       || { echo "ERROR: cannot install the agent skill at $SKILL_DST." >&2; exit 1; }
     printf '%s\n' "$new" > "$SKILL_DST.sha"
     echo "Installed the corral agent skill (~/.agents/skills/corral/SKILL.md; Claude Code reads ~/.claude/skills/corral/)"
   elif [[ -f "$SKILL_DST.sha" && "$(sha256sum "$SKILL_DST" 2>/dev/null | cut -d' ' -f1)" = "$(cat "$SKILL_DST.sha")" ]]; then
+    replace_file "$SKILL_SRC" "$SKILL_DST" "the corral agent skill" \
+      || { echo "ERROR: cannot refresh the agent skill at $SKILL_DST." >&2; exit 1; }
+    printf '%s\n' "$new" > "$SKILL_DST.sha"
+    echo "Refreshed the corral agent skill (~/.agents/skills/corral/SKILL.md; Claude Code reads ~/.claude/skills/corral/)"
+  elif [[ ! -f "$SKILL_DST.sha" ]] && is_legacy_skill_hash "$(sha256sum "$SKILL_DST" 2>/dev/null | cut -d' ' -f1)"; then
+    # A pass-47/48 install shipped no sidecar. Its bytes are still ours, so update them like the
+    # sidecar branch instead of freezing the stale skill forever (review 50 §4).
     replace_file "$SKILL_SRC" "$SKILL_DST" "the corral agent skill" \
       || { echo "ERROR: cannot refresh the agent skill at $SKILL_DST." >&2; exit 1; }
     printf '%s\n' "$new" > "$SKILL_DST.sha"
@@ -853,7 +880,7 @@ if [[ -d "$TARGET_HOME/.agents/skills" ]]; then
     # icon makes. Drop the sidecar rather than leave a hash that no longer describes the file; with
     # no sidecar, uninstall falls back to the byte comparison and still keeps the edit.
     rm -f "$SKILL_DST.sha"
-    echo "Left alone (edited since install, or its shipped copy is unavailable — not byte-identical): $SKILL_DST"
+    echo "Left alone (edited since install; delete it and re-run install.sh or corral update --apply to take updates again): $SKILL_DST"
   fi
 else
   echo "Agent skill not installed: no ~/.agents/skills; Claude Code reads ~/.claude/skills/corral/"

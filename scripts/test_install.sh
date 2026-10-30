@@ -1344,7 +1344,8 @@ for legacy in pass47 pass48; do
     pass47) legacy_sha=fcc57a4ee0147ab6ed8ae47fd42abed4185e33c41d16f21ac2bdec22dfbe2afd;;
     pass48) legacy_sha=cd5c665edf9a69537f6517044d2c82718ad834a3102ed1f0a536c2ecc6070914;;
   esac
-  legacy_fixture="$SRC/legacy-skill-$legacy.md"
+  legacy_fixture="$SRC/tests/fixtures/legacy-skill-$legacy.md"
+  [ -f "$legacy_fixture" ] || legacy_fixture="$ROOT/tests/fixtures/legacy-skill-$legacy.md"
   check "58 skill ($legacy): the fixture is the release's exact SKILL.md" bash -c \
     "[ \"\$(sha256sum '$legacy_fixture' | cut -d' ' -f1)\" = '$legacy_sha' ]"
   legacy_skill_case "$legacy" "$legacy_fixture"
@@ -1823,6 +1824,47 @@ win_query_dump() { # <file> <status> <last-run-time> <task-to-run> <schedule-typ
   } | sed 's/$/\r/' > "$1"
 }
 
+# The same task in German: labels and status are translated, the task name is not. Used by the
+# row-64 rows to prove a localized LIST dump cannot decide anything.
+win_query_dump_de() { # <file> <status> <last-run-time> <task-to-run> <schedule-type>
+  {
+    printf 'Ordner: \\\n'
+    printf 'Hostname:                             WIN-G86E4BG8RLB\n'
+    printf 'Aufgabenname:                         \\CorralDaemon\n'
+    printf 'Status:                               %s\n' "$2"
+    printf 'Zuletzt ausgeführt:                   %s\n' "$3"
+    printf 'Auszuführende Aufgabe:                %s\n' "$4"
+    printf 'Zeitplan:                             %s\n' "$5"
+  } | sed 's/$/\r/' > "$1"
+}
+
+# A realistic task XML: the element names are the same in every display language. Only the task's
+# own data (the Command path) is localized by the operator.
+win_task_xml() { # <file> <command>
+  {
+    printf '<?xml version="1.0" encoding="UTF-16"?>\r\n'
+    printf '<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">\r\n'
+    printf '  <RegistrationInfo>\r\n    <Author>WIN-G86E4BG8RLB\\ciszk</Author>\r\n  </RegistrationInfo>\r\n'
+    printf '  <Actions Context="Author">\r\n    <Exec>\r\n      <Command>%s</Command>\r\n    </Exec>\r\n  </Actions>\r\n' "$2"
+    printf '</Task>\r\n'
+  } > "$1"
+}
+# The encoder real schtasks uses on this host: UTF-16 with a BOM. Falls back to UTF-8 + a BOM where
+# iconv is absent, so the row still exercises the BOM strip.
+win_task_xml_utf16() { # <file> <command>
+  local tmp="$1.utf8"
+  win_task_xml "$tmp" "$2"
+  if command -v iconv >/dev/null 2>&1; then
+    iconv -f UTF-8 -t UTF-16 < "$tmp" > "$1"
+  else
+    { printf '\357\273\277'; cat "$tmp"; } > "$1"
+  fi
+  rm -f "$tmp"
+}
+win_csv_row() { # <file> <task-name> <status>
+  printf '"%s","N/A","%s"\r\n' "$2" "$3" > "$1"
+}
+
 # (a) happy path: onlogon works, task created, launcher carries CORRAL_ADB.
 TASK_A_HOME="$TMP/home-task-a"; TASK_A_SDK="$TASK_A_HOME/Android/Sdk/platform-tools"
 TASK_A_STUB="$TMP/taskstub-a"; TASK_A_LOG="$TMP/taskstub-a.log"
@@ -1958,18 +2000,24 @@ check "task access-denied+unreadable: the delete command (which needs a known ta
 TASK_M_HOME="$TMP/home-task-m"; TASK_M_SDK="$TASK_M_HOME/Android/Sdk/platform-tools"
 TASK_M_STUB="$TMP/taskstub-m"; TASK_M_LOG="$TMP/taskstub-m.log"
 TASK_M_Q1="$TMP/task-m-query-1.out"; TASK_M_Q2="$TMP/task-m-query-2.out"; TASK_M_N="$TMP/task-m-query-count"
+TASK_M_XML="$TMP/task-m-task.xml"; TASK_M_CSV="$TMP/task-m-tasks.csv"
 mkdir -p "$TASK_M_SDK" "$TASK_M_HOME/bin" "$TASK_M_STUB"; : > "$TASK_M_HOME/.bashrc"
 printf '%s\n' '#!/bin/sh' 'echo "task-m-adb $@"' > "$TASK_M_SDK/adb"; chmod +x "$TASK_M_SDK/adb"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_M_STUB/uname"
 win_query_dump "$TASK_M_Q1" Running '10/19/2026 7:00:03 PM' "$(winp "$TASK_M_HOME/bin/corral-daemon.bat")" 'One Time Only'
 win_query_dump "$TASK_M_Q2" Ready   '10/20/2026 1:05:11 PM' 'cmd /c exit 0' 'At logon time'
+win_task_xml_utf16 "$TASK_M_XML" "$(winp "$TASK_M_HOME/bin/corral-daemon.bat")"
+win_csv_row "$TASK_M_CSV" '\CorralDaemon' 'Wird ausgeführt'
 cat > "$TASK_M_STUB/schtasks" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$TASK_M_LOG"
-n=\$(cat "$TASK_M_N" 2>/dev/null || echo 0); n=\$((n+1)); printf '%s\n' "\$n" > "$TASK_M_N"
 case " \$* " in
   *" /create "*) echo "ERROR: Access is denied." >&2; exit 5;;
-  *" /query "*) if [ "\$n" -eq 1 ]; then cat "$TASK_M_Q1"; else cat "$TASK_M_Q2"; fi; exit 0;;
+  *" /query /tn CorralDaemon /xml "*) cat "$TASK_M_XML"; exit 0;;
+  *" /query /fo CSV /nh "*) cat "$TASK_M_CSV"; exit 0;;
+  *" /query "*)
+    n=\$(cat "$TASK_M_N" 2>/dev/null || echo 0); n=\$((n+1)); printf '%s\n' "\$n" > "$TASK_M_N"
+    if [ "\$n" -eq 1 ]; then cat "$TASK_M_Q1"; else cat "$TASK_M_Q2"; fi; exit 0;;
   *) exit 0;;
 esac
 EOF
@@ -1988,17 +2036,22 @@ check "task changed: the AFTER read's non-Running Status gets the 'not Running' 
 TASK_N_HOME="$TMP/home-task-n"; TASK_N_SDK="$TASK_N_HOME/Android/Sdk/platform-tools"
 TASK_N_STUB="$TMP/taskstub-n"; TASK_N_LOG="$TMP/taskstub-n.log"
 TASK_N_Q="$TMP/task-n-query.out"; TASK_N_N="$TMP/task-n-query-count"
+TASK_N_XML="$TMP/task-n-task.xml"; TASK_N_CSV="$TMP/task-n-tasks.csv"
 mkdir -p "$TASK_N_SDK" "$TASK_N_HOME/bin" "$TASK_N_STUB"; : > "$TASK_N_HOME/.bashrc"
 printf '%s\n' '#!/bin/sh' 'echo "task-n-adb $@"' > "$TASK_N_SDK/adb"; chmod +x "$TASK_N_SDK/adb"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_N_STUB/uname"
 win_query_dump "$TASK_N_Q" Ready '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'One Time Only'
+printf '%s\n' 'FEHLER: Das System kann die angegebene Datei nicht finden.' > "$TASK_N_XML"
+win_csv_row "$TASK_N_CSV" '\Microsoft\Windows\Defrag\ScheduledDefrag' 'Bereit'
 cat > "$TASK_N_STUB/schtasks" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$TASK_N_LOG"
-n=\$(cat "$TASK_N_N" 2>/dev/null || echo 0); n=\$((n+1)); printf '%s\n' "\$n" > "$TASK_N_N"
 case " \$* " in
   *" /create "*) echo "ERROR: Access is denied." >&2; exit 5;;
+  *" /query /tn CorralDaemon /xml "*) cat "$TASK_N_XML"; exit 1;;
+  *" /query /fo CSV /nh "*) cat "$TASK_N_CSV"; exit 0;;
   *" /query "*)
+    n=\$(cat "$TASK_N_N" 2>/dev/null || echo 0); n=\$((n+1)); printf '%s\n' "\$n" > "$TASK_N_N"
     if [ "\$n" -eq 1 ]; then echo "ERROR: The system cannot find the file specified." >&2; exit 1; fi
     cat "$TASK_N_Q"; exit 0;;
   *) exit 0;;
@@ -2364,6 +2417,89 @@ env HOME="$TASK_T_HOME" PATH="$TASK_T_STUB:$STUB:$PATH" bash "$SRC/install.sh" -
 dump_on_fail "$rcttu" "$TMP/task-t-uninstall.log"
 check "62 task: an UNREADABLE action is not ended or deleted, and is named under Left alone" bash -c \
   "[ '$rcttu' -eq 0 ] && ! grep -qF -- '/end /tn CorralDaemon' '$TASK_T_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$TASK_T_LOG' && grep -q 'Left alone' '$TMP/task-t-uninstall.log' && grep -q 'could not be verified' '$TMP/task-t-uninstall.log'"
+
+# ===== ROW 64: the ownership decision does not read a localized word =====
+# schtasks prints its labels and its "cannot find" text in the Windows display language. The old
+# check greps English, so on a German box it classes a MISSING task as unreadable (no autostart on a
+# fresh install) and a FOREIGN task as absent (repointed by install, deleted by uninstall). The new
+# check reads the action from the task's XML (`<Exec><Command>`) and absence from the query's exit
+# code plus the task name in `/fo CSV /nh`; both are locale-independent. German is a fixture string,
+# not a captured box — any translated locale exercises the same path.
+
+# (h1) a missing task: the localized "not found" on stderr and a nonzero exit, with a successful CSV
+#      listing that does not carry \CorralDaemon. Install must class it ABSENT and create/run it.
+TASK_U_HOME="$TMP/home-task-u-localized-missing"; TASK_U_SDK="$TASK_U_HOME/Android/Sdk/platform-tools"
+TASK_U_STUB="$TMP/taskstub-u"; TASK_U_LOG="$TMP/taskstub-u.log"; TASK_U_CSV="$TMP/task-u-tasks.csv"
+mkdir -p "$TASK_U_SDK" "$TASK_U_HOME/bin" "$TASK_U_STUB"; : > "$TASK_U_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-u-adb $@"' > "$TASK_U_SDK/adb"; chmod +x "$TASK_U_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_U_STUB/uname"
+win_csv_row "$TASK_U_CSV" '\Microsoft\Windows\Defrag\ScheduledDefrag' 'Bereit'
+cat > "$TASK_U_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_U_LOG"
+case " \$* " in
+  *" /query /fo CSV /nh "*) cat "$TASK_U_CSV"; exit 0;;
+  *" /query "*) echo "FEHLER: Das System kann die angegebene Datei nicht finden." >&2; exit 1;;
+  *" /create "*) echo 'ERFOLG: Die geplante Aufgabe "CorralDaemon" wurde erfolgreich erstellt.'; exit 0;;
+  *" /run "*) exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_U_STUB/uname" "$TASK_U_STUB/schtasks"
+ps_stub "$TASK_U_STUB"
+: > "$TASK_U_LOG"
+env HOME="$TASK_U_HOME" PATH="$TASK_U_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_U_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_U_HOME" >"$TMP/task-u-install.log" 2>&1; rctu=$?
+dump_on_fail "$rctu" "$TMP/task-u-install.log"
+check "64 task: a NON-ENGLISH missing task is classed absent, so install creates and runs it" bash -c \
+  "[ '$rctu' -eq 0 ] && grep -qF -- '/create /tn CorralDaemon' '$TASK_U_LOG' && grep -qF -- '/run /tn CorralDaemon' '$TASK_U_LOG' && grep -q 'Scheduled Task CorralDaemon created; auto-starts at logon and is running now' '$TMP/task-u-install.log'"
+check "64 task: a non-English 'not found' is NOT classed unreadable (no 'NOT started' summary)" bash -c \
+  "! grep -q \"This install's daemon was NOT started\" '$TMP/task-u-install.log' && ! grep -q 'Task To Run could not be read' '$TMP/task-u-install.log'"
+check "64 task: absence is confirmed by the task-name listing, not by the localized message" bash -c \
+  "grep -qF -- '/query /fo CSV /nh' '$TASK_U_LOG'"
+
+# (h2) a foreign task on a localized box: German LIST labels (so the old check sees no task), a real
+#      UTF-16 XML with the foreign Command (element names are not translated), and a CSV listing that
+#      carries \CorralDaemon. Install must not repoint it; uninstall must not end or delete it.
+TASK_V_HOME="$TMP/home-task-v-localized-foreign"; TASK_V_SDK="$TASK_V_HOME/Android/Sdk/platform-tools"
+TASK_V_STUB="$TMP/taskstub-v"; TASK_V_LOG="$TMP/taskstub-v.log"
+TASK_V_Q="$TMP/task-v-query.out"; TASK_V_XML="$TMP/task-v-task.xml"; TASK_V_CSV="$TMP/task-v-tasks.csv"
+TASK_V_FOREIGN='C:\Users\ciszk\bin\corral-daemon.bat'
+mkdir -p "$TASK_V_SDK" "$TASK_V_HOME/bin" "$TASK_V_STUB"; : > "$TASK_V_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-v-adb $@"' > "$TASK_V_SDK/adb"; chmod +x "$TASK_V_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_V_STUB/uname"
+win_query_dump_de "$TASK_V_Q" 'Wird ausgeführt' '19.10.2026 19:00:03' "$TASK_V_FOREIGN" 'Bei der Anmeldung'
+win_task_xml_utf16 "$TASK_V_XML" "$TASK_V_FOREIGN"
+win_csv_row "$TASK_V_CSV" '\CorralDaemon' 'Wird ausgeführt'
+cat > "$TASK_V_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_V_LOG"
+case " \$* " in
+  *" /query /fo CSV /nh "*) cat "$TASK_V_CSV"; exit 0;;
+  *" /query /tn CorralDaemon /xml "*) cat "$TASK_V_XML"; exit 0;;
+  *" /query "*) cat "$TASK_V_Q"; exit 0;;
+  *" /create "*) echo 'ERFOLG: Die geplante Aufgabe "CorralDaemon" wurde erfolgreich erstellt.'; exit 0;;
+  *" /run "*) exit 0;;
+  *" /end "*) exit 0;;
+  *" /delete "*) echo 'ERFOLG: Die geplante Aufgabe "CorralDaemon" wurde erfolgreich gelöscht.'; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_V_STUB/uname" "$TASK_V_STUB/schtasks"
+ps_stub "$TASK_V_STUB"
+: > "$TASK_V_LOG"
+env HOME="$TASK_V_HOME" PATH="$TASK_V_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_V_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_V_HOME" >"$TMP/task-v-install.log" 2>&1; rctv=$?
+dump_on_fail "$rctv" "$TMP/task-v-install.log"
+check "64 task: a FOREIGN task on a localized box is not repointed, ended or deleted by install" bash -c \
+  "[ '$rctv' -eq 0 ] && ! grep -qF -- '/create /tn CorralDaemon' '$TASK_V_LOG' && ! grep -qF -- '/run /tn CorralDaemon' '$TASK_V_LOG' && ! grep -qF -- '/end /tn CorralDaemon' '$TASK_V_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$TASK_V_LOG'"
+check "64 task: the localized install names the foreign task, read from the un-translated XML" bash -c \
+  "grep -q 'already has a CorralDaemon task for another install' '$TMP/task-v-install.log' && grep -qF 'C:\\Users\\ciszk\\bin\\corral-daemon.bat' '$TMP/task-v-install.log' && grep -qF -- '/query /tn CorralDaemon /xml' '$TASK_V_LOG'"
+env HOME="$TASK_V_HOME" PATH="$TASK_V_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_V_HOME" --uninstall \
+  >"$TMP/task-v-uninstall.log" 2>&1; rctvu=$?
+dump_on_fail "$rctvu" "$TMP/task-v-uninstall.log"
+check "64 task: a FOREIGN task on a localized box is left alone by uninstall too" bash -c \
+  "[ '$rctvu' -eq 0 ] && ! grep -qF -- '/end /tn CorralDaemon' '$TASK_V_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$TASK_V_LOG' && grep -q 'Left alone' '$TMP/task-v-uninstall.log' && ! grep '^Removed:' '$TMP/task-v-uninstall.log' | grep -q 'Scheduled Task CorralDaemon'"
 
 # (f) POSIX is untouched: no Scheduled Task call and no daemon .bat.
 POSIX_T_HOME="$TMP/home-posix-task"; POSIX_T_SDK="$POSIX_T_HOME/Android/Sdk/platform-tools"

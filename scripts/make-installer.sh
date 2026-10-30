@@ -105,6 +105,31 @@ mirror "$REPO_ROOT/SECURITY.md" "SECURITY.md"
 mkdir -p "$BUNDLE/skills/corral"
 mirror "$REPO_ROOT/skills/corral/SKILL.md" "skills/corral/SKILL.md"
 
+# The two legacy SKILL.md fixtures are test-only inputs: test_install.sh reads their bytes, and
+# install.sh only carries their sha256. They used to live in scripts/ and therefore landed at the
+# TOP of the bundle beside README.md and CUTOVER.md, where an agent asked for "the docs" could read
+# one as current guidance (both predate the heartbeat, the TTL knob and the SIGKILL wording fix).
+# They now ship under tests/fixtures/ with a README that says so. The bytes are pinned by
+# LEGACY_SKILL_SHA and must not change — do not add a header to the markdown files.
+FIXTURE_DIR="$REPO_ROOT/tests/fixtures"
+for stale in legacy-skill-pass47.md legacy-skill-pass48.md; do
+  if [ -e "$BUNDLE/$stale" ]; then
+    if [ "$CHECK" = 1 ]; then
+      printf '%s -> STALE (lives under tests/fixtures/ now)\n' "$stale"
+      drift=1
+    else
+      rm -f "$BUNDLE/$stale" || { echo "ERROR: cannot remove $BUNDLE/$stale" >&2; exit 1; }
+      printf '%s -> removed (moved under tests/fixtures/)\n' "$stale"
+    fi
+  fi
+done
+[ "$CHECK" = 1 ] || mkdir -p "$BUNDLE/tests/fixtures" \
+  || { echo "ERROR: cannot create $BUNDLE/tests/fixtures" >&2; exit 1; }
+for fixture in README.md legacy-skill-pass47.md legacy-skill-pass48.md; do
+  [ -f "$FIXTURE_DIR/$fixture" ] || { echo "ERROR: missing $FIXTURE_DIR/$fixture" >&2; exit 1; }
+  mirror "$FIXTURE_DIR/$fixture" "tests/fixtures/$fixture"
+done
+
 # The shipped cutover document is the TRACKED repo-root CUTOVER.md. scripts/cutover.md (the long
 # internal checklist) is NOT in git, so a bundle built from it is empty in CI and in the release
 # workflow — and the README's [CUTOVER.md](CUTOVER.md#updates) link then goes nowhere again. It ships

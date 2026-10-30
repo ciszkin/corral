@@ -155,6 +155,53 @@ task_action_path() { # task_action_path <Task To Run value> -> the path, without
   esac
   printf '%s' "$a"
 }
+
+# schtasks prints its LIST labels and its "not found" message in the Windows display language, so
+# neither may decide anything. The task's own XML does not translate: `<Exec><Command>` is the same
+# element in every locale. schtasks may emit that XML as UTF-16LE (BOM included) or UTF-8; bash
+# strings cannot hold NUL, and a NUL in command substitution also warns on stderr, so the reader
+# strips NULs and BOM bytes in the pipeline before the value ever reaches a variable. The five XML
+# entities are decoded afterwards because a path containing `&` is written `&amp;` in the XML while
+# the LIST field showed the literal character.
+task_read_xml() {
+  schtasks_run /query /tn CorralDaemon /xml 2>&1 \
+    | LC_ALL=C tr -d '\000\357\273\277\376\377'
+}
+task_xml_text() { # task_xml_text <raw XML> -> text with NULs/BOMs removed
+  printf '%s' "$1" | LC_ALL=C tr -d '\000\357\273\277\376\377'
+}
+task_xml_command() { # task_xml_command <raw XML> -> the <Exec><Command> value, or empty
+  local a
+  a=$(task_xml_text "$1" | tr -d '\r' \
+    | sed -n 's/.*<Command>\([^<]*\)<\/Command>.*/\1/p' | head -1)
+  [[ -n "$a" ]] || return 0
+  # Decode escapes in the order that keeps a literal `&lt;` literal: the entity that introduces an
+  # entity (`&amp;`) is expanded last.
+  printf '%s' "$a" | sed 's/&lt;/</g; s/&gt;/>/g; s/&quot;/"/g; s/&apos;/'"'"'/g; s/&amp;/\&/g' \
+    | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+# The XML is the primary source for the action. The English `Task To Run:` label is a FALLBACK used
+# only when the XML path yields no Command at all (a schtasks too old to emit XML, or a stub in the
+# suite that answers every query with the LIST shape). It is never the primary decision: on a
+# localized Windows the label is not there at all, and the safe direction (unreadable, not ours)
+# stays in force if both sources are empty.
+task_resolved_action() { # task_resolved_action <raw XML> <LIST output>
+  local a
+  a=$(task_xml_command "$1")
+  if [[ -z "$a" ]]; then a=$(task_action_value "$2"); fi
+  printf '%s\n' "$a"
+}
+# A task name in the CSV listing is not translated either. `/nh` drops the header, and the name is
+# the same `\CorralDaemon` the query names.
+task_csv_present() { # task_csv_present <schtasks /query /fo CSV /nh output>
+  printf '%s\n' "$1" | tr -d '\r' | grep -qiE '\\CorralDaemon("|,|[[:space:]]|$)'
+}
+# Only the exit code, not the text, says the listing was produced. `schtasks /query` on a box with
+# no CorralDaemon still succeeds and lists the other tasks; that success with no matching name is
+# the non-localized proof of absence. A failed listing proves nothing and is left to the fallback.
+task_csv_usable() { # task_csv_usable <rc>
+  [ "$1" -eq 0 ]
+}
 task_path_norm() { # task_path_norm <path> -> separator-blind, case-insensitive, no trailing slash
   local p
   p=$(printf '%s' "$1" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
@@ -177,26 +224,28 @@ task_is_ours() { # task_is_ours <Task To Run value>
   [[ -n "$root" && "$a" != "/" && ( "$a" = "$root" || "$a" = "$root"/* ) ]] && return 0
   return 1
 }
-task_owner() { # task_owner <query-exit> <query-output> -> absent|ours|foreign|unreadable
-  local rc="$1" out="$2" action
-  if [[ "$rc" -ne 0 ]] || ! task_ok "$rc" "$out"; then
-    # "cannot find" is the one failure that says there is no task to protect. Any other failed
-    # query (access denied, say) may be hiding a task we cannot read, so it is NOT ours.
-    if printf '%s' "$out" | grep -qiE 'cannot find|does not exist|not exist'; then echo absent
-    else echo unreadable; fi
-    return 0
-  fi
-  action=$(task_action_value "$out")
+task_owner() { # task_owner <query-rc> <LIST-output> <XML-output> <CSV-rc> <CSV-output> -> absent|ours|foreign|unreadable
+  local rc="$1" out="$2" xout="${3:-}" crc="${4:-1}" cout="${5:-}" action
+  action=$(task_resolved_action "$xout" "$out")
   if [[ -n "$action" ]]; then
     if task_is_ours "$action"; then echo ours; else echo foreign; fi
     return 0
   fi
-  # A readable query with task fields but no usable action is a task we cannot verify, not a task
-  # that is absent and not one we may replace.
-  if printf '%s\n' "$out" | tr -d '\r' | grep -qE '^(TaskName|Task To Run):'; then
+  # The action could not be read. A name in the CSV listing proves a task object exists, so it is
+  # unreadable (never absent, and never ours).
+  if task_csv_present "$cout"; then echo unreadable; return 0; fi
+  # A successful listing without the name is the non-localized proof of absence.
+  if task_csv_usable "$crc"; then echo absent; return 0; fi
+  # Last resort, only when the CSV listing itself failed: the English wording that this check used
+  # before it learned the exit-code/CSV route. It keeps the pre-XML behaviour on an English box
+  # whose schtasks cannot list at all; a non-English failure message simply reaches unreadable,
+  # which is the safe direction (nothing is created, repointed or deleted).
+  if task_ok "$rc" "$out" && printf '%s\n' "$out" | tr -d '\r' | grep -qE '^(TaskName|Task To Run):'; then
     echo unreadable
-  else
+  elif printf '%s' "$out" | grep -qiE 'cannot find|does not exist|not exist'; then
     echo absent
+  else
+    echo unreadable
   fi
 }
 
@@ -375,9 +424,11 @@ EOF
     del_rc=1; del_out=""
     if command -v schtasks >/dev/null 2>&1; then
       task_q=$(schtasks_run /query /tn CorralDaemon /fo LIST /v 2>&1); task_q_rc=$?
-      case "$(task_owner "$task_q_rc" "$task_q")" in
+      task_xml=$(task_read_xml)
+      task_csv=$(schtasks_run /query /fo CSV /nh 2>&1); task_csv_rc=$?
+      case "$(task_owner "$task_q_rc" "$task_q" "$task_xml" "$task_csv_rc" "$task_csv")" in
         foreign)
-          TASK_ACTION=$(task_action_value "$task_q")
+          TASK_ACTION=$(task_resolved_action "$task_xml" "$task_q")
           TASK_LEFT="the CorralDaemon Scheduled Task belongs to another install (Task To Run: $TASK_ACTION); it was not ended or deleted"
           ;;
         unreadable)
@@ -1198,13 +1249,17 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
     # box), so snapshot the fields a refused create could have changed.
     task_before_raw=$(schtasks_run /query /tn CorralDaemon /fo LIST /v 2>&1); before_rc=$?
     if task_ok "$before_rc" "$task_before_raw"; then task_before=$(task_fingerprint "$task_before_raw"); else task_before=""; fi
+    task_xml=$(task_read_xml)
+    task_csv=$(schtasks_run /query /fo CSV /nh 2>&1); task_csv_rc=$?
     # Ask whose task object this is before any /create /f. A task we cannot show to be ours is
     # left exactly as it was: no create (which would silently repoint the operator's live task at
-    # this sandbox's launcher), no run, and no claim that this install's daemon was started.
-    case "$(task_owner "$before_rc" "$task_before_raw")" in
+    # this sandbox's launcher), no run, and no claim that this install's daemon was started. The
+    # decision reads the XML action and the CSV name (neither is localized); the task_owner
+    # comment above says why.
+    case "$(task_owner "$before_rc" "$task_before_raw" "$task_xml" "$task_csv_rc" "$task_csv")" in
       foreign)
         TASK_STATE=foreign
-        TASK_ACTION=$(task_action_value "$task_before_raw")
+        TASK_ACTION=$(task_resolved_action "$task_xml" "$task_before_raw")
         ;;
       unreadable)
         TASK_STATE=unreadable

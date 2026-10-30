@@ -131,6 +131,75 @@ task_fingerprint() { # task_fingerprint <schtasks /query /fo LIST /v output>
     | grep -E '^(Status|Task To Run|Schedule Type|Last Run Time):' | sed 's/[[:space:]]*$//'
 }
 
+# A Scheduled Task OBJECT is not part of the install root just because this run can reach it. On a
+# box with one Corral, a sandbox install (HOME=<sandbox> --home <sandbox>, exactly how the suite
+# spells it, which is SANDBOX=0) and the operator's live install share the one task name. An
+# unguarded /end or /delete stops and removes the operator's task; an unguarded /create /f silently
+# repoints it at the sandbox's launcher (both happened to this box in the pass-50 QA gate). The
+# daemon PROCESS already has this containment check — its `-jar` operand must be under this install
+# root — and the task object now gets the same one, decided on the task's own registered action
+# (`Task To Run:`). `absent` keeps today's behaviour: a fresh box must still get its task, and an
+# uninstall still makes the delete attempt a box without the task tolerates. `ours` is exactly the
+# launcher this root writes, or a path under $TARGET_HOME. Anything else is `foreign`, and a task
+# whose action cannot be read is `unreadable`; neither is ever touched, because an action that
+# cannot be SHOWN to be ours is not ours — the same rule the daemon block applies to an
+# unresolvable jar. The comparison is separator-blind and case-insensitive, like the daemon one.
+task_action_value() { # task_action_value <schtasks /query /fo LIST /v output>
+  printf '%s\n' "$1" | tr -d '\r' | sed -n 's/^Task To Run:[[:space:]]*//p' | head -1 \
+    | sed 's/[[:space:]]*$//'
+}
+task_action_path() { # task_action_path <Task To Run value> -> the path, without surrounding quotes
+  local a="$1"
+  case "$a" in
+    \"*\") a=${a#\"}; a=${a%%\"*};;
+  esac
+  printf '%s' "$a"
+}
+task_path_norm() { # task_path_norm <path> -> separator-blind, case-insensitive, no trailing slash
+  local p
+  p=$(printf '%s' "$1" | tr '\\' '/' | tr '[:upper:]' '[:lower:]')
+  while [[ "$p" == */ && "$p" != "/" ]]; do p=${p%/}; done
+  printf '%s' "$p"
+}
+task_is_ours() { # task_is_ours <Task To Run value>
+  local a ours root
+  a=$(task_path_norm "$(task_action_path "$1")")
+  ours=$(task_path_norm "${TASK_WIN_BAT:-}")
+  # The uninstall does not render its own launcher up front: on a box with no PowerShell (and a
+  # restricted PATH) win_path would shell out for a value this decision never uses. Render lazily,
+  # only when there really is an action to compare.
+  if [[ -z "$ours" && -n "${TASK_BAT_PATH:-}" ]]; then
+    ours=$(task_path_norm "$(win_path "$TASK_BAT_PATH")")
+  fi
+  root=$(task_path_norm "$(win_path "$TARGET_HOME")")
+  [[ -n "$a" ]] || return 1
+  [[ -n "$ours" && "$a" = "$ours" ]] && return 0
+  [[ -n "$root" && "$a" != "/" && ( "$a" = "$root" || "$a" = "$root"/* ) ]] && return 0
+  return 1
+}
+task_owner() { # task_owner <query-exit> <query-output> -> absent|ours|foreign|unreadable
+  local rc="$1" out="$2" action
+  if [[ "$rc" -ne 0 ]] || ! task_ok "$rc" "$out"; then
+    # "cannot find" is the one failure that says there is no task to protect. Any other failed
+    # query (access denied, say) may be hiding a task we cannot read, so it is NOT ours.
+    if printf '%s' "$out" | grep -qiE 'cannot find|does not exist|not exist'; then echo absent
+    else echo unreadable; fi
+    return 0
+  fi
+  action=$(task_action_value "$out")
+  if [[ -n "$action" ]]; then
+    if task_is_ours "$action"; then echo ours; else echo foreign; fi
+    return 0
+  fi
+  # A readable query with task fields but no usable action is a task we cannot verify, not a task
+  # that is absent and not one we may replace.
+  if printf '%s\n' "$out" | tr -d '\r' | grep -qE '^(TaskName|Task To Run):'; then
+    echo unreadable
+  else
+    echo absent
+  fi
+}
+
 # Git Bash rewrites native-program arguments that start with `/` (e.g. /create) into paths. These
 # two switches are the documented opt-out; without them install.sh's schtasks calls reach the
 # executable as C:/Program Files/Git/create. The printed elevated command is for cmd/PowerShell.
@@ -205,6 +274,7 @@ is_legacy_skill_hash() { # is_legacy_skill_hash <sha256>
 
 if [[ $UNINSTALL -eq 1 ]]; then
   echo "==> Uninstalling corral"
+  TASK_LEFT=""
   if [[ $SANDBOX -eq 1 ]]; then
     echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
   elif [[ $IS_WINDOWS -eq 1 ]]; then
@@ -295,11 +365,29 @@ EOF
     # A task that is not running fails the /end and a box that never had the task fails the delete;
     # neither is worth failing on. The process stop runs regardless, because a previous uninstall
     # may have deleted the task and left the java child running — exactly what blocks ~/.corral.
+    #
+    # But first ASK WHOSE task it is. This branch is reached by a sandbox spelled the shipped way
+    # (HOME=<sandbox> --home <sandbox>, SANDBOX=0), and on a box with one Corral the one CorralDaemon
+    # task belongs to the operator's live install. A foreign task is not ended, not deleted and not
+    # reported as removed; the unreadable case is treated the same way. Only a task we can show is
+    # ours (or no task at all) goes through the /end + /delete below.
+    TASK_BAT_PATH="$BIN_DIR/corral-daemon.bat"
+    del_rc=1; del_out=""
     if command -v schtasks >/dev/null 2>&1; then
-      schtasks_run /end /tn CorralDaemon >/dev/null 2>&1 || true
-      del_out=$(schtasks_run /delete /tn CorralDaemon /f 2>&1); del_rc=$?
-    else
-      del_rc=1; del_out=""
+      task_q=$(schtasks_run /query /tn CorralDaemon /fo LIST /v 2>&1); task_q_rc=$?
+      case "$(task_owner "$task_q_rc" "$task_q")" in
+        foreign)
+          TASK_ACTION=$(task_action_value "$task_q")
+          TASK_LEFT="the CorralDaemon Scheduled Task belongs to another install (Task To Run: $TASK_ACTION); it was not ended or deleted"
+          ;;
+        unreadable)
+          TASK_LEFT="the CorralDaemon Scheduled Task could not be verified (its Task To Run could not be read); it was not ended or deleted"
+          ;;
+        *)
+          schtasks_run /end /tn CorralDaemon >/dev/null 2>&1 || true
+          del_out=$(schtasks_run /delete /tn CorralDaemon /f 2>&1); del_rc=$?
+          ;;
+      esac
     fi
 
     if [[ -n "$POWERSHELL" ]]; then
@@ -484,6 +572,9 @@ EOF
     echo "Removed: ${REMOVED%, }"
   else
     echo "Removed: nothing (no corral install found here)"
+  fi
+  if [[ -n "$TASK_LEFT" ]]; then
+    echo "Left alone ($TASK_LEFT)"
   fi
   if [[ -n "$KEPT_SHIMS" ]]; then
     echo "Left alone (not installed by corral; unrecognised shim content):$KEPT_SHIMS"
@@ -1105,8 +1196,20 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
     # "the existing task was left untouched" is a claim that needs a before and an after, not an
     # inference from the refusal; a medium-integrity token CAN read the task (verified on a real
     # box), so snapshot the fields a refused create could have changed.
-    task_before=$(schtasks_run /query /tn CorralDaemon /fo LIST /v 2>&1); before_rc=$?
-    if task_ok "$before_rc" "$task_before"; then task_before=$(task_fingerprint "$task_before"); else task_before=""; fi
+    task_before_raw=$(schtasks_run /query /tn CorralDaemon /fo LIST /v 2>&1); before_rc=$?
+    if task_ok "$before_rc" "$task_before_raw"; then task_before=$(task_fingerprint "$task_before_raw"); else task_before=""; fi
+    # Ask whose task object this is before any /create /f. A task we cannot show to be ours is
+    # left exactly as it was: no create (which would silently repoint the operator's live task at
+    # this sandbox's launcher), no run, and no claim that this install's daemon was started.
+    case "$(task_owner "$before_rc" "$task_before_raw")" in
+      foreign)
+        TASK_STATE=foreign
+        TASK_ACTION=$(task_action_value "$task_before_raw")
+        ;;
+      unreadable)
+        TASK_STATE=unreadable
+        ;;
+      *)
     task_out=$(schtasks_run /create /tn CorralDaemon /tr "$TASK_WIN_BAT" /sc onlogon /rl LIMITED /f 2>&1); task_rc=$?
     if task_ok "$task_rc" "$task_out"; then
       TASK_REFRESHED=1
@@ -1150,6 +1253,8 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
         fi
       fi
     fi
+        ;;
+    esac
   fi
 fi
 
@@ -1198,6 +1303,18 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
     sandbox)
       echo "  sandbox: no Scheduled Task CorralDaemon was created, replaced or deleted (--home $TARGET_HOME != \$HOME)."
       echo "  This installer started no daemon either."
+      ;;
+    foreign)
+      echo "  This box already has a CorralDaemon task for another install (Task To Run: $TASK_ACTION)."
+      echo "  This run did NOT repoint it and did not start it. It created no task for this install, so"
+      echo "  this install's daemon was NOT started; start it another way (the foreground command below,"
+      echo "  or a Scheduled Task you register yourself)."
+      ;;
+    unreadable)
+      echo "  A Scheduled Task CorralDaemon may exist, but its Task To Run could not be read, so this run"
+      echo "  did NOT create, replace or start anything (an action that cannot be shown to be this"
+      echo "  install's is not this install's). This install's daemon was NOT started."
+      echo "  Verify it yourself: schtasks /query /tn CorralDaemon /fo LIST /v"
       ;;
     *)
       if [[ $TASK_DENIED -eq 1 ]]; then

@@ -1893,7 +1893,7 @@ TASK_I_STUB="$TMP/taskstub-i"; TASK_I_LOG="$TMP/taskstub-i.log"; TASK_I_Q="$TMP/
 mkdir -p "$TASK_I_SDK" "$TASK_I_HOME/bin" "$TASK_I_STUB"; : > "$TASK_I_HOME/.bashrc"
 printf '%s\n' '#!/bin/sh' 'echo "task-i-adb $@"' > "$TASK_I_SDK/adb"; chmod +x "$TASK_I_SDK/adb"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_I_STUB/uname"
-win_query_dump "$TASK_I_Q" Running '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'One Time Only'
+win_query_dump "$TASK_I_Q" Running '10/19/2026 7:00:03 PM' "$(winp "$TASK_I_HOME/bin/corral-daemon.bat")" 'One Time Only'
 cat > "$TASK_I_STUB/schtasks" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$TASK_I_LOG"
@@ -1961,7 +1961,7 @@ TASK_M_Q1="$TMP/task-m-query-1.out"; TASK_M_Q2="$TMP/task-m-query-2.out"; TASK_M
 mkdir -p "$TASK_M_SDK" "$TASK_M_HOME/bin" "$TASK_M_STUB"; : > "$TASK_M_HOME/.bashrc"
 printf '%s\n' '#!/bin/sh' 'echo "task-m-adb $@"' > "$TASK_M_SDK/adb"; chmod +x "$TASK_M_SDK/adb"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_M_STUB/uname"
-win_query_dump "$TASK_M_Q1" Running '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'One Time Only'
+win_query_dump "$TASK_M_Q1" Running '10/19/2026 7:00:03 PM' "$(winp "$TASK_M_HOME/bin/corral-daemon.bat")" 'One Time Only'
 win_query_dump "$TASK_M_Q2" Ready   '10/20/2026 1:05:11 PM' 'cmd /c exit 0' 'At logon time'
 cat > "$TASK_M_STUB/schtasks" <<EOF
 #!/bin/sh
@@ -2022,7 +2022,7 @@ TASK_O_STUB="$TMP/taskstub-o"; TASK_O_LOG="$TMP/taskstub-o.log"; TASK_O_Q="$TMP/
 mkdir -p "$TASK_O_SDK" "$TASK_O_HOME/bin" "$TASK_O_STUB"; : > "$TASK_O_HOME/.bashrc"
 printf '%s\n' '#!/bin/sh' 'echo "task-o-adb $@"' > "$TASK_O_SDK/adb"; chmod +x "$TASK_O_SDK/adb"
 printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$TASK_O_STUB/uname"
-win_query_dump "$TASK_O_Q" Ready '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'One Time Only'
+win_query_dump "$TASK_O_Q" Ready '10/19/2026 7:00:03 PM' "$(winp "$TASK_O_HOME/bin/corral-daemon.bat")" 'One Time Only'
 cat > "$TASK_O_STUB/schtasks" <<EOF
 #!/bin/sh
 printf '%s\n' "\$*" >> "$TASK_O_LOG"
@@ -2214,6 +2214,156 @@ check "task uninstall: a /end error on STDERR with exit 0 still exits 0 and /del
   "[ '$rcth' -eq 0 ] && grep -qF -- '/delete /tn CorralDaemon /f' '$TASK_H_LOG'"
 check "task uninstall: a /end error on STDERR with exit 0 is NOT claimed as a stopped daemon" bash -c \
   "line=\$(grep '^Removed:' '$TMP/task-h-uninstall.log'); printf '%s' \"\$line\" | grep -qF 'Scheduled Task CorralDaemon' && ! printf '%s' \"\$line\" | grep -q 'daemon stopped'"
+
+# ===== ROW 62: the Scheduled Task object has the daemon's containment =====
+# A sandbox is normally spelled HOME=<sandbox> --home <sandbox> (SANDBOX=0), and on a box with one
+# Corral the one CorralDaemon task belongs to the operator's live install. Before this guard the
+# uninstall ran /end + /delete and the install ran /create /f, so a sandbox stole the operator's task
+# (the pass-50 QA gate did both to this box). Every stub below logs and would SUCCEED: a test that
+# only checked failure would miss the silent repoint the guard exists to prevent.
+task_stub_query() { # task_stub_query <dir> <log> <query-output-file> [exit-code]
+  local dir="$1" log="$2" q="$3" qrc="${4:-0}"
+  cat > "$dir/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$log"
+case " \$* " in
+  *" /query "*) cat "$q"; exit $qrc;;
+  *" /create "*) echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'; exit 0;;
+  *" /end "*) exit 0;;
+  *" /delete "*) echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been deleted.'; exit 0;;
+  *" /run "*) exit 0;;
+  *) exit 0;;
+esac
+EOF
+  chmod +x "$dir/schtasks"
+  printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$dir/uname"
+  chmod +x "$dir/uname"
+  ps_stub "$dir"
+}
+win_task_missing_action() { # win_task_missing_action <file>: a task whose Task To Run cannot be read
+  {
+    printf 'Folder: \\\n'
+    printf 'TaskName:                             \\CorralDaemon\n'
+    printf 'Status:                               Running\n'
+  } | sed 's/$/\r/' > "$1"
+}
+
+# (g1) uninstall on a box whose CorralDaemon belongs to ANOTHER install: read it, do not touch it.
+TASK_P_HOME="$TMP/home-task-p-foreign-uninstall"; TASK_P_STUB="$TMP/taskstub-p"
+TASK_P_LOG="$TMP/taskstub-p.log"; TASK_P_Q="$TMP/task-p-query.out"
+mkdir -p "$TASK_P_HOME/bin" "$TASK_P_HOME/.corral" "$TASK_P_STUB"; : > "$TASK_P_HOME/.bashrc"
+win_query_dump "$TASK_P_Q" Running '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'At logon time'
+task_stub_query "$TASK_P_STUB" "$TASK_P_LOG" "$TASK_P_Q"
+: > "$TASK_P_LOG"
+env HOME="$TASK_P_HOME" PATH="$TASK_P_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_P_HOME" --uninstall \
+  >"$TMP/task-p-uninstall.log" 2>&1; rctp=$?
+dump_on_fail "$rctp" "$TMP/task-p-uninstall.log"
+check "62 task: a sandbox uninstall reads the task action before deciding" bash -c \
+  "[ '$rctp' -eq 0 ] && grep -qF -- '/query /tn CorralDaemon /fo LIST /v' '$TASK_P_LOG'"
+check "62 task: a FOREIGN task is not ended and not deleted" bash -c \
+  "! grep -qF -- '/end /tn CorralDaemon' '$TASK_P_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$TASK_P_LOG'"
+check "62 task: the uninstall names the foreign task and the path it actually runs" bash -c \
+  "grep -q 'Left alone' '$TMP/task-p-uninstall.log' && grep -qF 'C:\\Users\\ciszk\\bin\\corral-daemon.bat' '$TMP/task-p-uninstall.log'"
+check "62 task: the uninstall does not claim it removed the foreign task" bash -c \
+  "! grep '^Removed:' '$TMP/task-p-uninstall.log' | grep -q 'Scheduled Task CorralDaemon'"
+
+# (g2) install on that same kind of box: read it, do not repoint it, and say so.
+TASK_Q_HOME="$TMP/home-task-q-foreign-install"; TASK_Q_SDK="$TASK_Q_HOME/Android/Sdk/platform-tools"
+TASK_Q_STUB="$TMP/taskstub-q"; TASK_Q_LOG="$TMP/taskstub-q.log"; TASK_Q_Q="$TMP/task-q-query.out"
+mkdir -p "$TASK_Q_SDK" "$TASK_Q_HOME/bin" "$TASK_Q_STUB"; : > "$TASK_Q_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-q-adb $@"' > "$TASK_Q_SDK/adb"; chmod +x "$TASK_Q_SDK/adb"
+win_query_dump "$TASK_Q_Q" Running '10/19/2026 7:00:03 PM' 'C:\Users\ciszk\bin\corral-daemon.bat' 'At logon time'
+task_stub_query "$TASK_Q_STUB" "$TASK_Q_LOG" "$TASK_Q_Q"
+: > "$TASK_Q_LOG"
+env HOME="$TASK_Q_HOME" PATH="$TASK_Q_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_Q_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_Q_HOME" >"$TMP/task-q-install.log" 2>&1; rctq=$?
+dump_on_fail "$rctq" "$TMP/task-q-install.log"
+check "62 task: a sandbox install (HOME == --home) reads the task action and exits 0" bash -c \
+  "[ '$rctq' -eq 0 ] && grep -qF -- '/query /tn CorralDaemon /fo LIST /v' '$TASK_Q_LOG'"
+check "62 task: a FOREIGN task is not repointed, ended or deleted (no /create /f, no /run)" bash -c \
+  "! grep -qF -- '/create /tn CorralDaemon' '$TASK_Q_LOG' && ! grep -qF -- '/run /tn CorralDaemon' '$TASK_Q_LOG' && ! grep -qF -- '/end /tn CorralDaemon' '$TASK_Q_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$TASK_Q_LOG'"
+check "62 task: the install says the box already has a CorralDaemon task for another install" bash -c \
+  "grep -q 'already has a CorralDaemon task for another install' '$TMP/task-q-install.log' && grep -q 'did NOT repoint it' '$TMP/task-q-install.log'"
+check "62 task: the install names the foreign path, and does not claim its daemon was started" bash -c \
+  "grep -qF 'C:\\Users\\ciszk\\bin\\corral-daemon.bat' '$TMP/task-q-install.log' && grep -q \"this install's daemon was NOT started\" '$TMP/task-q-install.log' && ! grep -q 'auto-starts at logon' '$TMP/task-q-install.log'"
+# The same sandbox's uninstall must leave the task definition alone too: the log that carried the
+# install's /query gains no /end, /delete or /create for the foreign path.
+env HOME="$TASK_Q_HOME" PATH="$TASK_Q_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_Q_HOME" --uninstall \
+  >"$TMP/task-q-uninstall.log" 2>&1; rctqu=$?
+dump_on_fail "$rctqu" "$TMP/task-q-uninstall.log"
+check "62 task: the same sandbox's uninstall leaves the foreign task's definition unchanged" bash -c \
+  "[ '$rctqu' -eq 0 ] && ! grep -qF -- '/create /tn CorralDaemon' '$TASK_Q_LOG' && ! grep -qF -- '/end /tn CorralDaemon' '$TASK_Q_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$TASK_Q_LOG' && grep -qF 'C:\\Users\\ciszk\\bin\\corral-daemon.bat' '$TMP/task-q-uninstall.log'"
+
+# (g3) our own task is still refreshed on install and deleted on uninstall.
+TASK_R_HOME="$TMP/home-task-r-ours"; TASK_R_SDK="$TASK_R_HOME/Android/Sdk/platform-tools"
+TASK_R_STUB="$TMP/taskstub-r"; TASK_R_LOG="$TMP/taskstub-r.log"; TASK_R_Q="$TMP/task-r-query.out"
+TASK_R_BAT="$TASK_R_HOME/bin/corral-daemon.bat"
+mkdir -p "$TASK_R_SDK" "$TASK_R_HOME/bin" "$TASK_R_STUB"; : > "$TASK_R_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-r-adb $@"' > "$TASK_R_SDK/adb"; chmod +x "$TASK_R_SDK/adb"
+win_query_dump "$TASK_R_Q" Running '10/19/2026 7:00:03 PM' "$(winp "$TASK_R_BAT")" 'At logon time'
+task_stub_query "$TASK_R_STUB" "$TASK_R_LOG" "$TASK_R_Q"
+: > "$TASK_R_LOG"
+env HOME="$TASK_R_HOME" PATH="$TASK_R_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_R_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_R_HOME" >"$TMP/task-r-install.log" 2>&1; rctr=$?
+dump_on_fail "$rctr" "$TMP/task-r-install.log"
+check "62 task: OUR task (this root's launcher) is still created/refreshed on install" bash -c \
+  "[ '$rctr' -eq 0 ] && grep -qF -- '/create /tn CorralDaemon /tr $(winp "$TASK_R_BAT") /sc onlogon /rl LIMITED /f' '$TASK_R_LOG' && grep -q 'Scheduled Task CorralDaemon created; auto-starts at logon and is running now' '$TMP/task-r-install.log'"
+env HOME="$TASK_R_HOME" PATH="$TASK_R_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_R_HOME" --uninstall \
+  >"$TMP/task-r-uninstall.log" 2>&1; rctru=$?
+dump_on_fail "$rctru" "$TMP/task-r-uninstall.log"
+check "62 task: OUR task is still ended and deleted on uninstall" bash -c \
+  "[ '$rctru' -eq 0 ] && grep -qF -- '/end /tn CorralDaemon' '$TASK_R_LOG' && grep -qF -- '/delete /tn CorralDaemon /f' '$TASK_R_LOG' && grep '^Removed:' '$TMP/task-r-uninstall.log' | grep -q 'Scheduled Task CorralDaemon'"
+
+# (g4) no task at all: unchanged behaviour (install creates one, uninstall still attempts the delete).
+TASK_S_HOME="$TMP/home-task-s-absent"; TASK_S_SDK="$TASK_S_HOME/Android/Sdk/platform-tools"
+TASK_S_STUB="$TMP/taskstub-s"; TASK_S_LOG="$TMP/taskstub-s.log"; TASK_S_Q="$TMP/task-s-query.out"
+mkdir -p "$TASK_S_SDK" "$TASK_S_HOME/bin" "$TASK_S_STUB"; : > "$TASK_S_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-s-adb $@"' > "$TASK_S_SDK/adb"; chmod +x "$TASK_S_SDK/adb"
+printf '%s\n' 'ERROR: The system cannot find the file specified.' > "$TASK_S_Q"
+task_stub_query "$TASK_S_STUB" "$TASK_S_LOG" "$TASK_S_Q" 1
+# A real box without the task fails the delete exactly as it fails the query; make that explicit so
+# "unchanged behaviour" means the tolerated attempt, not a fabricated successful removal.
+cat > "$TASK_S_STUB/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$TASK_S_LOG"
+case " \$* " in
+  *" /query "*) cat "$TASK_S_Q"; exit 1;;
+  *" /delete "*) echo "ERROR: The system cannot find the task." >&2; exit 1;;
+  *" /create "*) echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$TASK_S_STUB/schtasks"
+: > "$TASK_S_LOG"
+env HOME="$TASK_S_HOME" PATH="$TASK_S_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_S_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_S_HOME" >"$TMP/task-s-install.log" 2>&1; rcts=$?
+dump_on_fail "$rcts" "$TMP/task-s-install.log"
+check "62 task: a genuinely absent task still gets created on install" bash -c \
+  "[ '$rcts' -eq 0 ] && grep -qF -- '/create /tn CorralDaemon' '$TASK_S_LOG' && grep -q 'Scheduled Task CorralDaemon created' '$TMP/task-s-install.log'"
+env HOME="$TASK_S_HOME" PATH="$TASK_S_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_S_HOME" --uninstall \
+  >"$TMP/task-s-uninstall.log" 2>&1; rctsu=$?
+dump_on_fail "$rctsu" "$TMP/task-s-uninstall.log"
+check "62 task: a genuinely absent task still gets the tolerated delete attempt on uninstall" bash -c \
+  "[ '$rctsu' -eq 0 ] && grep -qF -- '/delete /tn CorralDaemon /f' '$TASK_S_LOG' && ! grep '^Removed:' '$TMP/task-s-uninstall.log' | grep -q 'Scheduled Task CorralDaemon'"
+
+# (g5) a task whose action cannot be read is NOT ours: never created over or deleted, and said.
+TASK_T_HOME="$TMP/home-task-t-unreadable"; TASK_T_SDK="$TASK_T_HOME/Android/Sdk/platform-tools"
+TASK_T_STUB="$TMP/taskstub-t"; TASK_T_LOG="$TMP/taskstub-t.log"; TASK_T_Q="$TMP/task-t-query.out"
+mkdir -p "$TASK_T_SDK" "$TASK_T_HOME/bin" "$TASK_T_STUB"; : > "$TASK_T_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "task-t-adb $@"' > "$TASK_T_SDK/adb"; chmod +x "$TASK_T_SDK/adb"
+win_task_missing_action "$TASK_T_Q"
+task_stub_query "$TASK_T_STUB" "$TASK_T_LOG" "$TASK_T_Q"
+: > "$TASK_T_LOG"
+env HOME="$TASK_T_HOME" PATH="$TASK_T_STUB:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$TASK_T_SDK/adb" --jar "$JAR" --no-ui --home "$TASK_T_HOME" >"$TMP/task-t-install.log" 2>&1; rctt=$?
+dump_on_fail "$rctt" "$TMP/task-t-install.log"
+check "62 task: an UNREADABLE action is not created over, and is reported as unverified" bash -c \
+  "[ '$rctt' -eq 0 ] && ! grep -qF -- '/create /tn CorralDaemon' '$TASK_T_LOG' && grep -q 'Task To Run could not be read' '$TMP/task-t-install.log'"
+env HOME="$TASK_T_HOME" PATH="$TASK_T_STUB:$STUB:$PATH" bash "$SRC/install.sh" --home "$TASK_T_HOME" --uninstall \
+  >"$TMP/task-t-uninstall.log" 2>&1; rcttu=$?
+dump_on_fail "$rcttu" "$TMP/task-t-uninstall.log"
+check "62 task: an UNREADABLE action is not ended or deleted, and is named under Left alone" bash -c \
+  "[ '$rcttu' -eq 0 ] && ! grep -qF -- '/end /tn CorralDaemon' '$TASK_T_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$TASK_T_LOG' && grep -q 'Left alone' '$TMP/task-t-uninstall.log' && grep -q 'could not be verified' '$TMP/task-t-uninstall.log'"
 
 # (f) POSIX is untouched: no Scheduled Task call and no daemon .bat.
 POSIX_T_HOME="$TMP/home-posix-task"; POSIX_T_SDK="$POSIX_T_HOME/Android/Sdk/platform-tools"
@@ -2658,8 +2808,10 @@ check "55 docs: the shipped skill names the knob, its readers and the floor/cap"
   "grep -qF 'CORRAL_LEASE_TTL_SECONDS' '$SKILL_SRC' && grep -qF '\`claim\`, \`wait\`, \`lease\` and' '$SKILL_SRC' && grep -qF '\`renew\`' '$SKILL_SRC' && grep -qF 'below 10 s is raised to 10' '$SKILL_SRC' && grep -qF 'above 86400 s is clamped' '$SKILL_SRC'"
 check "59 docs: the shipped skill says an edit opts the copy out of updates" bash -c \
   "grep -qF 'opts this copy out' '$SKILL_SRC' && grep -qF 'updates leave it alone' '$SKILL_SRC'"
-check "59 docs: the shipped skill gives the delete-and-reinstall way back, not a byte restore" bash -c \
-  "grep -qF 'restoring the shipped bytes by hand does not rejoin' '$SKILL_SRC' && grep -qF 'delete the file and re-run' '$SKILL_SRC' && grep -qF 'corral update --apply' '$SKILL_SRC'"
+check "61 docs: the shipped skill says a byte-for-byte restore of the CURRENT bundle rejoins updates" bash -c \
+  "grep -qF \"restore bytes that exactly match the current bundle's copy\" '$SKILL_SRC' && grep -qF 'install adopts those and the copy rejoins updates' '$SKILL_SRC' && grep -qF 'anything else stays left alone' '$SKILL_SRC' && ! grep -qF 'restoring the shipped bytes by hand does not rejoin' '$SKILL_SRC'"
+check "61 docs: the shipped skill still gives delete-and-reinstall as the reliable way back" bash -c \
+  "grep -qF 'delete the file and re-run' '$SKILL_SRC' && grep -qF 'corral update --apply' '$SKILL_SRC'"
 check "60 docs: CUTOVER says a blank knob is unset and an oversized value is not a positive integer" bash -c \
   "grep -qF 'including a value too large for a 64-bit integer' '$DOCDIR/CUTOVER.md' && grep -qF 'an unset or blank knob is silent' '$DOCDIR/CUTOVER.md'"
 check "60 docs: the shipped skill says a blank value is unset and an oversized value is not a positive integer" bash -c \

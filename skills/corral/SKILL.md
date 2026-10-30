@@ -231,8 +231,10 @@ and the bypass list. The default gate rules file is `corral-rules` beside the in
 bundle (`scripts/corral-rules` in a source checkout), installed as `~/.config/corral/rules`. This
 skill lives at `~/.agents/skills/corral/SKILL.md` on the house install, and `corral update --apply`
 refreshes that file only while it is unedited. A local edit (adding a note, say) opts this copy out:
-updates leave it alone, and restoring the shipped bytes by hand does not rejoin them. To take updates
-again, delete the file and re-run `install.sh` (or `corral update --apply`). Claude Code reads
+updates leave it alone, unless you restore bytes that exactly match the current bundle's copy —
+install adopts those and the copy rejoins updates, while anything else stays left alone. To take
+updates again reliably, delete the file and re-run `install.sh` (or `corral update --apply`). Claude
+Code reads
 `~/.claude/skills/<name>/` instead — prefer a **symlink** where your harness supports one
 (`~/.claude/skills/corral` → `~/.agents/skills/corral`, the layout the `skills` CLI uses), so one
 file stays current. If you must copy it there, refresh the copy after every `corral update --apply`:

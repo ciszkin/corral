@@ -784,6 +784,10 @@ if [ "$WINMODE" = wine ] || [ "$WINMODE" = native ]; then
         ( cd "$d" && MSYS2_ARG_CONV_EXCL='*' MSYS_NO_PATHCONV=1 timeout 90 cmd /c "$wd\\launch.bat" 2>&1 )
       fi
     }
+    # These rows plant their own java on PATH. corral.bat deliberately prefers %JAVA_HOME%\bin\java.exe
+    # over PATH, so an inherited JAVA_HOME (a CI shell, or a developer exporting JDK 17 so gradle
+    # works) would silently replace the fixture under test. Clear it in the generated launcher.
+    # CORRAL_JAVA is NOT cleared: the one row that sets it does so deliberately via `extra`.
     # run_bat <dir> <windows PATH> [args...]: run adb-wrapper.bat from <dir> with that PATH
     run_bat() {
       local d="$1" wpath="$2"; shift 2
@@ -791,7 +795,7 @@ if [ "$WINMODE" = wine ] || [ "$WINMODE" = native ]; then
       # the trailing `exit /b %%errorlevel%%` is explicit on purpose: cmd /c under wine 9 drops the
       # IMPLICIT final errorlevel of a script, so a launch.bat ending in a bare `call` reported 1
       # instead of the delegate's code. Propagate deliberately at every level instead.
-      printf '@echo off\r\nset "PATH=%s"\r\ncall "%s\\adb-wrapper.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
+      printf '@echo off\r\nset "JAVA_HOME="\r\nset "PATH=%s"\r\ncall "%s\\adb-wrapper.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
         "$wpath" "$wd" "$*" > "$d/launch.bat"
       run_launch "$d"
     }
@@ -799,7 +803,7 @@ if [ "$WINMODE" = wine ] || [ "$WINMODE" = native ]; then
     run_corral() {
       local d="$1" wpath="$2" extra="$3"; shift 3
       local wd; wd=$(winpath "$d")
-      printf '@echo off\r\nset "PATH=%s"\r\n%s\r\ncall "%s\\corral.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
+      printf '@echo off\r\nset "JAVA_HOME="\r\nset "PATH=%s"\r\n%s\r\ncall "%s\\corral.bat" %s\r\nexit /b %%errorlevel%%\r\n' \
         "$wpath" "$extra" "$wd" "$*" > "$d/launch.bat"
       run_launch "$d"
     }
@@ -921,6 +925,25 @@ if [ "$WINMODE" = wine ] || [ "$WINMODE" = native ]; then
       return 0
     }
     check "win: corral.bat resolves java from an absolute PATH entry" check_corral_java_on_path
+
+    # Pin the launcher's JAVA_HOME clear: an inherited value would take corral.bat's JAVA_HOME branch
+    # (which tests bin\java.exe specifically) and the fixture planted on PATH would never run.
+    check_corral_inherited_javahome() {
+      local d jh out rc
+      d=$(corral_dir cj-inherit); mkdir -p "$d/bin"
+      printf '@echo off\r\necho RAN > path.marker\r\nexit /b 6\r\n' > "$d/bin/java.bat"
+      jh="$d/inherited"; mkdir -p "$jh/bin"
+      # both names: corral.bat keys on java.exe there, and the java.bat proves the batch stub in
+      # JAVA_HOME is never consulted either
+      printf '@echo off\r\necho RAN > javahome-bat.marker\r\nexit /b 5\r\n' > "$jh/bin/java.bat"
+      cp "$HOST_EXE" "$jh/bin/java.exe"
+      out=$(export JAVA_HOME="$(winpath "$jh")"; run_corral "$d" "C:\\windows\\system32;$(winpath "$d/bin")" '' claim); rc=$?
+      [ -f "$d/path.marker" ] || { echo "inherited JAVA_HOME outranked the PATH java: $out" >&2; return 1; }
+      [ "$rc" -eq 6 ] || { echo "rc $rc != 6: $out" >&2; return 1; }
+      [ -f "$jh/javahome-bat.marker" ] && { echo "JAVA_HOME batch java ran" >&2; return 1; }
+      return 0
+    }
+    check "win: an inherited JAVA_HOME cannot outrank the planted java" check_corral_inherited_javahome
 
     check_bat_forward_slash() {
       local d out rc

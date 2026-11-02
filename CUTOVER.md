@@ -61,9 +61,10 @@ any Windows display language, and a task it cannot read is left alone.
 
 One edge remains, deliberately: a **nested** install — one whose launcher lives
 under another install root, say `~/qa/root` inside `~` — has a task the outer
-install also considers its own, so the outer uninstall ends and deletes it. If
-you keep two installs in one tree, uninstall the inner one first,
-or register the inner one's task elsewhere.
+install also considers its own, so the outer uninstall ends and deletes it.
+It also stops the inner daemon's `java.exe`, because the process check has the
+same under-root rule. If you keep two installs in one tree,
+uninstall the inner one first, or register the inner one's task elsewhere.
 
 ## Install
 

@@ -3056,6 +3056,11 @@ check "60 docs: CUTOVER says a blank knob is unset and an oversized value is not
   "grep -qF 'including a value too large for a 64-bit integer' '$DOCDIR/CUTOVER.md' && grep -qF 'an unset or blank knob is silent' '$DOCDIR/CUTOVER.md'"
 check "60 docs: the shipped skill says a blank value is unset and an oversized value is not a positive integer" bash -c \
   "grep -qF 'including one too large for a 64-bit integer' '$SKILL_SRC' && grep -qF 'an unset or blank value is silent' '$SKILL_SRC'"
+# 63: an operator must be able to read whose Scheduled Task the installer will touch, and the one
+# remaining edge (a deliberately nested install) must be named with what to do about it. Match
+# phrases, not whole lines, so rewrapping the paragraph does not break the row.
+check "63 docs: CUTOVER gives the un-translated ownership rule and the nested-install edge" bash -c \
+  "grep -qF 'data that is not translated' '$DOCDIR/CUTOVER.md' && grep -qF 'schtasks /query /fo CSV /nh' '$DOCDIR/CUTOVER.md' && grep -qF 'fallbacks' '$DOCDIR/CUTOVER.md' && grep -qF 'not ours' '$DOCDIR/CUTOVER.md' && grep -qF 'unverified' '$DOCDIR/CUTOVER.md' && grep -qF 'any Windows display language' '$DOCDIR/CUTOVER.md' && grep -qF 'uninstall the inner one first' '$DOCDIR/CUTOVER.md' && grep -qF \"register the inner one's task elsewhere\" '$DOCDIR/CUTOVER.md'"
 # The listing, not the path: on a case-insensitive filesystem (macOS) `cutover.md` IS `CUTOVER.md`,
 # so `test ! -e` fails there — the one platform where a name mismatch is invisible. An exact-name
 # listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.

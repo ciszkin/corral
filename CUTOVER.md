@@ -44,6 +44,27 @@ Two Windows nuances remain, and both are reported by the installer rather than h
   run continues, refreshes everything else, names every jar it left behind, and exits
   non-zero.
 
+### Scheduled Task ownership
+
+A `CorralDaemon` task counts as this install's own only when its action is this
+root's launcher or a path under this install root; an absent task may be
+created, and anything else is left alone.
+The decision is made on data that is not translated: the action from the
+task's XML (`<Exec><Command>`), and, when that yields nothing, absence from a
+successful `schtasks /query /fo CSV /nh` listing without `\CorralDaemon` (or
+its presence there, which means the task exists but its ownership could not be
+read). The English `Task To Run:` label (when the XML carries no `<Command>`)
+and the English "cannot find" message (only when the CSV listing itself fails)
+are fallbacks; a task whose ownership cannot be read is treated as not ours and
+reported as unverified, never guessed. So the containment holds on
+any Windows display language, and a task it cannot read is left alone.
+
+One edge remains, deliberately: a **nested** install — one whose launcher lives
+under another install root, say `~/qa/root` inside `~` — has a task the outer
+install also considers its own, so the outer uninstall ends and deletes it. If
+you keep two installs in one tree, uninstall the inner one first,
+or register the inner one's task elsewhere.
+
 ## Install
 
 From a release bundle (`corral-<version>.zip`), unpack it and run the

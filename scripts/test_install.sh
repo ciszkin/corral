@@ -1861,6 +1861,13 @@ win_task_xml_utf16() { # <file> <command>
   fi
   rm -f "$tmp"
 }
+# The other encoding a Windows host can emit: UTF-8 with a leading BOM, as plain bytes.
+win_task_xml_utf8bom() { # <file> <command>
+  local tmp="$1.utf8"
+  win_task_xml "$tmp" "$2"
+  { printf '\357\273\277'; cat "$tmp"; } > "$1"
+  rm -f "$tmp"
+}
 win_csv_row() { # <file> <task-name> <status>
   printf '"%s","N/A","%s"\r\n' "$2" "$3" > "$1"
 }
@@ -2500,6 +2507,103 @@ env HOME="$TASK_V_HOME" PATH="$TASK_V_STUB:$STUB:$PATH" bash "$SRC/install.sh" -
 dump_on_fail "$rctvu" "$TMP/task-v-uninstall.log"
 check "64 task: a FOREIGN task on a localized box is left alone by uninstall too" bash -c \
   "[ '$rctvu' -eq 0 ] && ! grep -qF -- '/end /tn CorralDaemon' '$TASK_V_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$TASK_V_LOG' && grep -q 'Left alone' '$TMP/task-v-uninstall.log' && ! grep '^Removed:' '$TMP/task-v-uninstall.log' | grep -q 'Scheduled Task CorralDaemon'"
+
+# ===== ROW 66: decode the task XML instead of deleting bytes =====
+# Row 64 reads the action from `<Exec><Command>`, but its reader deleted every NUL and BOM byte in
+# the text. That decodes ASCII only: on a non-ASCII install root (`Jürgen`, `Павел`) the command
+# either is invalid UTF-8 (so the extraction empties and the task looks unreadable) or is
+# valid-but-wrong (`ü` becomes the single byte `FC`), which no longer equals win_path's rendering
+# and makes the task look foreign. A re-install then refuses to refresh or start its own task, and
+# an uninstall keeps the task while deleting the launcher it points at. These rows name the
+# launcher this root writes in each encoding schtasks emits; the task must class OURS.
+task_own_case() { # task_own_case <label> <dir-name> <xml-writer>
+  local label="$1" name="$2" writer="$3"
+  local H="$TMP/home-$name" SDK="$TMP/home-$name/Android/Sdk/platform-tools"
+  local ST="$TMP/taskstub-$name" LOG="$TMP/taskstub-$name.log"
+  local Q="$TMP/task-$name-query.out" XML="$TMP/task-$name.xml" CSV="$TMP/task-$name.csv"
+  local BAT="$H/bin/corral-daemon.bat" rc rcu
+  local inst="$TMP/task-$name-install.log" un="$TMP/task-$name-uninstall.log"
+  mkdir -p "$SDK" "$H/bin" "$ST"; : > "$H/.bashrc"
+  printf '%s\n' '#!/bin/sh' "echo \"$name-adb \$@\"" > "$SDK/adb"; chmod +x "$SDK/adb"
+  printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$ST/uname"
+  # German LIST labels: the English `Task To Run:` fallback must not rescue a broken XML read, or
+  # the row would pass without the decode it exists to pin.
+  win_query_dump_de "$Q" 'Wird ausgeführt' '19.10.2026 19:00:03' "$(winp "$BAT")" 'Bei der Anmeldung'
+  "$writer" "$XML" "$(winp "$BAT")"
+  win_csv_row "$CSV" '\CorralDaemon' 'Running'
+  cat > "$ST/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$LOG"
+case " \$* " in
+  *" /query /fo CSV /nh "*) cat "$CSV"; exit 0;;
+  *" /query /tn CorralDaemon /xml "*) cat "$XML"; exit 0;;
+  *" /query "*) cat "$Q"; exit 0;;
+  *" /create "*) echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'; exit 0;;
+  *" /run "*) exit 0;;
+  *" /end "*) exit 0;;
+  *" /delete "*) echo 'SUCCESS: The scheduled task "CorralDaemon" was deleted.'; exit 0;;
+  *) exit 0;;
+esac
+EOF
+  chmod +x "$ST/uname" "$ST/schtasks"
+  ps_stub "$ST"
+  : > "$LOG"
+  env HOME="$H" PATH="$ST:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+    --adb "$SDK/adb" --jar "$JAR" --no-ui --home "$H" >"$inst" 2>&1; rc=$?
+  dump_on_fail "$rc" "$inst"
+  check "66 task: $label names its OWN task, so install /creates and /runs it" bash -c \
+    "[ '$rc' -eq 0 ] && grep -qF -- '/create /tn CorralDaemon' '$LOG' && grep -qF -- '/run /tn CorralDaemon' '$LOG'"
+  check "66 task: $label is not misclassed unreadable or foreign" bash -c \
+    "! grep -q 'Task To Run could not be read' '$inst' && ! grep -q 'another install' '$inst' && ! grep -q \"This install's daemon was NOT started\" '$inst'"
+  env HOME="$H" PATH="$ST:$STUB:$PATH" bash "$SRC/install.sh" --home "$H" --uninstall >"$un" 2>&1; rcu=$?
+  dump_on_fail "$rcu" "$un"
+  check "66 task: $label is /end and /delete on uninstall, not left behind" bash -c \
+    "[ '$rcu' -eq 0 ] && grep -qF -- '/end /tn CorralDaemon' '$LOG' && grep -qF -- '/delete /tn CorralDaemon' '$LOG' && grep '^Removed:' '$un' | grep -qF 'Scheduled Task CorralDaemon'"
+}
+task_own_case 'Jürgen (UTF-16LE with BOM)' 'w-Jürgen' win_task_xml_utf16
+task_own_case 'Павел (UTF-16LE with BOM)' 'w-Павел' win_task_xml_utf16
+task_own_case 'Павел (UTF-8 with BOM)' 'w-Павел-utf8bom' win_task_xml_utf8bom
+
+# (k4) a UTF-16 XML the decoder cannot read (here iconv refuses, as it would be absent) is NOT
+# guessed: install creates nothing and uninstall ends/deletes nothing, and both say unverified
+# rather than foreign. The XML itself names this root's launcher, so a guess would class it ours.
+DEC_HOME="$TMP/home-row66-undecodable"; DEC_SDK="$DEC_HOME/Android/Sdk/platform-tools"
+DEC_ST="$TMP/taskstub-row66-undecodable"; DEC_LOG="$TMP/taskstub-row66-undecodable.log"
+DEC_Q="$TMP/row66-undecodable-query.out"; DEC_XML="$TMP/row66-undecodable.xml"
+DEC_CSV="$TMP/row66-undecodable.csv"; DEC_BAT="$DEC_HOME/bin/corral-daemon.bat"
+mkdir -p "$DEC_SDK" "$DEC_HOME/bin" "$DEC_ST"; : > "$DEC_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "row66-undecodable-adb $@"' > "$DEC_SDK/adb"; chmod +x "$DEC_SDK/adb"
+printf '%s\n' '#!/bin/sh' 'echo "MINGW64_NT-10.0-22631"' > "$DEC_ST/uname"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$DEC_ST/iconv"
+win_query_dump_de "$DEC_Q" 'Wird ausgeführt' '19.10.2026 19:00:03' "$(winp "$DEC_BAT")" 'Bei der Anmeldung'
+win_task_xml_utf16 "$DEC_XML" "$(winp "$DEC_BAT")"
+win_csv_row "$DEC_CSV" '\CorralDaemon' 'Wird ausgeführt'
+cat > "$DEC_ST/schtasks" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$DEC_LOG"
+case " \$* " in
+  *" /query /fo CSV /nh "*) cat "$DEC_CSV"; exit 0;;
+  *" /query /tn CorralDaemon /xml "*) cat "$DEC_XML"; exit 0;;
+  *" /query "*) cat "$DEC_Q"; exit 0;;
+  *" /create "*) echo 'SUCCESS: The scheduled task "CorralDaemon" has successfully been created.'; exit 0;;
+  *" /end "*) exit 0;;
+  *" /delete "*) echo 'SUCCESS: The scheduled task "CorralDaemon" was deleted.'; exit 0;;
+  *) exit 0;;
+esac
+EOF
+chmod +x "$DEC_ST/uname" "$DEC_ST/iconv" "$DEC_ST/schtasks"
+ps_stub "$DEC_ST"
+: > "$DEC_LOG"
+env HOME="$DEC_HOME" PATH="$DEC_ST:$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$DEC_SDK/adb" --jar "$JAR" --no-ui --home "$DEC_HOME" >"$TMP/row66-undecodable-install.log" 2>&1; rcdec=$?
+dump_on_fail "$rcdec" "$TMP/row66-undecodable-install.log"
+check "66 task: an UNDECODABLE XML is not guessed ours, so install creates nothing" bash -c \
+  "[ '$rcdec' -eq 0 ] && ! grep -qF -- '/create /tn CorralDaemon' '$DEC_LOG' && grep -q 'Task To Run could not be read' '$TMP/row66-undecodable-install.log'"
+env HOME="$DEC_HOME" PATH="$DEC_ST:$STUB:$PATH" bash "$SRC/install.sh" --home "$DEC_HOME" --uninstall \
+  >"$TMP/row66-undecodable-uninstall.log" 2>&1; rcdecu=$?
+dump_on_fail "$rcdecu" "$TMP/row66-undecodable-uninstall.log"
+check "66 task: an UNDECODABLE XML is not ended or deleted, and is reported unverified not foreign" bash -c \
+  "[ '$rcdecu' -eq 0 ] && ! grep -qF -- '/end /tn CorralDaemon' '$DEC_LOG' && ! grep -qF -- '/delete /tn CorralDaemon' '$DEC_LOG' && grep -q 'could not be verified' '$TMP/row66-undecodable-uninstall.log' && ! grep -q 'another install' '$TMP/row66-undecodable-uninstall.log'"
 
 # (f) POSIX is untouched: no Scheduled Task call and no daemon .bat.
 POSIX_T_HOME="$TMP/home-posix-task"; POSIX_T_SDK="$POSIX_T_HOME/Android/Sdk/platform-tools"

@@ -160,20 +160,46 @@ task_action_path() { # task_action_path <Task To Run value> -> the path, without
 # neither may decide anything. The task's own XML does not translate: `<Exec><Command>` is the same
 # element in every locale. schtasks may emit that XML as UTF-16LE (BOM included) or UTF-8; bash
 # strings cannot hold NUL, and a NUL in command substitution also warns on stderr, so the reader
-# strips NULs and BOM bytes in the pipeline before the value ever reaches a variable. The five XML
-# entities are decoded afterwards because a path containing `&` is written `&amp;` in the XML while
-# the LIST field showed the literal character.
+# must get the bytes out of the stream before the value reaches a variable.
+#
+# Deleting the NULs is NOT that: it decodes ASCII only. In UTF-16LE `ü` (`FC 00`) becomes the single
+# byte `FC` and Cyrillic `л` (`3B 04`) becomes `;` plus `0x04`; in UTF-8 deleting the continuation
+# bytes `BB`/`BF` cuts `û`, `ÿ`, `л`, `п` and U+F000-up short. The damaged path then either is invalid
+# UTF-8 (the extraction empties and the task looks unreadable) or is valid-but-wrong (it no longer
+# equals the launcher this root writes, so the task looks foreign) — row 66. Decode instead: the
+# BOM says which encoding, iconv converts it, and a BOM-less stream is already UTF-8. Only a
+# LEADING UTF-8 BOM is stripped. An encoding that cannot be decoded (no iconv) yields no Command,
+# which keeps the safe direction: not ours, reported as unverified, never guessed.
 task_read_xml() {
-  schtasks_run /query /tn CorralDaemon /xml 2>&1 \
-    | LC_ALL=C tr -d '\000\357\273\277\376\377'
+  local f bom enc
+  f=$(mktemp "${TMPDIR:-/tmp}/corral-task.XXXXXX") || return 1
+  schtasks_run /query /tn CorralDaemon /xml >"$f" 2>&1 || true
+  bom=$(LC_ALL=C od -An -tx1 -N3 "$f" | tr -d '[:space:]')
+  case "$bom" in
+    fffe*) enc=UTF-16LE;;
+    feff*) enc=UTF-16BE;;
+    efbbbf*) enc=UTF-8-BOM;;
+    *) enc=UTF-8;;
+  esac
+  case "$enc" in
+    UTF-16LE|UTF-16BE)
+      # iconv keeps the decoded BOM as a leading UTF-8 BOM; drop exactly those three bytes.
+      command -v iconv >/dev/null 2>&1 \
+        && LC_ALL=C iconv -f "$enc" -t UTF-8 "$f" 2>/dev/null | tail -c +4
+      ;;
+    UTF-8-BOM) tail -c +4 "$f";;
+    *) cat "$f";;
+  esac
+  rm -f "$f"
 }
-task_xml_text() { # task_xml_text <raw XML> -> text with NULs/BOMs removed
-  printf '%s' "$1" | LC_ALL=C tr -d '\000\357\273\277\376\377'
+task_xml_text() { # task_xml_text <decoded XML> -> the text unchanged (task_read_xml decoded it)
+  printf '%s' "$1"
 }
 task_xml_command() { # task_xml_command <raw XML> -> the <Exec><Command> value, or empty
   local a
-  a=$(task_xml_text "$1" | tr -d '\r' \
-    | sed -n 's/.*<Command>\([^<]*\)<\/Command>.*/\1/p' | head -1)
+  # LC_ALL=C: the bytes are decoded by now, and the match must not change with the host locale.
+  a=$(task_xml_text "$1" | LC_ALL=C tr -d '\r' \
+    | LC_ALL=C sed -n 's/.*<Command>\([^<]*\)<\/Command>.*/\1/p' | head -1)
   [[ -n "$a" ]] || return 0
   # Decode escapes in the order that keeps a literal `&lt;` literal: the entity that introduces an
   # entity (`&amp;`) is expanded last.

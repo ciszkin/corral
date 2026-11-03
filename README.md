@@ -1,8 +1,15 @@
+<p align="center">
+  <img src="corral.png" width="112" alt="Corral">
+</p>
+
 # Corral
 
 Device session manager for coding agents. Herds connected Android devices (USB, WiFi,
 emulators) into one pool and leases them exclusively to agents — no two agents driving
 the same device.
+
+[Adopting Corral](CUTOVER.md) · [Security policy and threat model](SECURITY.md) ·
+[Agent skill](skills/corral/SKILL.md) · Apache-2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE))
 
 ## What it does
 
@@ -90,22 +97,26 @@ the same device.
   never run (its `exit /b` ends the caller). Interactive cmd.exe/PowerShell are unaffected.
 - **Self-healing** — the daemon watches the SDK adb shim and restores it automatically
   after SDK updates (stashing the updated binary), and restores a missing or blank
-  `~/.config/corral/rules` from the jar default; `corral doctor` reports the state of
-  every enforcement layer on demand.
+  `~/.config/corral/rules` from the jar default; `corral doctor` reports each layer it can
+  inspect on demand.
 - **CLI** — `corral claim [--all|<serial>] [selector]`, `wait [--timeout S] [selector]`,
   `queue`, `free [--all|<serial>]`, `renew <serial>`,
   `lease [--all | --timeout S] [selector] -- <cmd>`,
   `screenshot <serial> [--out F]`, `events`, `check`, `owner`, `doctor`, `devices`, `status`,
-  `avd [list|start A|stop A [--force]]` — all logic in the jar behind 3-line
-  launcher shims, so it works for humans and agents alike.
-  Selector: `--serial S --model M --os V(min) --type usb|wifi|emulator --avd A`.
+  `gate -- <adb args>`, `update [--apply]`, `avd [list|start A|stop A [--force]]` — all logic
+  in the jar behind two-line launcher shims, so it works for humans and agents alike.
+  `corral --version` prints the CLI jar's version with no daemon; the queue wait for `wait`/`lease`
+  is capped at 600 s (a larger `--timeout` is clamped with a warning, a negative one is a usage
+  error). Selector: `--serial S --model M --os V(min) --type usb|wifi|emulator --avd A`.
 - **Updates** — the daemon checks the release feed once a day, **on by default**
   (every daemon calls `api.github.com`; `CORRAL_UPDATE_CHECK=off` stops it, and
   `CORRAL_REPO` points both the check and the apply at another repository —
   env only). `corral update` reports what the check found, `corral update
   --apply` downloads the release zip and its `.sha256`, verifies the digest and
   only then runs the bundle's `install.sh`, and `GET /api/update` is the same
-  state as a read. The digest comes from the same release as the zip, so it
+  state as a read (`?force` runs a fresh check at once — the console's check
+  button uses it, and its install button confirms first and then applies the
+  same gated path). The digest comes from the same release as the zip, so it
   proves the download was intact — **not** that the publisher is genuine:
   anyone who can publish a release there runs `install.sh`, i.e. arbitrary code
   as you, on every host that applies it. Jars are replaced by rename, so a
@@ -152,43 +163,47 @@ the same device.
   (claim, ticket, free, renew, emulator start/stop, config) rejects an `Origin` that is not
   loopback or whose port differs from the request `Host` with `403`, and startup logs and falls
   back (rather than exiting) on an unusable `daemon.env` value. `GET /api/doctor` mirrors
-  `corral doctor`'s three layers (`daemon` / `sdk-shim` / `rules`) and is read-only; the `rules`
-  layer reports `warn` when a hand-edited `readonly` holds a non-host-only command or the identity
-  lists differ from the defaults. An empty pool stays `ok`, but the `daemon` layer (and `corral
-  doctor`) then adds a hint that an `adb reconnect` can leave the adb server's device list empty
-  until the server is restarted, with the `adb kill-server && adb start-server` recovery — so zero
-  devices no longer reads as only "nothing is plugged in".
+  `corral doctor`'s layers (`daemon` / `sdk-shim` / `rules`, plus `emulators` while an AVD is
+  wedged) and is read-only; the `rules` layer reports `warn` when a hand-edited `readonly` holds a
+  non-host-only command or the identity lists differ from the defaults. An empty pool stays `ok`,
+  but the `daemon` layer (and `corral doctor`) then adds a hint that an `adb reconnect` can leave
+  the adb server's device list empty until the server is restarted, with the `adb kill-server &&
+  adb start-server` recovery — so zero devices no longer reads as only "nothing is plugged in".
 - **Desktop UI** — `corral-ui [--url http://127.0.0.1:port]` (else `CORRAL_URL`, then the stored
   pref, default `http://127.0.0.1:8798`; the daemon is loopback-only, so `--url` picks a
   non-default local port unless the operator deliberately rebinds it) opens a Compose operator
   console — **verified on JDK 17 (Linux)**, with the Windows coverage stated once in
   [CUTOVER.md § Windows](CUTOVER.md#windows); very new JDKs beyond those are untested. The daemon
-  and CLI are unaffected either way. One six-section screen with a left rail and scrollspy — **Devices** (horizontal card
-  console: one six-section screen with a left rail and scrollspy — **Devices** (horizontal card
-  carousel with paging chevrons, live thumbnails, holder and TTL countdown), **Emulators** (AVDs
-  with running serials, a boot chip while booting, and start/stop), **Queue** (the wait list),
-  **Doctor** (per-layer
-  health with a rail badge on FAIL), **Rules** and **Settings** — plus a connection bar with the
-  last event `seq`. Rules and Settings are editors: the gate rules and daemon knobs go over the
-  daemon's config API (the `readonly`/`valueflags` lists, the knobs with the restart-required hint
-  and per-field validation), while the client's own `CORRAL_URL`/`CORRAL_OWNER`/`CORRAL_SCRCPY`
-  are local prefs applied live on save; `shell_skip`/`init_floor` are file-only, so edit
-  `~/.config/corral/rules` directly. The
-  theme (System/Light/Dark) and language (English/Беларуская) apply immediately and persist, with
-  the client's window geometry, to `~/.config/corral/ui.conf`. Force-free sits behind a confirm
-  dialog naming the holder, and a scrcpy live view is strictly read-only (`--no-control`,
-  `--no-clipboard-autosync`, `--no-audio`), so an observer can watch a leased device but never
-  touch it. The window and tray use the Corral mark. The window's close button parks it in the
-  system tray where the platform has one (Windows, macOS, and Linux desktops that host an X
-  tray — GNOME does via its appindicator support), and clicking the tray icon (either button)
-  brings the window back; since close only parks it, the window's **Corral** menu holds **Quit**.
+  and CLI are unaffected either way. One six-section screen with a left rail and scrollspy —
+  **Devices** (horizontal card carousel with paging chevrons, live thumbnails, holder and TTL
+  countdown), **Emulators** (AVDs with running serials, a boot chip while booting, and start/stop),
+  **Queue** (the wait list), **Doctor** (per-layer health with a rail badge on FAIL), **Rules** and
+  **Settings** — plus a status bar with the live event `seq`, the daemon's version (omitted, never
+  faked, while unknown) and an update pill when a newer release is known; Settings shows the
+  console's own version beside the daemon's. Rules and Settings are editors: the gate rules and
+  daemon knobs go over the daemon's config API (the `readonly`/`valueflags` lists, the knobs with
+  the restart-required hint and per-field validation), while the client's own
+  `CORRAL_URL`/`CORRAL_OWNER`/`CORRAL_SCRCPY` are local prefs applied live on save;
+  `shell_skip`/`init_floor` are file-only, so edit `~/.config/corral/rules` directly. Settings also
+  holds the update row: the last check's honest state, a "check now" that asks for a fresh check
+  (`?force`), and an install that confirms first and then runs the same checksum-gated applier as
+  `corral update --apply`. The theme (System/Light/Dark) and language (English/Беларуская) apply
+  immediately and persist, with the client's window geometry, to `~/.config/corral/ui.conf`.
+  Force-free sits behind a confirm dialog naming the holder, and a scrcpy live view is strictly
+  read-only (`--no-control`, `--no-clipboard-autosync`, `--no-audio`), so an observer can watch a
+  leased device but never touch it. The window and tray use the Corral mark. The window's close
+  button parks it in the system tray where the platform has one (Windows, macOS, and Linux desktops
+  that host an X tray — GNOME does via its appindicator support), and clicking the tray icon
+  (either button) brings the window back; since close only parks it, the window's **Corral** menu
+  holds **Quit**.
   Where `isTraySupported` is false, close quits, and the **Corral** launcher `install.sh --ui`
   drops into `~/.local/share/applications` (app grid, pinnable to the dock, `Icon=` the Corral
   mark) starts it again. Its own traffic is HTTP/WS — the UI never talks adb itself — and it is an
   observer, not a leaser: its identity is `CORRAL_OWNER` (default `corral-ui`). The one adb it can
   spawn is the read-only scrcpy live view above: scrcpy resolves adb itself (a static build ships
   its own), so that one path generally sits outside corral's lease gate — an acknowledged
-  exception, not an oversight (see the "Known limits" section of [CUTOVER.md](CUTOVER.md#known-limits)). Install it with `install.sh --ui` (or
+  exception, not an oversight (see the "Known limits" section of
+  [CUTOVER.md](CUTOVER.md#known-limits)). Install it with `install.sh --ui` (or
   `--no-ui` to skip; the default follows whether a `corral-ui-all.jar` is found — beside the
   installer in the bundle, or in `corral-ui/build/libs/` in a source checkout). Because
   screenshots are strict by default, the installer seeds `CORRAL_SCREENSHOT_OBSERVERS=corral-ui`
@@ -201,13 +216,35 @@ the same device.
 
 ## Shape of it
 
-One headless Kotlin/Ktor daemon (`java -jar`, OS-agnostic), a Compose Desktop operator
-console, a native adb-wrapper twin (`.sh` / `.bat`), an SDK adb shim, a Gradle init.d gate,
-and the `corral` CLI. Install with `scripts/install.sh` or the self-contained
-`corral-installer/` bundle on a Linux host, or on Windows through the installer's Windows
-branch ([CUTOVER.md § Windows](CUTOVER.md#windows))
-(the installer manages the daemon unit, the shims, the SDK shim, and the gradle gate, and
-restores everything on `--uninstall`).
+Four Gradle modules, one repository:
+
+- `corral-common` — the DTOs the daemon, CLI and console share (pure Kotlin +
+  kotlinx-serialization, KMP-ready, no `java.*`);
+- `corral-update` — the release-apply gate: download, verify the published `.sha256`, then run the
+  bundle's `install.sh`. Zero dependencies, shared by the daemon's CLI and the console, so one
+  module owns the security-critical check;
+- `corral-daemon` — the headless Kotlin/Ktor daemon (`java -jar`, OS-agnostic: leases, HTTP/WS/MCP
+  API, SQLite, emulator control) and the `corral` CLI;
+- `corral-ui` — the Compose Desktop operator console.
+
+Install with `scripts/install.sh` or the self-contained `corral-installer/` bundle on a Linux host,
+or on Windows through the installer's Windows branch ([CUTOVER.md § Windows](CUTOVER.md#windows));
+the installer manages the daemon unit and the `~/bin` shims, the SDK adb shim, the Gradle gate, the
+agent skill and the optional console, and restores everything on `--uninstall`.
+
+## Build and test
+
+```sh
+./gradlew test                        # all four modules; offline, no adb, no device
+./gradlew :corral-daemon:shadowJar    # -> corral-daemon/build/libs/corral-daemon-all.jar
+./gradlew :corral-ui:shadowJar        # -> corral-ui/build/libs/corral-ui-all.jar
+scripts/make-installer.sh             # build both jars and mirror scripts/ + docs into the bundle
+scripts/make-installer.sh --check     # report bundle drift, write nothing
+```
+
+`scripts/test_wrapper.sh` drives the gate through the bundled wrapper, `SLOW=1 scripts/test_e2e.sh`
+runs the daemon end to end against fake devices, and `scripts/test_install.sh` installs into a
+sandbox home; CI runs all three plus both shadow jars and the bundle drift check.
 
 ## Status
 
@@ -220,8 +257,10 @@ over streamable HTTP at `/mcp` — is built and verified with fake devices via a
 handshake. Later phases are built too: M4 observability (screenshots + `/ws/events`), M5 the
 Compose Desktop UI — rebuilt into the six-section operator console with rules/settings editors,
 theme modes and English/Belarusian resources — M6 the emulator lifecycle (list/start/stop with the
-boot gate) and M7 the config/doctor API. Corral replaces the
-`adb-lease` MVP (`adb-lease.md`).
+boot gate) and M7 the config/doctor API. Later still: the daily release check with its explicit,
+checksum-gated apply (in the shared `corral-update` module) and one version stamped from the git tag
+into both jars. Corral replaces the `adb-lease` MVP — `adb-lease.md` stays as the historical
+writeup.
 
 ## Roadmap (Phase 3+)
 
@@ -234,3 +273,8 @@ boot gate) and M7 the config/doctor API. Corral replaces the
 - Windows support is stated once, in the guide: [CUTOVER.md § Windows](CUTOVER.md#windows)
   covers the install target, the console on JDK 25, what was host-verified, and the two
   remaining nuances (the `.bat` in-flight window and the jar-lock refusal)
+- Nothing on the original Phase 3+ list is still open. The deliberate gaps are stated in the
+  guide's [Known limits](CUTOVER.md#known-limits) and [Updates](CUTOVER.md#updates) sections and in
+  [SECURITY.md](SECURITY.md): cooperative identity, the absolute-path adb / ddmlib / scrcpy
+  bypasses, loopback-only, an update channel whose checksum is not a signature, and macOS with no
+  installer

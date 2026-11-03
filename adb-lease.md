@@ -1,6 +1,10 @@
 # adb-lease — device session manager for parallel agents
 
-**Written:** 2026-09-09 · **Deployed:** 2026-09-08 16:33 · **Status:** in daily use
+> **Superseded.** The `adb-lease` MVP described here was replaced by Corral. This page is kept as the
+> historical design write-up and is not current guidance — start at [README.md](README.md) and
+> [CUTOVER.md](CUTOVER.md).
+
+**Written:** 2026-09-09 · **Deployed:** 2026-09-08 16:33 · **Status:** retired (superseded by Corral)
 **Last change:** 2026-09-09 — gate tracks `export`/bare assignments across a block
 
 Stops two agents from driving the same Android device at once. One bash script leases

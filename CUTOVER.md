@@ -97,9 +97,21 @@ re-run. It:
 - installs a Gradle `init.d` gate that pre-flights device-touching tasks;
 - installs the `corral` agent skill (how an agent should lease devices and read the gate) to
   `~/.agents/skills/corral/SKILL.md` when `~/.agents/skills` already exists — the house harness
-  discovers it from there, while Claude Code reads `~/.claude/skills/<name>/` instead;
+  discovers it from there, while Claude Code reads `~/.claude/skills/<name>/` instead. The
+  installer does not create that link: add `~/.claude/skills/corral` as a symlink to
+  `~/.agents/skills/corral` yourself (uninstall removes the link only while it resolves into that
+  skill);
 - optionally installs the desktop console with `--ui` (the default when a
   `corral-ui-all.jar` is present) or `--no-ui`.
+
+The installer's own flags: `--java PATH`, `--adb PATH`, `--jar PATH`, `--ui` / `--no-ui`,
+`--no-sdk-shim`, `--home DIR` (sandboxes and the test suite) and `--uninstall`; `--help` lists
+them. Re-running it is also the upgrade path — `corral update --apply` downloads a release bundle
+and runs this same script from it.
+
+The installed `corral` and `corral-ui` shims are two lines each: they run `java` on
+`$CORRAL_JAR` (default `~/.corral/corral-daemon-all.jar`) and `$CORRAL_UI_JAR` (default
+`~/.corral/corral-ui-all.jar`), so a jar built elsewhere can be tried without reinstalling.
 
 Reload your shell, then check that everything came up:
 
@@ -126,7 +138,8 @@ corral free "$serial"
 
 A claim's TTL is the hold, and its owner string is the identity, so a claim
 outlives the process that made it. `corral free --all` drops everything you
-own.
+own, and a bare `corral free` does the same; `corral free <serial>` releases
+that one device, and only if it is yours.
 
 Every lease the CLI asks for has a TTL; the default is 1800 seconds (30
 minutes). `CORRAL_LEASE_TTL_SECONDS` overrides it for `claim`, `wait`, `lease`
@@ -148,6 +161,12 @@ command after `--`, and releases the device when the command exits. The lease
 is tied to the lifetime of the command, so a crashed command frees its device
 through the usual TTL/pid machinery.
 
+`corral lease --all -- <cmd>` is the pool-wide variant: it claims every free
+device that matches the selector, runs the command once with them all held, and
+releases them when it exits. It exports no `ANDROID_SERIAL` (the command is
+meant to drive the whole pool, as `./gradlew connectedAndroidTest` does), and it
+cannot be combined with `--timeout`.
+
 When nothing is free and you would rather wait than poll:
 
 ```sh
@@ -160,7 +179,10 @@ offered, then runs the command **holding** that device until the command exits. 
 matching device is offered to the longest-waiting ticket that is still polling, so
 waiting is FIFO by arrival — and because the lease lives for the command's lifetime
 (the CLI renews it while the command runs), the device cannot move on to the next
-ticket while the command runs. The one exception is SIGKILL to the `corral lease`
+ticket while the command runs. The queue wait is capped at 600 seconds: a larger
+`--timeout` is clamped with a warning on stderr, and a negative one is a usage
+error. `corral wait --timeout` takes the same cap and defaults to 600 when it is
+omitted. The one exception is SIGKILL to the `corral lease`
 process itself: the JVM runs no shutdown hook, so the CLI cannot clean up — the next
 paragraph covers how the hold ends in that case. Send TERM (not KILL) and give it a
 few seconds. A command that crashes still frees its device through the usual TTL/pid
@@ -188,6 +210,17 @@ when you want to know which device you would get and then decide what to do; use
 `lease --timeout` when you want the device held for the work. A ticket that goes quiet
 is dropped after about 30 seconds. `corral queue` lists the outstanding tickets, and
 `corral status` names the current holder of every device.
+
+The rest of the CLI:
+
+- `corral check [--owner O] [serial...]` asks the same question the gate asks — may this owner use
+  each device — and exits non-zero listing the ones it may not; useful in a script or a CI step.
+- `corral gate -- <adb args>` runs the wrapper's classification and then, only when the call is
+  allowed, `exec`s the real adb. The Windows `.bat` twin reaches the gate this way.
+- `corral screenshot <serial> [--out FILE]` writes a PNG of a device you may read (the default file
+  is `<serial>.png`); `corral events` streams the daemon's `hello` and `state.changed` frames as
+  raw JSON.
+- `corral --version` prints the version stamped into the CLI's jar, with no daemon running.
 
 Identity: leases are owned per agent session, not per unix user. Set
 `CORRAL_OWNER` to a stable name if your harness's session outlives a single
@@ -249,7 +282,9 @@ waits for the flip too, but it hands the lease back when it exits, so it is the
 poll-then-decide form — wrap work in `lease --timeout`.) When the daemon runs as
 the installed `corral.service` unit, each AVD runs in its own transient
 `systemd-run --user` unit that survives a daemon restart, with its output at
-`~/.corral/emulator-<avd>.log`. Stopping an emulator releases its lease.
+`~/.corral/emulator-<avd>.log` (`CORRAL_EMULATOR_LAUNCHER=systemd` forces that
+path, `direct` forces a plain child process; unset auto-detects). Stopping an
+emulator releases its lease.
 
 ## The desktop console
 
@@ -259,8 +294,10 @@ corral-ui --url http://127.0.0.1:9000
 ```
 
 The console resolves its daemon URL from `--url`, else `CORRAL_URL`, else a
-stored preference, else the default `http://127.0.0.1:8798`. It is a single
-screen with a left rail and six sections:
+stored preference, else the default `http://127.0.0.1:8798`. Its identity
+(`CORRAL_OWNER`, default `corral-ui`) and its scrcpy path (`CORRAL_SCRCPY`) are
+client preferences too, saved with the URL in `~/.config/corral/ui.conf`. It is
+a single screen with a left rail and six sections:
 
 - **Devices** — a card carousel with live thumbnails, the holder and a TTL
   countdown;
@@ -269,6 +306,13 @@ screen with a left rail and six sections:
 - **Doctor** — per-layer health, with a rail badge on failure;
 - **Rules** — the gate rules;
 - **Settings** — the daemon knobs and this client's own preferences.
+
+The status bar carries the connection state with the last event `seq` and the daemon's version
+(omitted, not faked, while it is unknown); an update pill appears when a newer release is known,
+and Settings shows the console's own version beside the daemon's. Settings also holds the update
+row: the last check's honest state, a check-now that asks the daemon for a fresh check, and an
+install that confirms first and then runs the same checksum-gated applier as `corral update
+--apply`.
 
 It is an observer, not a leaser: its identity is `CORRAL_OWNER` (default
 `corral-ui`), and its scrcpy live view is strictly read-only. Install it with
@@ -291,6 +335,10 @@ and the identity ancestor lists) live in the same editable file,
 `~/.config/corral/rules` (override `CORRAL_RULES`). A missing rules file fails
 closed, and the daemon restores the built-in default from the jar.
 
+`GET /api/config` (for instance `curl -s http://127.0.0.1:8798/api/config`) lists every knob with
+its effective value, its built-in default and whether changing it needs a restart — the same list
+the console's Settings section shows.
+
 The update check is on by default; see [Updates](#updates) for its kill-switch
 (`CORRAL_UPDATE_CHECK`).
 
@@ -298,7 +346,11 @@ The update check is on by default; see [Updates](#updates) for its kill-switch
 
 `corral doctor` is the health check. It reports, in one pass:
 
-- whether the daemon is reachable, and how many devices it sees;
+- whether the daemon is reachable, and how many devices it sees — an empty pool
+  also gets a hint that an `adb reconnect` can leave the adb server's list empty
+  until the server restarts, with the `adb kill-server && adb start-server`
+  recovery (both act on the server, so check `corral status` shows no live
+  leases first);
 - any wedged emulator and its remedy;
 - the state of the SDK adb shim;
 - the state of the gate rules;
@@ -324,7 +376,8 @@ daemon's `GET /api/update` is a read — current version, latest version,
 whether an update is available, whether the check is enabled; it starts
 nothing.
 
-`corral update` reports what the last check found; it downloads nothing.
+`corral update` reports what the last check found; it downloads nothing. `GET /api/update?force`
+runs a fresh check at once — that is what the console's check-now calls.
 
 Applying an update is always explicit:
 
@@ -332,10 +385,11 @@ Applying an update is always explicit:
 corral update --apply
 ```
 
-Without `--apply`, nothing is downloaded and nothing is run. Applying
-downloads the release `corral-<version>.zip` and its `.zip.sha256` from the
-same release, verifies the SHA-256, and only then extracts the bundle and runs
-its `install.sh`, which restarts the daemon. A checksum mismatch, a missing
+Without `--apply`, nothing is downloaded and nothing is run. The console's **Install** button is the
+same explicit step from the other surface: it names the version, asks for confirmation, and then
+runs the same applier. Applying downloads the release `corral-<version>.zip` and its
+`.zip.sha256` from the same release, verifies the SHA-256, and only then extracts the bundle and
+runs its `install.sh`, which restarts the daemon. A checksum mismatch, a missing
 checksum, or an unreadable one stops the apply before any file is extracted.
 
 **What the checksum proves.** The `.sha256` comes from the same release as the
@@ -366,12 +420,17 @@ scripts/install.sh --uninstall    # from a source checkout
 ```
 
 This stops and disables the `corral` user service, removes the unit, the adb
-wrapper, the `corral` and `corral-ui` shims, the desktop launcher and icon, the
-Gradle `init.d` gate, and the `~/.config/corral` files, and removes `~/.corral`
-(the daemon jar and its SQLite database). Your Android SDK and your `PATH`
-edits in the shell rc files are left alone. An agent-edited skill keeps both its
-file and the link at `~/.claude/skills/corral` that points at it; both are named
-under "Left alone".
+wrapper, the `corral` and `corral-ui` shims, the desktop launcher, the Gradle
+`init.d` gate, and the `~/.config/corral` files, and removes `~/.corral`
+(the daemon jar and its SQLite database). It also puts the SDK's real adb back
+at `platform-tools/adb` when the shim had been installed (from the `adb.real` the
+installer stashed), removes the icon at `~/.local/share/icons/corral.png` when it
+is still the one it installed, and removes the agent skill when it still matches
+what it installed (an edited skill keeps both its file and the link at
+`~/.claude/skills/corral` that points at it; every kept file is named under
+"Left alone"). Your Android SDK and your `PATH` edits in the shell rc files are
+left alone, and so is `~/.agents/skills` itself — it is what declared this host
+an agent host.
 
 ## Known limits
 

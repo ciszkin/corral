@@ -35,7 +35,7 @@ bypass:
   `connected*AndroidTest` tasks because AGP bypasses the adb binary — bypassed
   by a build that does not use the installed Gradle gate.
 
-Two more bypasses are common enough to name, because they are the ones a
+Three more bypasses are common enough to name, because they are the ones a
 developer hits without meaning to:
 
 - **ddmlib clients that talk to the adb server on `:5037` directly.** Android
@@ -44,8 +44,13 @@ developer hits without meaning to:
 - **`platform-tools/adb.real`**, the real binary that sits beside the SDK shim.
   Anything that names it by absolute path is outside the shim layer (and, when
   it does not go through `PATH`, the wrapper too).
+- **the console's scrcpy live view.** scrcpy resolves adb itself (a static build
+  ships its own), so that one path generally sits outside all three layers. The
+  view is read-only by construction — `--no-control` (which also drops
+  drag-and-drop install/push), `--no-clipboard-autosync`, `--no-audio` — so an
+  observer can watch a leased device but not type into it.
 
-None of these layers — including the two above — is a security boundary against
+None of these layers — including the ones above — is a security boundary against
 a hostile local process; they are guardrails for cooperating agents and humans,
 and a client that goes around adb entirely is outside all of them.
 

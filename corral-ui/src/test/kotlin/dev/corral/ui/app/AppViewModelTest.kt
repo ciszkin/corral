@@ -14,7 +14,6 @@ import dev.corral.ui.data.DoctorResponse
 import dev.corral.ui.data.Prefs
 import dev.corral.ui.data.PutConfigResponse
 import dev.corral.ui.data.UiPrefs
-import dev.corral.ui.theme.Language
 import dev.corral.ui.theme.ThemeMode
 import kotlin.io.path.createTempDirectory
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -86,9 +85,8 @@ class AppViewModelTest {
     private fun tmpPrefs() = UiPrefs(createTempDirectory("appvm").resolve("ui.conf"))
 
     @Test fun initialStateReflectsStoredPrefs() = runTest {
-        val vm = newVm(prefs = Prefs(themeMode = ThemeMode.DARK, language = Language.BELARUSIAN, url = "http://host:1"))
+        val vm = newVm(prefs = Prefs(themeMode = ThemeMode.DARK, url = "http://host:1"))
         assertTrue(vm.state.value.useDark)
-        assertEquals(Language.BELARUSIAN, vm.state.value.language)
         assertEquals("http://host:1", vm.state.value.prefs.url)
         assertEquals("http://host:1", vm.state.value.url)
     }
@@ -247,14 +245,6 @@ class AppViewModelTest {
         vm.onIntent(AppIntent.SetTheme(ThemeMode.LIGHT))
         assertFalse(vm.state.value.useDark)
         assertEquals(ThemeMode.LIGHT, store.load().themeMode)
-    }
-
-    @Test fun setLanguagePersists() = runTest {
-        val store = tmpPrefs()
-        val vm = newVm(store = store)
-        vm.onIntent(AppIntent.SetLanguage(Language.BELARUSIAN))
-        assertEquals(Language.BELARUSIAN, vm.state.value.language)
-        assertEquals(Language.BELARUSIAN, store.load().language)
     }
 
     @Test fun setScrcpyPersists() = runTest {

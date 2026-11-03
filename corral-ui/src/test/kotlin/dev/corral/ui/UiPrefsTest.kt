@@ -2,7 +2,6 @@ package dev.corral.ui
 
 import dev.corral.ui.data.Prefs
 import dev.corral.ui.data.UiPrefs
-import dev.corral.ui.theme.Language
 import dev.corral.ui.theme.ThemeMode
 import java.nio.file.Files
 import kotlin.io.path.createTempDirectory
@@ -19,7 +18,6 @@ class UiPrefsTest {
             owner = "claude:abc",
             scrcpyPath = "/opt/scrcpy",
             themeMode = ThemeMode.LIGHT,
-            language = Language.BELARUSIAN,
             windowX = 120,
             windowY = 48,
             windowW = 1440,
@@ -41,6 +39,28 @@ class UiPrefsTest {
         assertEquals(Prefs(), UiPrefs(path).load())
         Files.writeString(path, """{"windowW": "wide"}""")
         assertEquals(Prefs(), UiPrefs(path).load())
+    }
+
+    @Test fun legacyLanguageKeyLoadsWithoutLosingOtherPrefs() {
+        val dir = createTempDirectory("prefs")
+        val path = dir.resolve("ui.conf")
+        Files.writeString(path, """
+            {
+              "url": "http://127.0.0.1:9123",
+              "owner": "claude:abc",
+              "scrcpyPath": "/opt/scrcpy",
+              "themeMode": "LIGHT",
+              "language": "BELARUSIAN",
+              "windowW": 1440
+            }
+        """.trimIndent())
+        val loaded = UiPrefs(path).load()
+        assertEquals("http://127.0.0.1:9123", loaded.url)
+        assertEquals("claude:abc", loaded.owner)
+        assertEquals("/opt/scrcpy", loaded.scrcpyPath)
+        assertEquals(ThemeMode.LIGHT, loaded.themeMode)
+        assertEquals(1440, loaded.windowW)
+        assertTrue(loaded != Prefs(), "a legacy language key must not force the defaults")
     }
 
     @Test fun saveCreatesParentsAndLeavesNoTempFile() {

@@ -83,7 +83,6 @@
     <string name="settings_restart_hint">патрабуецца перазапуск — systemctl --user restart corral</string>
     <string name="settings_reset_defaults">Скінуць да стандартных</string>
     <string name="settings_theme">Тэма</string>
-    <string name="settings_language">Мова</string>
     <string name="settings_url">URL дэмана</string>
     <string name="settings_saved">захавана</string>
     <string name="settings_paths">налады кліента → ~/.config/corral/ui.conf · налады дэмана → канфіг дэмана</string>
@@ -93,7 +92,6 @@
     <string name="settings_owner_desc">Ідэнтычнасць гэтага кліента ў арэндах і здымках. Ужываецца пры наступным злучэнні.</string>
     <string name="settings_scrcpy_desc">Бінарнік scrcpy для жывога прагляду — пуста: спачатку CORRAL_SCRCPY з асяроддзя, потым PATH. Ужываецца пры наступным праглядзе.</string>
     <string name="settings_theme_desc">Ужываецца адразу — агульнае з пераключальнікам у радку стану.</string>
-    <string name="settings_language_desc">Мова інтэрфейсу. Ужываецца адразу.</string>
     <string name="settings_port_desc">Порт праслухоўвання (1024–65535).</string>
     <string name="settings_screenshots_desc">strict: здымаюць толькі ўтрымальнік або названыя назіральнікі.</string>
     <string name="settings_screenshots_strict">строгі</string>
@@ -106,9 +104,6 @@
     <string name="settings_gradle_tasks_desc">Заданні, якія шлюз лічыць якія зачэпліваюць прылады.</string>
     <string name="settings_load_error">Не ўдалося загрузіць канфіг.</string>
     <string name="config_loading">загрузка…</string>
-
-    <string name="language_en">English</string>
-    <string name="language_be">Беларуская</string>
 
     <string name="theme_system">Сістэмная</string>
     <string name="theme_dark">Цёмная</string>

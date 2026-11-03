@@ -46,7 +46,6 @@ class AppViewModel(
             copy(
                 url = initialUrl,
                 useDark = resolveUseDark(initial.themeMode),
-                language = initial.language,
                 prefs = initial,
                 lastUpdatedMs = clock(),
             )
@@ -72,10 +71,6 @@ class AppViewModel(
             is AppIntent.SetTheme -> {
                 val p = persist { it.copy(themeMode = intent.mode) }
                 reduceState { copy(prefs = p, useDark = resolveUseDark(intent.mode)) }
-            }
-            is AppIntent.SetLanguage -> {
-                val p = persist { it.copy(language = intent.language) }
-                reduceState { copy(prefs = p, language = intent.language) }
             }
             is AppIntent.SetScrcpy -> persist { it.copy(scrcpyPath = intent.path) }
             AppIntent.SocketOpened -> reduceState { copy(connection = Connection.Connecting, daemonVersion = "") }

@@ -80,7 +80,6 @@
     <string name="settings_restart_hint">restart required — systemctl --user restart corral</string>
     <string name="settings_reset_defaults">Reset to defaults</string>
     <string name="settings_theme">Theme</string>
-    <string name="settings_language">Language</string>
     <string name="settings_url">Daemon URL</string>
     <string name="settings_saved">saved</string>
     <string name="settings_paths">client prefs → ~/.config/corral/ui.conf · daemon prefs → daemon config</string>
@@ -90,7 +89,6 @@
     <string name="settings_owner_desc">This client's identity in leases and screenshots. Applies next connection.</string>
     <string name="settings_scrcpy_desc">scrcpy binary for live view — empty tries CORRAL_SCRCPY from the environment, then PATH. Applies next live view.</string>
     <string name="settings_theme_desc">Applies immediately — shared with the status-bar toggle.</string>
-    <string name="settings_language_desc">Interface language. Applies immediately.</string>
     <string name="settings_port_desc">Listen port (1024–65535).</string>
     <string name="settings_screenshots_desc">strict: only the holder or named observers capture.</string>
     <string name="settings_screenshots_strict">strict</string>
@@ -103,9 +101,6 @@
     <string name="settings_gradle_tasks_desc">Tasks the gate treats as device-touching.</string>
     <string name="settings_load_error">Could not load config.</string>
     <string name="config_loading">loading…</string>
-
-    <string name="language_en">English</string>
-    <string name="language_be">Беларуская</string>
 
     <string name="theme_system">System</string>
     <string name="theme_dark">Dark</string>

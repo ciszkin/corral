@@ -6,7 +6,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -28,7 +27,6 @@ import dev.corral.ui.resources.corral_icon_128
 import dev.corral.ui.resources.corral_icon_48
 import dev.corral.ui.theme.CorralTheme
 import dev.corral.ui.theme.Dimens
-import dev.corral.ui.theme.locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
@@ -54,7 +52,7 @@ fun main(args: Array<String>) {
     val envOwner = System.getenv("CORRAL_OWNER")?.takeIf { it.isNotBlank() }
     val prefsStore = UiPrefs()
     val stored = prefsStore.load()
-    Locale.setDefault(stored.language.locale())
+    pinEnglishLocale()
     val url = argUrl ?: envUrl ?: stored.url
     val owner = envOwner ?: stored.owner
     val sessionType = System.getenv("XDG_SESSION_TYPE")
@@ -138,19 +136,15 @@ fun main(args: Array<String>) {
                     window.requestFocus()
                 }
             }
-            val language = state.language
-            Locale.setDefault(language.locale())
-            key(language) {
-                CorralTheme(state.useDark) {
-                    AppScreen(
-                        app, pool, config, listState,
-                        onQuit = {
-                            saveGeometry(prefsStore, app.state.value.prefs, awtWindow, offsetX, offsetY)
-                            exitApplication()
-                        },
-                        scrcpy = { serial -> scrcpy.launch(serial) },
-                    )
-                }
+            CorralTheme(state.useDark) {
+                AppScreen(
+                    app, pool, config, listState,
+                    onQuit = {
+                        saveGeometry(prefsStore, app.state.value.prefs, awtWindow, offsetX, offsetY)
+                        exitApplication()
+                    },
+                    scrcpy = { serial -> scrcpy.launch(serial) },
+                )
             }
         }
     }
@@ -162,6 +156,10 @@ fun main(args: Array<String>) {
         e.printStackTrace()
         exitProcess(1)
     }
+}
+
+internal fun pinEnglishLocale() {
+    Locale.setDefault(Locale.ENGLISH)
 }
 
 private fun saveGeometry(

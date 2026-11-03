@@ -45,8 +45,6 @@ import dev.corral.ui.icons.AppIcon
 import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.config_loading
-import dev.corral.ui.resources.language_be
-import dev.corral.ui.resources.language_en
 import dev.corral.ui.resources.rail_settings
 import dev.corral.ui.resources.rules_discard
 import dev.corral.ui.resources.rules_dirty
@@ -59,8 +57,6 @@ import dev.corral.ui.resources.settings_default
 import dev.corral.ui.resources.settings_default_empty
 import dev.corral.ui.resources.settings_emulator_desc
 import dev.corral.ui.resources.settings_gradle_tasks_desc
-import dev.corral.ui.resources.settings_language
-import dev.corral.ui.resources.settings_language_desc
 import dev.corral.ui.resources.settings_launcher_desc
 import dev.corral.ui.resources.settings_load_error
 import dev.corral.ui.resources.settings_observers_desc
@@ -104,7 +100,6 @@ import dev.corral.ui.resources.update_state_unknown
 import dev.corral.ui.resources.update_state_unparseable
 import dev.corral.ui.resources.update_state_unreachable
 import dev.corral.ui.theme.Dimens
-import dev.corral.ui.theme.Language
 import dev.corral.ui.theme.LocalExtendedColors
 import dev.corral.ui.theme.LocalMonoFont
 import dev.corral.ui.theme.ThemeMode
@@ -171,7 +166,6 @@ fun SettingsSection(
                 owner = defaults.owner
                 scrcpy = defaults.scrcpyPath
                 onAppIntent(AppIntent.SetTheme(ThemeMode.SYSTEM))
-                onAppIntent(AppIntent.SetLanguage(Language.ENGLISH))
                 onConfigIntent(ConfigIntent.ResetToDefaults)
             },
             onSave = {
@@ -227,18 +221,6 @@ private fun ClientGroup(
                     ThemeMode.SYSTEM -> stringResource(Res.string.theme_system)
                     ThemeMode.LIGHT -> stringResource(Res.string.theme_light)
                     ThemeMode.DARK -> stringResource(Res.string.theme_dark)
-                }
-            }
-        }
-        FieldBlock(stringResource(Res.string.settings_language), stringResource(Res.string.settings_language_desc)) {
-            Segmented(
-                options = listOf(Language.ENGLISH, Language.BELARUSIAN),
-                selected = app.language,
-                onSelect = { language -> onAppIntent(AppIntent.SetLanguage(language)) },
-            ) { language ->
-                when (language) {
-                    Language.ENGLISH -> stringResource(Res.string.language_en)
-                    Language.BELARUSIAN -> stringResource(Res.string.language_be)
                 }
             }
         }

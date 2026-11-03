@@ -4,7 +4,6 @@ import dev.corral.EventFrame
 import dev.corral.ui.architecture.MviIntent
 import dev.corral.ui.architecture.MviState
 import dev.corral.ui.data.Prefs
-import dev.corral.ui.theme.Language
 import dev.corral.ui.theme.ThemeMode
 
 sealed interface Connection {
@@ -19,7 +18,6 @@ data class AppState(
     val url: String = "",
     val daemonVersion: String = "",
     val useDark: Boolean = true,
-    val language: Language = Language.ENGLISH,
     val prefs: Prefs = Prefs(),
     val lastUpdatedMs: Long = 0,
 ) : MviState
@@ -27,7 +25,6 @@ data class AppState(
 sealed interface AppIntent : MviIntent {
     data class Connect(val url: String, val owner: String) : AppIntent
     data class SetTheme(val mode: ThemeMode) : AppIntent
-    data class SetLanguage(val language: Language) : AppIntent
     data class SetScrcpy(val path: String) : AppIntent
     data object SocketOpened : AppIntent
     data class Frame(val frame: EventFrame) : AppIntent

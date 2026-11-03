@@ -197,8 +197,8 @@ the same device.
   Settings also
   holds the update row: the last check's honest state, a "check now" that asks for a fresh check
   (`?force`), and an install that confirms first and then runs the same checksum-gated applier as
-  `corral update --apply`. The theme (System/Light/Dark) and language (English/Беларуская) apply
-  immediately and persist, with the client's window geometry, to `~/.config/corral/ui.conf`.
+  `corral update --apply`. The interface is English, and the theme (System/Light/Dark) applies
+  immediately and persists, with the client's window geometry, to `~/.config/corral/ui.conf`.
   Force-free sits behind a confirm dialog naming the holder, and a scrcpy live view is strictly
   read-only (`--no-control`, `--no-clipboard-autosync`, `--no-audio`), so an observer can watch a
   leased device but never touch it. The window and tray use the Corral mark. The window's close

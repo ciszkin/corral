@@ -1,6 +1,5 @@
 package dev.corral.ui.data
 
-import dev.corral.ui.theme.Language
 import dev.corral.ui.theme.ThemeMode
 import java.nio.file.Files
 import java.nio.file.Path
@@ -14,7 +13,6 @@ data class Prefs(
     val owner: String = "corral-ui",
     val scrcpyPath: String = "",
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val language: Language = Language.ENGLISH,
     val windowX: Int = -1,
     val windowY: Int = -1,
     val windowW: Int = 1100,

@@ -212,6 +212,8 @@
 
     <!-- Draft additions pending OWNER REVIEW — update surface -->
     <string name="update_section">Абнаўленне</string>
+    <string name="update_source">Крыніца абнаўленняў</string>
+    <string name="update_source_desc">толькі чытанне — дэман бярэ гэтую назву рэпазіторыя з уласнага асяроддзя (CORRAL_REPO); змяняйце там, не тут</string>
     <string name="update_current">Бягучая версія</string>
     <string name="update_latest">Апошняя версія</string>
     <string name="update_check_now">Праверыць зараз</string>

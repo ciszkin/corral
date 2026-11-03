@@ -19,6 +19,7 @@ data class ConfigResponse(
     val rules: ConfigRules,
     val rulesPath: String,
     val envPath: String,
+    val updateRepo: String = "",
 )
 
 @Serializable

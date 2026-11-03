@@ -67,7 +67,7 @@ init_list=" $(normalize_list "$init_list") "
 # /proc only (Linux): comm and starttime there match the CLI byte for byte. Where /proc is
 # unreadable (macOS/Windows hosts) this shell cannot walk — it delegates to `corral owner`,
 # whose ProcessHandle walk is the same chain the CLI's own claims use, so both readers
-# still agree (one JVM spawn per unpinned adb call); without corral it degrades to user:$USER.
+# still agree (one JVM spawn per adb call); without corral it degrades to user:$USER.
 # PROC_ROOT is injectable so the suite can simulate a /proc-less host.
 PROC_ROOT=${CORRAL_PROC_ROOT:-/proc}
 agent_process() {

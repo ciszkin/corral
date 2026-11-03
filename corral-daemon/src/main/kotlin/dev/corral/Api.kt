@@ -84,7 +84,8 @@ import kotlinx.serialization.json.decodeFromJsonElement
     @EncodeDefault val init_floor: List<String> = emptyList())
 
 @Serializable data class ConfigResponse(val settings: List<ConfigSetting>, val rules: ConfigRules,
-                                        val rulesPath: String, val envPath: String)
+                                        val rulesPath: String, val envPath: String,
+                                        val updateRepo: String = "")
 
 @Serializable data class PutConfigRequest(val settings: Map<String, String> = emptyMap(), val rules: ConfigRules? = null)
 
@@ -366,7 +367,7 @@ fun Application.corralModule(env: AppEnv) {
             call.respond(ConfigResponse(
                 cfg.settings(),
                 ConfigRules(r.readonly.sorted(), r.valueFlags.sorted(), r.shellSkip.sorted(), r.initFloor.sorted()),
-                RulesFile.defaultPath().toString(), DaemonConfig.defaultPath().toString()))
+                RulesFile.defaultPath().toString(), DaemonConfig.defaultPath().toString(), updateRepo()))
         }
         put("/api/config") {
             if (call.rejectsForeignOrigin()) return@put

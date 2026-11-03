@@ -194,6 +194,8 @@
     <string name="retry">Retry</string>
 
     <string name="update_section">Update</string>
+    <string name="update_source">Update source</string>
+    <string name="update_source_desc">read-only — the daemon reads this repository name from its own environment (CORRAL_REPO); change it there, not here</string>
     <string name="update_current">Current version</string>
     <string name="update_latest">Latest version</string>
     <string name="update_check_now">Check now</string>

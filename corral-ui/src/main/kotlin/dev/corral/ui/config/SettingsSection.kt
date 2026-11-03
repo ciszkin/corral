@@ -38,6 +38,7 @@ import dev.corral.ui.app.AppIntent
 import dev.corral.ui.app.AppState
 import dev.corral.ui.components.CorralPill
 import dev.corral.ui.components.SectionHeader
+import dev.corral.ui.data.ConfigResponse
 import dev.corral.ui.data.ConfigSetting
 import dev.corral.ui.data.Prefs
 import dev.corral.ui.icons.AppIcon
@@ -91,6 +92,8 @@ import dev.corral.ui.resources.update_installed
 import dev.corral.ui.resources.update_installing
 import dev.corral.ui.resources.update_latest
 import dev.corral.ui.resources.update_section
+import dev.corral.ui.resources.update_source
+import dev.corral.ui.resources.update_source_desc
 import dev.corral.ui.resources.update_state_available
 import dev.corral.ui.resources.update_state_cause_unknown
 import dev.corral.ui.resources.update_state_current
@@ -111,6 +114,10 @@ import org.jetbrains.compose.resources.stringResource
 
 /** The version row's value: the honest version, or an explicit placeholder when the jar reported none. */
 internal fun versionText(version: String, unknown: String): String = version.ifBlank { unknown }
+
+/** The update-source row's value: the daemon's repo, or a placeholder for a daemon that predates it. */
+internal fun updateRepoText(loaded: ConfigResponse, unknown: String): String =
+    loaded.updateRepo.ifBlank { unknown }
 
 @Composable
 fun SettingsSection(
@@ -278,6 +285,15 @@ private fun DaemonGroup(
         settings.forEach { setting ->
             SettingRow(setting, state.settings[setting.key] ?: setting.value,
                 state.errors.firstOrNull { it.contains(setting.key) && !it.isRulesMessage() }, onConfigIntent)
+        }
+        FieldBlock(
+            stringResource(Res.string.update_source),
+            stringResource(Res.string.update_source_desc),
+        ) {
+            Text(
+                updateRepoText(loaded, stringResource(Res.string.settings_version_unknown)),
+                fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.body2,
+            )
         }
     }
 }

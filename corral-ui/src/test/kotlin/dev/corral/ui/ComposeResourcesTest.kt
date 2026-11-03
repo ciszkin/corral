@@ -49,7 +49,8 @@ class ComposeResourcesTest {
 
     @Test fun updateStringsExistInBothLanguages() {
         val names = listOf(
-            "update_section", "update_current", "update_latest", "update_check_now", "update_install",
+            "update_section", "update_source", "update_source_desc",
+            "update_current", "update_latest", "update_check_now", "update_install",
             "update_state_current", "update_state_available", "update_state_disabled",
             "update_state_not_checked", "update_state_unreachable", "update_state_http",
             "update_state_unparseable", "update_state_cause_unknown", "update_state_unknown",

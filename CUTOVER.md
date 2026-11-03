@@ -341,7 +341,9 @@ closed, and the daemon restores the built-in default from the jar.
 
 `GET /api/config` (for instance `curl -s http://127.0.0.1:8798/api/config`) lists every knob with
 its effective value, its built-in default and whether changing it needs a restart — the same list
-the console's Settings section shows.
+the console's Settings section shows. The one exception is `CORRAL_REPO`: the daemon reads it from
+its own environment only, so `/api/config` and Settings show it **read-only**, and it is the one
+setting that decides where an update check and an apply point.
 
 The update check is on by default; see [Updates](#updates) for its kill-switch
 (`CORRAL_UPDATE_CHECK`).
@@ -371,7 +373,8 @@ unauthenticated `GET` to
 `https://api.github.com/repos/<owner>/<repo>/releases/latest` (default
 `ciszkin/corral`; `CORRAL_REPO` points both the check and the apply at another
 repository — an environment variable only, not a config knob, which is what a
-fork wants). It sends no token and no credentials.
+fork wants; `/api/config` and Settings report it read-only). It sends no token
+and no credentials.
 
 The check is **on by default**: an unmodified daemon calls `api.github.com`
 once a day. `CORRAL_UPDATE_CHECK=off` in `daemon.env` or the environment turns

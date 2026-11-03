@@ -207,6 +207,23 @@ class ApiTest {
         }
     }
 
+    @Test fun configCarriesTheUpdateSourceAndStillListsOnlyTheNineWritableKnobs() {
+        withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+            val body = Json.decodeFromString<ConfigResponse>(c.get("/api/config").bodyAsText())
+            assertEquals(updateRepo(), body.updateRepo)
+            assertEquals(9, body.settings.size)
+            assertEquals(DaemonConfig.KEYS.map { it.key }, body.settings.map { it.key })
+            assertTrue(body.settings.none { it.key == "CORRAL_REPO" })
+        }
+    }
+
+    @Test fun updateRepoFallsBackToTheBuiltInDefaultOnlyWhenTheEnvIsBlankOrUnset() {
+        assertEquals("ciszkin/corral", updateRepo { null })
+        assertEquals("ciszkin/corral", updateRepo { "" })
+        assertEquals("ciszkin/corral", updateRepo { "   " })
+        assertEquals("acme/fork", updateRepo { "acme/fork" })
+    }
+
     @Test fun configReportsTheEffectiveValueWhenTheFileValueIsUnusable() {
         val config = DaemonConfig(
             fileValues = mapOf("CORRAL_PORT" to "22"),

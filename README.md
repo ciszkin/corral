@@ -148,8 +148,9 @@ the same device.
   returns an image content block, and `corral screenshot <serial> [--out F]` / `corral events`
   are the CLI verbs.
 - **Config & doctor API** — `GET /api/config` reports every daemon knob with its **effective**
-  value, built-in default and `restartRequired` flag, plus the gate rules and the `rules` /
-  `daemon.env` paths; an unusable file value falls through to inherited env then the default.
+  value, built-in default and `restartRequired` flag, plus the gate rules, the `rules` /
+  `daemon.env` paths and the update source (`CORRAL_REPO`, environment-only and read-only);
+  an unusable file value falls through to inherited env then the default.
   `PUT /api/config` validates the whole payload before writing anything (unknown keys are ignored,
   control characters rejected, settings paths checked, the port must be 1024–65535), so a bad
   request is `400` and writes nothing. A rules entry that cannot round-trip through the rules file

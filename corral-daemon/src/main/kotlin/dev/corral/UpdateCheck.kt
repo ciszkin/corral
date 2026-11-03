@@ -12,6 +12,11 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 
 private const val FEED_TIMEOUT_SECONDS = 10L
+private const val DEFAULT_UPDATE_REPO = "ciszkin/corral"
+
+/** The one update-repository resolver: check and config API share it, so the reported value cannot drift. */
+internal fun updateRepo(env: (String) -> String? = System::getenv): String =
+    env("CORRAL_REPO")?.takeIf { it.isNotBlank() } ?: DEFAULT_UPDATE_REPO
 
 /**
  * What the one outbound call observed: a 200 body, a non-200 status, or no response at all. The
@@ -30,7 +35,7 @@ sealed interface FeedResult {
  * observed HTTP status, while a timeout, DNS, or TLS failure is [FeedResult.Unreachable].
  */
 internal fun defaultUpdateFeed(): FeedResult = runCatching {
-    val repo = System.getenv("CORRAL_REPO")?.takeIf { it.isNotBlank() } ?: "ciszkin/corral"
+    val repo = updateRepo()
     val client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(FEED_TIMEOUT_SECONDS)).build()
     val request = HttpRequest.newBuilder(URI.create("https://api.github.com/repos/$repo/releases/latest"))
         // HttpRequest.timeout only bounds time-to-headers; orTimeout below bounds the whole exchange

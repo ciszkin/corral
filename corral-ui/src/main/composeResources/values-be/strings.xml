@@ -91,7 +91,7 @@
     <string name="settings_default_empty">(пуста)</string>
     <string name="settings_url_desc">Адрас дэмана. Ужываецца адразу пры захаванні.</string>
     <string name="settings_owner_desc">Ідэнтычнасць гэтага кліента ў арэндах і здымках. Ужываецца пры наступным злучэнні.</string>
-    <string name="settings_scrcpy_desc">Бінарнік scrcpy для жывога прагляду — пуста значыць PATH. Ужываецца пры наступным праглядзе.</string>
+    <string name="settings_scrcpy_desc">Бінарнік scrcpy для жывога прагляду — пуста: спачатку CORRAL_SCRCPY з асяроддзя, потым PATH. Ужываецца пры наступным праглядзе.</string>
     <string name="settings_theme_desc">Ужываецца адразу — агульнае з пераключальнікам у радку стану.</string>
     <string name="settings_language_desc">Мова інтэрфейсу. Ужываецца адразу.</string>
     <string name="settings_port_desc">Порт праслухоўвання (1024–65535).</string>

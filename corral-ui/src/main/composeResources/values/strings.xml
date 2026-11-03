@@ -88,7 +88,7 @@
     <string name="settings_default_empty">(empty)</string>
     <string name="settings_url_desc">Daemon address. Applies live on save.</string>
     <string name="settings_owner_desc">This client's identity in leases and screenshots. Applies next connection.</string>
-    <string name="settings_scrcpy_desc">scrcpy binary for live view — empty uses PATH. Applies next live view.</string>
+    <string name="settings_scrcpy_desc">scrcpy binary for live view — empty tries CORRAL_SCRCPY from the environment, then PATH. Applies next live view.</string>
     <string name="settings_theme_desc">Applies immediately — shared with the status-bar toggle.</string>
     <string name="settings_language_desc">Interface language. Applies immediately.</string>
     <string name="settings_port_desc">Listen port (1024–65535).</string>

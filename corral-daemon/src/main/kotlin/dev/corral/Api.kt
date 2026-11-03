@@ -472,7 +472,14 @@ fun Application.corralModule(env: AppEnv) {
                         }
                     "CORRAL_UPDATE_CHECK" -> raw.trim().lowercase().takeIf { it == "on" || it == "off" }
                         ?.let { clean[k] = it } ?: run { errors += "CORRAL_UPDATE_CHECK must be on or off" }
-                    else -> {}   // unknown keys ignored by design
+                    else -> {
+                        if (k == "CORRAL_REPO")
+                            errors += "CORRAL_REPO is read-only — it is set in the daemon's own environment, " +
+                                "and it decides where updates come from"
+                        else
+                            errors += "unknown setting $k — accepted: " +
+                                DaemonConfig.KEYS.joinToString(", ") { it.key }
+                    }
                 }
             }
             req.rules?.let { r ->

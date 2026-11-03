@@ -151,7 +151,8 @@ the same device.
   value, built-in default and `restartRequired` flag, plus the gate rules, the `rules` /
   `daemon.env` paths and the update source (`CORRAL_REPO`, environment-only and read-only);
   an unusable file value falls through to inherited env then the default.
-  `PUT /api/config` validates the whole payload before writing anything (unknown keys are ignored,
+  `PUT /api/config` validates the whole payload before writing anything (an unknown setting key is
+  refused with a `400` that names the accepted ones, and `CORRAL_REPO` with a read-only message;
   control characters rejected, settings paths checked, the port must be 1024–65535), so a bad
   request is `400` and writes nothing. A rules entry that cannot round-trip through the rules file
   (whitespace, `,`, `#`, `=`) is refused, as is a `valueflags` entry without a leading dash. Over

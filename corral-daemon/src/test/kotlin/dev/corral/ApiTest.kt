@@ -375,6 +375,34 @@ class ApiTest {
         assertEquals("open", EnvFile.read(DaemonConfig.defaultPath())["CORRAL_SCREENSHOTS"])
     }
 
+    @Test fun putRejectsAnUnknownSettingKeyAndWritesNothing() =
+        withConfigApi(DaemonConfig(fileValues = mapOf("CORRAL_PORT" to "9000"), inherited = emptyMap())) { c ->
+            val envPath = DaemonConfig.defaultPath()
+            EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000", "KEEP" to "yes"))
+            val before = Files.readString(envPath)
+
+            val r = c.putConfig("""{"settings":{"CORRAL_SCREENSHOT_OBSERVER":"bob"}}""")
+            assertEquals(HttpStatusCode.BadRequest, r.status)
+            val err = Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.joinToString(" ")
+            assertContains(err, "CORRAL_SCREENSHOT_OBSERVER")
+            assertContains(err, DaemonConfig.KEYS.joinToString(", ") { it.key })
+            assertEquals(before, Files.readString(envPath))
+
+            val after = Json.decodeFromString<ConfigResponse>(c.get("/api/config").bodyAsText())
+            assertEquals("9000", after.settings.first { it.key == "CORRAL_PORT" }.value)
+        }
+
+    @Test fun putRefusesCorralRepoAsReadOnly() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+        val r = c.putConfig("""{"settings":{"CORRAL_REPO":"acme/fork"}}""")
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        val err = Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.joinToString(" ")
+        assertContains(err, "CORRAL_REPO")
+        assertContains(err, "read-only")
+        assertContains(err, "environment")
+        assertFalse(err.contains("unknown setting"))
+        assertFalse(Files.exists(DaemonConfig.defaultPath()))
+    }
+
     @Test fun putRejectsABadEmulatorLauncherAndWritesNothing() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
         val envPath = DaemonConfig.defaultPath()
         EnvFile.write(envPath, mapOf("CORRAL_PORT" to "9000", "KEEP" to "yes"))
@@ -524,12 +552,13 @@ class ApiTest {
         assertEquals(rulesBefore, Files.readString(rulesPath))
     }
 
-    @Test fun putIgnoresUnknownSettingsKeys() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
+    @Test fun putRejectsUnknownSettingsKeysAlongsideAKnownOne() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->
         val r = c.putConfig("""{"settings":{"UNKNOWN":"x","CORRAL_PORT":"9001"}}""")
-        assertEquals(HttpStatusCode.OK, r.status)
-        val env = EnvFile.read(DaemonConfig.defaultPath())
-        assertEquals("9001", env["CORRAL_PORT"])
-        assertFalse(env.containsKey("UNKNOWN"))
+        assertEquals(HttpStatusCode.BadRequest, r.status)
+        val err = Json.decodeFromString<ConfigErrors>(r.bodyAsText()).errors.joinToString(" ")
+        assertContains(err, "UNKNOWN")
+        assertContains(err, "CORRAL_PORT")
+        assertFalse(Files.exists(DaemonConfig.defaultPath()))
     }
 
     @Test fun putRulesOnlyLeavesEnvFileUntouched() = withConfigApi(DaemonConfig(fileValues = emptyMap())) { c ->

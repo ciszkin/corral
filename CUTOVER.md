@@ -299,8 +299,9 @@ The console resolves its daemon URL from `--url`, else `CORRAL_URL`, else a
 stored preference, else the default `http://127.0.0.1:8798`. Its identity
 (`CORRAL_OWNER`, default `corral-ui`) and its scrcpy path (`CORRAL_SCRCPY`) are
 client preferences too, saved with the URL in `~/.config/corral/ui.conf`; a
-saved `CORRAL_SCRCPY` is inert, because the launcher reads only the console's
-environment. It is a single screen with a left rail and six sections:
+saved `CORRAL_SCRCPY` path is used by the next live view and wins over
+`CORRAL_SCRCPY` in the console's environment, which remains the fallback. It is
+a single screen with a left rail and six sections:
 
 - **Devices** — a card carousel with live thumbnails, the holder and a TTL
   countdown;

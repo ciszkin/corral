@@ -11,16 +11,20 @@ import kotlinx.coroutines.withContext
  * the clipboard channel and `--no-audio` keeps it visual. An observer must never be able to
  * interact with a device an agent holds.
  */
-class ScrcpyLauncher(private val env: Map<String, String> = System.getenv()) {
+class ScrcpyLauncher(
+    private val env: Map<String, String> = System.getenv(),
+    private val savedPath: () -> String = { "" },
+) {
     /** Suspends through the early-exit window on Dispatchers.IO — safe to call from the UI thread. */
     suspend fun launch(serial: String): Process = withContext(Dispatchers.IO) {
-        val bin = env["CORRAL_SCRCPY"]?.takeIf { it.isNotBlank() } ?: "scrcpy"
+        val bin = scrcpyBinary(savedPath(), env)
         val process = try {
             ProcessBuilder(bin, "-s", serial, "--no-control", "--no-clipboard-autosync", "--no-audio")
                 .inheritIO().start()
         } catch (e: IOException) {
             throw IllegalStateException(
-                "scrcpy not found ($bin) — install it or point CORRAL_SCRCPY at the binary", e)
+                "scrcpy not found ($bin) — install it, set CORRAL_SCRCPY in Settings, " +
+                    "or point CORRAL_SCRCPY at the binary", e)
         }
         // A scrcpy that starts and dies at once — denied by the adb gate, device offline, server
         // push rejected — would otherwise look like success: inheritIO sends its complaint to the
@@ -37,3 +41,9 @@ class ScrcpyLauncher(private val env: Map<String, String> = System.getenv()) {
         const val EARLY_EXIT_MS = 700L
     }
 }
+
+/** Saved preference first, then the console's environment, then the bare binary on PATH. */
+internal fun scrcpyBinary(savedPath: String, env: Map<String, String>): String =
+    savedPath.takeIf { it.isNotBlank() }
+        ?: env["CORRAL_SCRCPY"]?.takeIf { it.isNotBlank() }
+        ?: "scrcpy"

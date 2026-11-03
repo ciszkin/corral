@@ -128,9 +128,10 @@ internal fun deniedBannerText(base: String, reason: String?): String =
     if (reason.isNullOrBlank()) base else "$base\n$reason"
 
 /**
- * The status-bar caption: the connection line plus the daemon's version when it is known. An unknown
- * version is omitted, never faked — the daemon jar governs device behaviour, so a stale number is worse
- * than none.
+ * The status-bar caption: the connection line plus the daemon's version when it is known. A blank
+ * version is omitted; an untagged build reports `0.0.0-dev` and is shown as-is, because a real
+ * placeholder beats a hidden version — the daemon jar governs device behaviour, so a stale number
+ * would be worse than none.
  */
 internal fun statusBarText(status: String, url: String, version: String): String =
     if (version.isBlank()) "$status — $url" else "$status — $url · v$version"

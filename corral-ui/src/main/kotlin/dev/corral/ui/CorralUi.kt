@@ -70,7 +70,7 @@ fun main(args: Array<String>) {
     val pool = koin.get<PoolViewModel>()
     val config = koin.get<ConfigViewModel>()
     app.start()
-    val scrcpy = ScrcpyLauncher()
+    val scrcpy = ScrcpyLauncher(savedPath = { app.state.value.prefs.scrcpyPath })
 
     // The window libraries can die at class-init on exotic hosts (e.g. Skiko's theme read on
     // Windows under JDK 25) — turn that into a teaching exit instead of a raw stack.

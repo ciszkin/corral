@@ -73,6 +73,13 @@ class AppScreenTest {
         )
     }
 
+    @Test fun statusBarShowsTheUntaggedBuildPlaceholder() {
+        assertEquals(
+            "connected (seq 0) — http://127.0.0.1:8798 · v0.0.0-dev",
+            statusBarText("connected (seq 0)", "http://127.0.0.1:8798", "0.0.0-dev"),
+        )
+    }
+
     @Test fun settingsRowsReadTheirOwnVersionSources() {
         val unknown = "unknown"
         assertEquals("1.2.3", versionText(AppState(daemonVersion = "1.2.3").daemonVersion, unknown))

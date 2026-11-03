@@ -189,9 +189,10 @@ the same device.
   shows the console's own version beside the daemon's. Rules and Settings are editors: the gate
   rules and daemon knobs go over the daemon's config API (the `readonly`/`valueflags` lists, the
   knobs with the restart-required hint and per-field validation), while the client's own
-  `CORRAL_URL`/`CORRAL_OWNER` apply on save and `CORRAL_SCRCPY` must also be in the console's
-  environment — a saved path is not yet applied; `shell_skip`/`init_floor` are file-only, so edit
-  `~/.config/corral/rules` directly. Settings also
+  `CORRAL_URL`/`CORRAL_OWNER` apply on save, and a saved `CORRAL_SCRCPY` path is used by the next
+  live view — it wins over `CORRAL_SCRCPY` in the console's environment, which remains the
+  fallback; `shell_skip`/`init_floor` are file-only, so edit `~/.config/corral/rules` directly.
+  Settings also
   holds the update row: the last check's honest state, a "check now" that asks for a fresh check
   (`?force`), and an install that confirms first and then runs the same checksum-gated applier as
   `corral update --apply`. The theme (System/Light/Dark) and language (English/Беларуская) apply

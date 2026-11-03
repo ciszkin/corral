@@ -57,6 +57,65 @@ class ScrcpyLauncherTest {
         assertTrue(e.message!!.contains("CORRAL_SCRCPY"))
     }
 
+    @Test fun savedPathWinsOverTheEnvironment() = runTest {
+        val dir = createTempDirectory("scrcpy")
+        val log = dir.resolve("invocations")
+        val fakeScript = fakeScrcpy(dir,
+            posix = "#!/usr/bin/env bash\necho \"$*\" >> '$log'\n",
+            windows = "@echo off\r\necho %* >> \"$log\"\r\n")
+
+        val p = ScrcpyLauncher(
+            env = mapOf("CORRAL_SCRCPY" to "/no/such/scrcpy"),
+            savedPath = { fakeScript.toString() },
+        ).launch("dev1")
+
+        assertTrue(p.waitFor() == 0)
+        assertEquals("-s dev1 --no-control --no-clipboard-autosync --no-audio",
+            Files.readString(log).trim())
+    }
+
+    @Test fun blankSavedPathFallsBackToTheEnvironment() = runTest {
+        val dir = createTempDirectory("scrcpy")
+        val log = dir.resolve("invocations")
+        val fakeScript = fakeScrcpy(dir,
+            posix = "#!/usr/bin/env bash\necho \"$*\" >> '$log'\n",
+            windows = "@echo off\r\necho %* >> \"$log\"\r\n")
+
+        val p = ScrcpyLauncher(
+            env = mapOf("CORRAL_SCRCPY" to fakeScript.toString()),
+            savedPath = { "   " },
+        ).launch("dev1")
+
+        assertTrue(p.waitFor() == 0)
+        assertEquals("-s dev1 --no-control --no-clipboard-autosync --no-audio",
+            Files.readString(log).trim())
+    }
+
+    @Test fun blankSavedPathAndNoEnvironmentResolveTheBareBinary() {
+        assertEquals("scrcpy", scrcpyBinary("", emptyMap()))
+        assertEquals("scrcpy", scrcpyBinary("   ", emptyMap()))
+        assertEquals("from-env", scrcpyBinary("", mapOf("CORRAL_SCRCPY" to "from-env")))
+        assertEquals("saved", scrcpyBinary("saved", mapOf("CORRAL_SCRCPY" to "from-env")))
+    }
+
+    @Test fun savedPathChangedAfterConstructionIsHonoured() = runTest {
+        val dir = createTempDirectory("scrcpy")
+        val log = dir.resolve("invocations")
+        val fakeScript = fakeScrcpy(dir,
+            posix = "#!/usr/bin/env bash\necho \"$*\" >> '$log'\n",
+            windows = "@echo off\r\necho %* >> \"$log\"\r\n")
+
+        var saved = ""
+        val launcher = ScrcpyLauncher(env = emptyMap(), savedPath = { saved })
+        saved = fakeScript.toString()
+
+        val p = launcher.launch("dev1")
+
+        assertTrue(p.waitFor() == 0)
+        assertEquals("-s dev1 --no-control --no-clipboard-autosync --no-audio",
+            Files.readString(log).trim())
+    }
+
     @Test fun earlyNonZeroExitIsReported() = runTest {
         val dir = createTempDirectory("scrcpy")
         val fakeScript = fakeScrcpy(dir,

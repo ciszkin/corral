@@ -19,7 +19,8 @@ knowledge of the project.
 
 ## Requirements
 
-- Linux, or Windows through the installer's Windows branch (Git Bash or Cygwin).
+- Linux, or Windows through the installer's Windows branch (Git Bash; Cygwin only with a
+  Windows-style install root).
 - JDK 17 or newer.
 - A working Android SDK with `platform-tools/adb`.
 - Optional: `scrcpy`, for the console's read-only live view.
@@ -262,7 +263,8 @@ corral lease -- ./gradlew connectedAndroidTest
 ```
 
 A build pinned with `ANDROID_SERIAL` is checked against that one device
-instead of the whole selector. `corral doctor` reports the state of the gate.
+instead of the whole selector. `corral doctor` reports the rules file the
+gate reads; it cannot see whether the Gradle `init.d` script is installed.
 
 ## Emulators
 
@@ -296,8 +298,9 @@ corral-ui --url http://127.0.0.1:9000
 The console resolves its daemon URL from `--url`, else `CORRAL_URL`, else a
 stored preference, else the default `http://127.0.0.1:8798`. Its identity
 (`CORRAL_OWNER`, default `corral-ui`) and its scrcpy path (`CORRAL_SCRCPY`) are
-client preferences too, saved with the URL in `~/.config/corral/ui.conf`. It is
-a single screen with a left rail and six sections:
+client preferences too, saved with the URL in `~/.config/corral/ui.conf`; a
+saved `CORRAL_SCRCPY` is inert, because the launcher reads only the console's
+environment. It is a single screen with a left rail and six sections:
 
 - **Devices** — a card carousel with live thumbnails, the holder and a TTL
   countdown;
@@ -308,7 +311,7 @@ a single screen with a left rail and six sections:
 - **Settings** — the daemon knobs and this client's own preferences.
 
 The status bar carries the connection state with the last event `seq` and the daemon's version
-(omitted, not faked, while it is unknown); an update pill appears when a newer release is known,
+(`0.0.0-dev` for an untagged build, shown as-is); an update pill appears when a newer release is known,
 and Settings shows the console's own version beside the daemon's. Settings also holds the update
 row: the last check's honest state, a check-now that asks the daemon for a fresh check, and an
 install that confirms first and then runs the same checksum-gated applier as `corral update
@@ -373,8 +376,8 @@ The check is **on by default**: an unmodified daemon calls `api.github.com`
 once a day. `CORRAL_UPDATE_CHECK=off` in `daemon.env` or the environment turns
 it off, and the daemon re-reads it every cycle, so no restart is needed. The
 daemon's `GET /api/update` is a read — current version, latest version,
-whether an update is available, whether the check is enabled; it starts
-nothing.
+whether an update is available, whether the check is enabled; it starts no
+install, though a first read or a switch flip may kick one background check.
 
 `corral update` reports what the last check found; it downloads nothing. `GET /api/update?force`
 runs a fresh check at once — that is what the console's check-now calls.
@@ -389,8 +392,10 @@ Without `--apply`, nothing is downloaded and nothing is run. The console's **Ins
 same explicit step from the other surface: it names the version, asks for confirmation, and then
 runs the same applier. Applying downloads the release `corral-<version>.zip` and its
 `.zip.sha256` from the same release, verifies the SHA-256, and only then extracts the bundle and
-runs its `install.sh`, which restarts the daemon. A checksum mismatch, a missing
-checksum, or an unreadable one stops the apply before any file is extracted.
+runs its `install.sh`, which restarts the daemon. On Windows (or any host without a systemd user
+session) the apply refuses up front and tells you to unpack the zip and run `install.sh` by hand.
+A checksum mismatch, a missing checksum, or an unreadable one stops the apply before any file is
+extracted.
 
 **What the checksum proves.** The `.sha256` comes from the same release as the
 zip, so it proves the download was not corrupted or truncated — **not** that
@@ -427,8 +432,9 @@ at `platform-tools/adb` when the shim had been installed (from the `adb.real` th
 installer stashed), removes the icon at `~/.local/share/icons/corral.png` when it
 is still the one it installed, and removes the agent skill when it still matches
 what it installed (an edited skill keeps both its file and the link at
-`~/.claude/skills/corral` that points at it; every kept file is named under
-"Left alone"). Your Android SDK and your `PATH` edits in the shell rc files are
+`~/.claude/skills/corral` that points at it; kept shims, the skill and its
+symlink are named under "Left alone", while a user-replaced icon is simply left
+in place). Your Android SDK and your `PATH` edits in the shell rc files are
 left alone, and so is `~/.agents/skills` itself — it is what declared this host
 an agent host.
 
@@ -441,9 +447,10 @@ an agent host.
 - **The absolute-path adb exception.** The `PATH` wrapper catches PATH-resolved
   adb calls and the SDK shim catches calls to the SDK's own absolute path, but a
   client that invokes an adb by an absolute path outside the SDK directory (a
-  tool carrying its own adb build, for example) can sit outside the gate. The
-  console's scrcpy live view is one such case: scrcpy resolves adb itself.
-  This is a documented, acknowledged exception.
+  tool carrying its own adb build, for example) can sit outside the gate. On
+  Windows there is no SDK shim, so the SDK's own absolute path is outside the
+  gate too. The console's scrcpy live view is one such case: scrcpy resolves adb
+  itself. This is a documented, acknowledged exception.
 - **Loopback only.** The daemon binds `127.0.0.1` and rejects non-local Host
   headers, so it cannot be reached from another machine. A non-default port via
   `--url` still has to be a local one.

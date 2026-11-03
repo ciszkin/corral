@@ -68,9 +68,12 @@ the same device.
   declared identifier (`CORRAL_OWNER`) wins; otherwise the owner derives from process
   ancestry (`proc:<comm>:<pid>:<starttime>`, universal, no agent cooperation needed), read
   from `/proc` on Linux and from `ProcessHandle` on Windows/macOS, with `user:$USER` as the
-  floor. Where `/proc` is unreadable (macOS/Windows) the PATH wrapper delegates its identity
-  to `corral owner` — one JVM spawn per unpinned adb call — so wrapper and CLI still agree;
-  `user:$USER` if `corral` is off PATH. The ancestor skip/floor lists (`shell_skip`,
+  floor. Where `/proc` is unreadable (macOS; Windows never installs this bash wrapper) the
+  PATH wrapper delegates its identity to `corral owner` — one JVM spawn per adb call, because
+  the owner is computed before the pin — so wrapper and CLI still agree; `user:$USER` if
+  `corral` is off PATH. The wrapper needs bash 4+ (stock macOS `/bin/bash` is 3.2), and the
+  Windows `.bat` twin instead delegates to `corral gate` and fails closed when `corral` is not
+  on PATH. The ancestor skip/floor lists (`shell_skip`,
   `init_floor`) live in the same editable
   `~/.config/corral/rules` file as the gate lists; a file from an older install without
   those keys simply keeps the built-in defaults (add the keys to customize). Membership
@@ -80,13 +83,16 @@ the same device.
   only a liveness *hint*, recorded
   when the process actually spans the work — so a harness whose session outlives a single
   process (per-prompt or per-tool-call) sets `CORRAL_OWNER` and gets a durable identity.
-- **Exec-time enforcement** — three complementary gates:
+- **Exec-time enforcement** — three complementary gates on a POSIX install:
   - an `adb` wrapper on PATH checks every PATH-resolved adb invocation;
   - an SDK `platform-tools/adb` shim catches absolute-path calls (IDE, scripts);
   - a Gradle `init.d` gate pre-flights `install*` / `connected*AndroidTest` tasks —
     AGP bypasses the adb binary entirely, so only a build-level gate can cover it; a
     build pinned with `ANDROID_SERIAL` is checked against that device only. The check
     runs at task execution, so gated builds stay configuration-cache compatible.
+
+  A Windows install has two layers — the `.bat` wrapper and the Gradle gate — because the
+  SDK's `adb.exe` is not shimmed.
   The wrapper's read-only-command and value-flag lists live in one editable file,
   `~/.config/corral/rules` (override `CORRAL_RULES`), read by both the bash wrapper and the
   CLI; the Windows `.bat` delegates to `corral gate`, so the three cannot drift. A missing
@@ -178,13 +184,14 @@ the same device.
   **Devices** (horizontal card carousel with paging chevrons, live thumbnails, holder and TTL
   countdown), **Emulators** (AVDs with running serials, a boot chip while booting, and start/stop),
   **Queue** (the wait list), **Doctor** (per-layer health with a rail badge on FAIL), **Rules** and
-  **Settings** — plus a status bar with the live event `seq`, the daemon's version (omitted, never
-  faked, while unknown) and an update pill when a newer release is known; Settings shows the
-  console's own version beside the daemon's. Rules and Settings are editors: the gate rules and
-  daemon knobs go over the daemon's config API (the `readonly`/`valueflags` lists, the knobs with
-  the restart-required hint and per-field validation), while the client's own
-  `CORRAL_URL`/`CORRAL_OWNER`/`CORRAL_SCRCPY` are local prefs applied live on save;
-  `shell_skip`/`init_floor` are file-only, so edit `~/.config/corral/rules` directly. Settings also
+  **Settings** — plus a status bar with the live event `seq`, the daemon's version (`0.0.0-dev`
+  for an untagged build, shown as-is) and an update pill when a newer release is known; Settings
+  shows the console's own version beside the daemon's. Rules and Settings are editors: the gate
+  rules and daemon knobs go over the daemon's config API (the `readonly`/`valueflags` lists, the
+  knobs with the restart-required hint and per-field validation), while the client's own
+  `CORRAL_URL`/`CORRAL_OWNER` apply on save and `CORRAL_SCRCPY` must also be in the console's
+  environment — a saved path is not yet applied; `shell_skip`/`init_floor` are file-only, so edit
+  `~/.config/corral/rules` directly. Settings also
   holds the update row: the last check's honest state, a "check now" that asks for a fresh check
   (`?force`), and an install that confirms first and then runs the same checksum-gated applier as
   `corral update --apply`. The theme (System/Light/Dark) and language (English/Беларуская) apply
@@ -192,10 +199,10 @@ the same device.
   Force-free sits behind a confirm dialog naming the holder, and a scrcpy live view is strictly
   read-only (`--no-control`, `--no-clipboard-autosync`, `--no-audio`), so an observer can watch a
   leased device but never touch it. The window and tray use the Corral mark. The window's close
-  button parks it in the system tray where the platform has one (Windows, macOS, and Linux desktops
-  that host an X tray — GNOME does via its appindicator support), and clicking the tray icon
-  (either button) brings the window back; since close only parks it, the window's **Corral** menu
-  holds **Quit**.
+  button parks it in the system tray where the platform has one — Windows, macOS and X11 desktops
+  other than GNOME (a Wayland session or GNOME quits instead) — and clicking the tray icon
+  (either button) brings the window back; since close only parks it, **Quit** sits at the foot of
+  the left rail and asks for confirmation.
   Where `isTraySupported` is false, close quits, and the **Corral** launcher `install.sh --ui`
   drops into `~/.local/share/applications` (app grid, pinnable to the dock, `Icon=` the Corral
   mark) starts it again. Its own traffic is HTTP/WS — the UI never talks adb itself — and it is an
@@ -207,7 +214,8 @@ the same device.
   `--no-ui` to skip; the default follows whether a `corral-ui-all.jar` is found — beside the
   installer in the bundle, or in `corral-ui/build/libs/` in a source checkout). Because
   screenshots are strict by default, the installer seeds `CORRAL_SCREENSHOT_OBSERVERS=corral-ui`
-  into the daemon unit env **only when that line is absent** — visible and editable forever after
+  into the daemon unit env when it installs the console and the line is absent (POSIX unit only) —
+  visible and editable forever after
   (emptying it disables observers and survives reinstalls); a remote UI denied with `403` raises a
   banner naming the variable.
 - **Loopback only** — the daemon binds `127.0.0.1` and refuses any non-local `Host`
@@ -229,8 +237,9 @@ Four Gradle modules, one repository:
 
 Install with `scripts/install.sh` or the self-contained `corral-installer/` bundle on a Linux host,
 or on Windows through the installer's Windows branch ([CUTOVER.md § Windows](CUTOVER.md#windows));
-the installer manages the daemon unit and the `~/bin` shims, the SDK adb shim, the Gradle gate, the
-agent skill and the optional console, and restores everything on `--uninstall`.
+the installer manages the installed components — the daemon unit or Scheduled Task, the shims, the
+SDK adb shim on POSIX, the Gradle gate, the agent skill and the optional console; `--uninstall`
+removes what is still its own and names edited files under "Left alone".
 
 ## Build and test
 
@@ -248,33 +257,40 @@ sandbox home; CI runs all three plus both shadow jars and the bundle drift check
 
 ## Status
 
-Phase 1 — daemon core, leases, HTTP API, adb wrapper + SDK shim, CLI, and the gradle gate —
-is built and verified on real devices. Phase 2 — the selector FIFO queue and the generalized
-agent identity — is built and verified with fake devices and the real `omp` / `hermes`
-harnesses; the queue was later reworked to client-polled tickets, so no request is parked
-server-side and a crashed client cannot stall it. Phase 3 — the MCP server
-over streamable HTTP at `/mcp` — is built and verified with fake devices via a scripted MCP
-handshake. Later phases are built too: M4 observability (screenshots + `/ws/events`), M5 the
-Compose Desktop UI — rebuilt into the six-section operator console with rules/settings editors,
-theme modes and English/Belarusian resources — M6 the emulator lifecycle (list/start/stop with the
-boot gate) and M7 the config/doctor API. Later still: the daily release check with its explicit,
-checksum-gated apply (in the shared `corral-update` module) and one version stamped from the git tag
-into both jars. Corral replaces the `adb-lease` MVP — `adb-lease.md` stays as the historical
-writeup.
+Corral is feature-complete for a first release, and every finding from 52 independent review passes
+is closed.
 
-## Roadmap (Phase 3+)
+- **Linux and Windows.** The daemon, CLI, console and installer are built and tested offline — four
+  Gradle modules, four suites (`./gradlew test`, `test_wrapper.sh`, `SLOW=1 test_e2e.sh`,
+  `test_install.sh`) — on Linux CI. The Windows install path is host-verified on one box: the `.bat`
+  shims, the per-user `CorralDaemon` Scheduled Task and its ownership rules, the jar-lock and
+  `.bat` in-flight refusals, the Gradle gate, and the console.
+- **What it is not.** macOS has no installer (the daemon and CLI are portable, nothing is packaged
+  or verified there), and the gate is evaluated at exec time — a client that bypasses the wrapper,
+  the SDK shim and Gradle entirely is outside it. Both are stated in
+  [Known limits](CUTOVER.md#known-limits) rather than implied away.
+- **Versions.** Both jars report `0.0.0-dev` until the first `v*` tag; the version is stamped from
+  the tag at build time.
 
-- ~~Compose Desktop UI, live view via scrcpy~~ — done (M5): a third `corral-ui` module rebuilt
-  into the operator console (six sections, rules/settings editors, theme modes, en/be resources,
-  the Corral mark), component install, observer seeding
-- ~~Emulator lifecycle management~~ — done (M6): list/start/stop AVDs over CLI, REST and MCP, the
-  `CORRAL_EMULATOR` resolution, the `booted` gate with its boot-wait queue, and the console
-  Emulators seat
-- Windows support is stated once, in the guide: [CUTOVER.md § Windows](CUTOVER.md#windows)
-  covers the install target, the console on JDK 25, what was host-verified, and the two
-  remaining nuances (the `.bat` in-flight window and the jar-lock refusal)
-- Nothing on the original Phase 3+ list is still open. The deliberate gaps are stated in the
-  guide's [Known limits](CUTOVER.md#known-limits) and [Updates](CUTOVER.md#updates) sections and in
-  [SECURITY.md](SECURITY.md): cooperative identity, the absolute-path adb / ddmlib / scrcpy
-  bypasses, loopback-only, an update channel whose checksum is not a signature, and macOS with no
-  installer
+## Roadmap
+
+The product work is done; what remains is shipping it.
+
+- **v0.1.0, the first release.** Tag `v0.1.0` so the release workflow stages the bundle, then
+  dispatch it with `publish=true` on the tag ref to publish; the tag is what turns `0.0.0-dev`
+  into a real version in both jars. Flipping the repository public is the same decision.
+- **Then the update path, end to end.** `corral update --apply` is built and gated, but it has never
+  run against a real release — every build so far is `0.0.0-dev`, so there is nothing to fetch. The
+  first tagged release is the first honest test of it; expect a round of fixes there.
+- **Open design choices, not bugs:**
+  - *Signing.* The update digest proves the download was intact, not that the publisher is genuine —
+    the trust model of fetching a script from GitHub. Signing, or documenting checksum-only, is an
+    owner decision.
+  - *macOS.* No installer and no host verification; adding one is a port, not a fix.
+  - *The cooperative-identity floor and the absolute-path bypasses.* Stated in
+    [SECURITY.md](SECURITY.md) and [Known limits](CUTOVER.md#known-limits); closing them means
+    kernel-level or AGP-level interception.
+- Nothing on the original Phase 3+ list is open. Phase 1 (daemon core, leases, the wrapper and SDK
+  shim, the CLI, the Gradle gate), Phase 2 (the selector FIFO queue and per-agent identity),
+  Phase 3 (MCP at `/mcp`) and milestones M4–M7 (screenshots and events, the console, emulators,
+  config/doctor) are built and review-closed; their history lives in the reviews, not here.

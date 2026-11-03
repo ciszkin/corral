@@ -21,8 +21,8 @@ The daemon binds `127.0.0.1` only, and the CLI talks to it over loopback. The da
 non-local `Host` header with `403`, so it is not reachable off-host and cannot
 be driven by DNS rebinding from a browser on the same machine.
 
-The lease gate is enforced in three independent layers, and each has a known
-bypass:
+The lease gate is enforced in three independent layers on POSIX (two on Windows, where there is
+no SDK `adb.exe` shim), and each has a known bypass:
 
 - the `adb` wrapper earlier on `PATH` — bypassed by invoking a different adb
   (for example a static build with its own copy) without going through `PATH`;
@@ -40,12 +40,12 @@ developer hits without meaning to:
 
 - **ddmlib clients that talk to the adb server on `:5037` directly.** Android
   Studio's Run/deploy, Logcat and Device Explorer do exactly this: no adb
-  binary, no Gradle install task, so all three layers miss them.
+  binary, no Gradle install task, so all the layers miss them.
 - **`platform-tools/adb.real`**, the real binary that sits beside the SDK shim.
   Anything that names it by absolute path is outside the shim layer (and, when
   it does not go through `PATH`, the wrapper too).
 - **the console's scrcpy live view.** scrcpy resolves adb itself (a static build
-  ships its own), so that one path generally sits outside all three layers. The
+  ships its own), so that one path generally sits outside all of them. The
   view is read-only by construction — `--no-control` (which also drops
   drag-and-drop install/push), `--no-clipboard-autosync`, `--no-audio` — so an
   observer can watch a leased device but not type into it.
@@ -56,7 +56,8 @@ and a client that goes around adb entirely is outside all of them.
 
 ## The update channel's outbound surface
 
-The daemon makes exactly one outbound call, once a day: an unauthenticated
+The daemon makes one outbound call a day on its own, plus one run per explicit
+`?force` or off→on switch flip: an unauthenticated
 `GET` to `https://api.github.com/repos/<owner>/<repo>/releases/latest`
 (`<owner>/<repo>` defaults to `ciszkin/corral`, overridable with
 `CORRAL_REPO`). It sends no token and no credentials of any kind. The check is

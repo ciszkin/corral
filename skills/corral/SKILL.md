@@ -6,7 +6,8 @@ description: >-
   Android device", "corral wait", "corral lease", "device is busy", "corral doctor", or "the gate
   refused my adb call" — and before any adb, `install*` or `connected*AndroidTest` run on a host
   where Corral is installed. Prefer Corral over raw adb there: it gives one agent session sole use
-  of a device, and the three enforcement layers turn away the calls that skip it.
+  of a device, and the three enforcement layers on POSIX (two on Windows) turn away the calls that
+  skip it.
 ---
 
 # Corral
@@ -104,7 +105,8 @@ makes your own device read as someone else's.
 
 ## The gate — why an adb call can be refused
 
-Three independent layers enforce the lease:
+Three independent layers enforce the lease on POSIX (two on Windows — there is no SDK `adb.exe`
+shim):
 
 1. an `adb` wrapper earlier on `PATH` — every PATH-resolved adb call is classified;
 2. the SDK `platform-tools/adb` shim — the same check for absolute-path calls into the SDK;
@@ -146,7 +148,7 @@ disables the unpinned guard for it, for everyone on the host.
 model is cooperating agents, not a hostile local process:
 
 - ddmlib clients that talk to the adb server on `:5037` directly — Android Studio's Run/deploy,
-  Logcat, Device Explorer: no adb binary, no Gradle task, so all three layers miss them;
+  Logcat, Device Explorer: no adb binary, no Gradle task, so all the layers miss them;
 - `platform-tools/adb.real`, or any adb outside the SDK directory by absolute path: outside the
   shim, and outside the wrapper when it does not go through `PATH`.
 
@@ -207,8 +209,9 @@ update state. Read it like this:
   human. Only believe "nothing is plugged in" after that.
 - `sdk adb shim: skipped - unmanaged adb path (…)` — the configured adb is not the SDK shim, so the
   shim layer is not covering that path; the wrapper and the Gradle gate still are.
-- `rules: FAIL` — the rules file is missing or incomplete, so the gate is failing closed. Restart
-  the daemon (it restores the default from the jar) rather than hand-writing it.
+- `rules: FAIL` — the rules file is missing or incomplete, so the gate is failing closed. Delete it
+  (or blank it) and restart (the daemon restores the default from the jar); a
+  present-but-incomplete file is not self-healed.
 - `update: unknown` — reported honestly, never as "current".
 
 Then, in order:

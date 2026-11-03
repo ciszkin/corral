@@ -438,7 +438,7 @@ internal fun busyLine(selector: Selector, body: String): String {
 }
 
 /**
- * corral CLI — all logic in the jar (portable), launched by 3-line shims.
+ * corral CLI — all logic in the jar (portable), launched by two-line shims.
  * claim: JVM exits right after printing -> no pid recorded -> TTL-bound lease (MVP `adb-lease claim` semantics).
  * lease: JVM outlives the child -> pid recorded -> instant crash recovery (MVP `withdev` semantics).
  */

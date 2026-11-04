@@ -39,6 +39,32 @@ class UpdateApplierTest {
         spawn = spawn,
     )
 
+    @Test fun httpDownloadFollowsTheReleaseRedirect() {
+        // GitHub answers a release-asset download with 302 to a CDN. The JDK client does not follow
+        // redirects unless told to, so without this the first real apply died at "HTTP 302" before
+        // the checksum gate could run.
+        val payload = "redirected-body".toByteArray()
+        val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+        server.createContext("/asset") { ex ->
+            ex.responseHeaders.add("Location", "/blob")
+            ex.sendResponseHeaders(302, -1)
+            ex.close()
+        }
+        server.createContext("/blob") { ex ->
+            ex.sendResponseHeaders(200, payload.size.toLong())
+            ex.responseBody.use { it.write(payload) }
+        }
+        server.start()
+        try {
+            val base = "http://127.0.0.1:${server.address.port}"
+            val dest = newWorkDir().resolve("redirected.bin")
+            httpDownload(java.net.URI.create("$base/asset"), dest)
+            assertEquals(String(payload), Files.readString(dest))
+        } finally {
+            server.stop(0)
+        }
+    }
+
     @Test fun commandsAreTheInstallerPipeline() {
         val workDir = Path.of("/tmp/corral-update")
         val relaunch = Relaunch.Console(listOf("java", "-cp", "/home/u/.corral/corral-ui-all.jar", "dev.corral.ui.CorralUiKt"))

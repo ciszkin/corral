@@ -325,6 +325,10 @@ internal fun httpDownload(uri: URI, dest: Path): Unit {
     dest.parent?.let { Files.createDirectories(it) }
     val client = HttpClient.newBuilder()
         .connectTimeout(Duration.ofSeconds(DOWNLOAD_CONNECT_TIMEOUT_SECONDS))
+        // GitHub's release-asset URLs answer 302 to a CDN, and the JDK client does NOT follow
+        // redirects by default -- so every real apply failed with "HTTP 302" before it could verify
+        // anything. NORMAL follows http->https but still refuses a downgrade to plain http.
+        .followRedirects(HttpClient.Redirect.NORMAL)
         .build()
     val request = HttpRequest.newBuilder(uri)
         .timeout(Duration.ofSeconds(DOWNLOAD_TIMEOUT_SECONDS))

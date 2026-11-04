@@ -274,26 +274,3 @@ is closed.
   [Known limits](CUTOVER.md#known-limits) rather than implied away.
 - **Versions.** Both jars report `0.0.0-dev` until the first `v*` tag; the version is stamped from
   the tag at build time.
-
-## Roadmap
-
-The product work is done; what remains is shipping it.
-
-- **v0.1.0, the first release.** Tag `v0.1.0` so the release workflow stages the bundle, then
-  dispatch it with `publish=true` on the tag ref to publish; the tag is what turns `0.0.0-dev`
-  into a real version in both jars. Flipping the repository public is the same decision.
-- **Then the update path, end to end.** `corral update --apply` is built and gated, but it has never
-  run against a real release — every build so far is `0.0.0-dev`, so there is nothing to fetch. The
-  first tagged release is the first honest test of it; expect a round of fixes there.
-- **Open design choices, not bugs:**
-  - *Signing.* The update digest proves the download was intact, not that the publisher is genuine —
-    the trust model of fetching a script from GitHub. Signing, or documenting checksum-only, is an
-    owner decision.
-  - *macOS.* No installer and no host verification; adding one is a port, not a fix.
-  - *The cooperative-identity floor and the absolute-path bypasses.* Stated in
-    [SECURITY.md](SECURITY.md) and [Known limits](CUTOVER.md#known-limits); closing them means
-    kernel-level or AGP-level interception.
-- Nothing on the original Phase 3+ list is open. Phase 1 (daemon core, leases, the wrapper and SDK
-  shim, the CLI, the Gradle gate), Phase 2 (the selector FIFO queue and per-agent identity),
-  Phase 3 (MCP at `/mcp`) and milestones M4–M7 (screenshots and events, the console, emulators,
-  config/doctor) are built and review-closed; their history lives in the reviews, not here.

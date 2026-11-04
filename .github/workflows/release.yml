@@ -120,6 +120,10 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           # Every later step sees the tag-stamped version, exactly as phase A intends.
           echo "CORRAL_VERSION=$VERSION" >> "$GITHUB_ENV"
+          # Every later step builds paths from $VERSION (dist/corral-$VERSION.zip and its .sha256);
+          # without this export those steps died on `set -u` with "VERSION: unbound variable", which
+          # is why the first staging run of a release produced no artifact at all.
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "TAG=$TAG" >> "$GITHUB_ENV"
           echo "Resolved tag=$TAG version=$VERSION"
 

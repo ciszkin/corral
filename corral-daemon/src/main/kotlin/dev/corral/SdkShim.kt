@@ -17,10 +17,25 @@ internal fun shimPathOf(reported: String): String =
 object SdkShim {
     private const val MARKER = "corral adb wrapper"
 
+    /** Resolve either spelling of the SDK adb pair to the real binary. A bare path counts as
+     *  Corral's shim only when its `.real` sibling exists or it carries the marker; any other
+     *  adb binary stays unmanaged. */
+    private fun realPathOf(adb: Path): Path? {
+        if (!adb.isAbsolute) return null
+        val name = adb.fileName?.toString() ?: return null
+        if (name.endsWith(".real")) return adb
+        val real = adb.resolveSibling("$name.real")
+        val shimText = runCatching { Files.readString(adb) }.getOrNull()
+        return if (Files.exists(real) || shimText?.contains(MARKER) == true) real else null
+    }
+
+    private fun shimOf(realAdb: Path): Path =
+        realAdb.resolveSibling(realAdb.fileName.toString().removeSuffix(".real"))
+
     /** @return a status message worth logging, or null when the shim is fine or unmanaged. */
-    fun ensure(realAdb: Path, wrapperSource: Path?): String? {
-        if (!realAdb.isAbsolute || realAdb.fileName?.toString()?.endsWith(".real") != true) return null
-        val shim = realAdb.resolveSibling("adb")
+    fun ensure(adb: Path, wrapperSource: Path?): String? {
+        val realAdb = realPathOf(adb) ?: return null
+        val shim = shimOf(realAdb)
         val shimText = runCatching { Files.readString(shim) }.getOrNull()
         if (shimText?.contains(MARKER) == true) {
             return if (Files.exists(realAdb)) null
@@ -42,15 +57,16 @@ object SdkShim {
     }
 
     /** Read-only health check for /api/doctor — never repairs (that is [ensure]'s job on the 10 s tick). */
-    fun probe(realAdb: Path): Pair<String, String> {
-        if (!realAdb.isAbsolute || realAdb.fileName?.toString()?.endsWith(".real") != true) {
+    fun probe(adb: Path): Pair<String, String> {
+        val realAdb = realPathOf(adb)
+        if (realAdb == null) {
             // unmanaged path: legitimate when it exists (a bare PATH adb); a configured absolute
             // path that does not exist means discovery is broken — doctor must say so on every surface
-            return if (realAdb.isAbsolute && !Files.exists(realAdb))
-                "fail" to "$realAdb does not exist — the daemon's device discovery is broken (fix CORRAL_ADB)"
-            else "skipped" to "unmanaged adb path (${shimPathOf(realAdb.toString())})"
+            return if (adb.isAbsolute && !Files.exists(adb))
+                "fail" to "$adb does not exist — the daemon's device discovery is broken (fix CORRAL_ADB)"
+            else "skipped" to "unmanaged adb path (${shimPathOf(adb.toString())})"
         }
-        val shim = realAdb.resolveSibling("adb")
+        val shim = shimOf(realAdb)
         val shimText = runCatching { Files.readString(shim) }.getOrNull()
             ?: return "fail" to "$shim missing (re-run install.sh)"
         if (!shimText.contains(MARKER)) return "fail" to "$shim is not the corral wrapper (re-run install.sh)"

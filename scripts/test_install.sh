@@ -3061,6 +3061,11 @@ check "60 docs: the shipped skill says a blank value is unset and an oversized v
 # phrases, not whole lines, so rewrapping the paragraph does not break the row.
 check "63 docs: CUTOVER gives the un-translated ownership rule and the nested-install edge" bash -c \
   "grep -qF 'data that is not translated' '$DOCDIR/CUTOVER.md' && grep -qF 'schtasks /query /fo CSV /nh' '$DOCDIR/CUTOVER.md' && grep -qF 'Task To Run:' '$DOCDIR/CUTOVER.md' && grep -qF 'never guessed' '$DOCDIR/CUTOVER.md' && grep -qF 'not ours' '$DOCDIR/CUTOVER.md' && grep -qF 'unverified' '$DOCDIR/CUTOVER.md' && grep -qF 'any Windows display language' '$DOCDIR/CUTOVER.md' && grep -qF 'uninstall the inner one first' '$DOCDIR/CUTOVER.md' && grep -qF \"register the inner one's task elsewhere\" '$DOCDIR/CUTOVER.md' && grep -qF 'stops the inner daemon' '$DOCDIR/CUTOVER.md'"
+# 80: an operator must know when the shim heals (one 10 s tick while the daemon runs, or the next
+# start), that the updated binary is kept as adb.real, and that reinstalling is the manual fallback
+# rather than a routine step after every SDK update.
+check "80 docs: the README says when the SDK shim heals and that reinstall is the fallback" bash -c \
+  "grep -qF 'checks the SDK adb shim every 10 seconds' '$DOCDIR/README.md' && grep -qF 'heals at the next start' '$DOCDIR/README.md' && grep -qF 'keeping the updated binary as \`adb.real\`' '$DOCDIR/README.md' && grep -qF 'manual fallback' '$DOCDIR/README.md'"
 # The listing, not the path: on a case-insensitive filesystem (macOS) `cutover.md` IS `CUTOVER.md`,
 # so `test ! -e` fails there — the one platform where a name mismatch is invisible. An exact-name
 # listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.

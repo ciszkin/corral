@@ -101,10 +101,12 @@ the same device.
   On Windows `corral` is `corral.bat`, so a **batch caller must write `call corral …`**:
   without `call`, cmd.exe transfers control to the shim and the caller's remaining lines
   never run (its `exit /b` ends the caller). Interactive cmd.exe/PowerShell are unaffected.
-- **Self-healing** — the daemon watches the SDK adb shim and restores it automatically
-  after SDK updates (stashing the updated binary), and restores a missing or blank
-  `~/.config/corral/rules` from the jar default; `corral doctor` reports each layer it can
-  inspect on demand.
+- **Self-healing** — while the daemon runs it checks the SDK adb shim every 10 seconds
+  and restores it after an SDK update, keeping the updated binary as `adb.real`; if the
+  daemon was stopped when the SDK updated, it heals at the next start. It also restores a
+  missing or blank `~/.config/corral/rules` from the jar default, and `corral doctor`
+  reports each layer it can inspect. Re-running the installer (or `corral update --apply`)
+  is the manual fallback, not a routine step after an SDK update.
 - **CLI** — `corral claim [--all|<serial>] [selector]`, `wait [--timeout S] [selector]`,
   `queue`, `free [--all|<serial>]`, `renew <serial>`,
   `lease [--all | --timeout S] [selector] -- <cmd>`,

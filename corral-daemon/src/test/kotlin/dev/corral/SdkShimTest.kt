@@ -76,11 +76,47 @@ class SdkShimTest {
     }
 
     @Test
+    fun `ensure spelled as the shim repairs the SDK-updated binary`() {
+        writeShim("REAL ADB v1")
+        SdkShim.ensure(realAdb, wrapperSource)
+        writeShim("REAL ADB v2") // the SDK just replaced the shim with a fresh binary
+        val status = SdkShim.ensure(shim, wrapperSource)
+        assertTrue(status!!.contains("repaired"))
+        assertEquals("REAL ADB v2", realAdb.readText())
+        assertTrue(shim.readText().contains(MARKER_CONTENT))
+    }
+
+    @Test
+    fun `ensure leaves an unmanaged adb binary alone`() {
+        writeShim("REAL ADB v1") // exists, no .real sibling, not the wrapper
+        assertEquals(null, SdkShim.ensure(shim, wrapperSource))
+        assertEquals("REAL ADB v1", shim.readText())
+    }
+
+    @Test
     fun probeOkWhenWrapperAndRealPresent() {
         writeShim(wrapper)
         Files.writeString(realAdb, "REAL ADB v1")
         realAdb.toFile().setExecutable(true)
         assertEquals("ok", SdkShim.probe(realAdb).first)
+    }
+
+    @Test
+    fun `probe ok when given the shim path`() {
+        writeShim(wrapper)
+        Files.writeString(realAdb, "REAL ADB v1")
+        realAdb.toFile().setExecutable(true)
+        val (status, detail) = SdkShim.probe(shim)
+        assertEquals("ok", status)
+        assertEquals("$shim -> adb.real", detail)
+    }
+
+    @Test
+    fun `probe fails when given the shim and adb real is missing`() {
+        writeShim(wrapper)
+        val (status, detail) = SdkShim.probe(shim)
+        assertEquals("fail", status)
+        assertTrue(detail.contains(realAdb.toString()), "detail must name the missing real binary: $detail")
     }
 
     @Test

@@ -111,7 +111,7 @@ the same device.
   `queue`, `free [--all|<serial>]`, `renew <serial>`,
   `lease [--all | --timeout S] [selector] -- <cmd>`,
   `screenshot <serial> [--out F]`, `events`, `check`, `owner`, `doctor`, `devices`, `status`,
-  `gate -- <adb args>`, `update [--apply]`, `avd [list|start A|stop A [--force]]` — all logic
+  `gate -- <adb args>`, `update [--apply] [--repo owner/name]`, `avd [list|start A|stop A [--force]]` — all logic
   in the jar behind two-line launcher shims, so it works for humans and agents alike.
   `corral --version` prints the CLI jar's version with no daemon; the queue wait for `wait`/`lease`
   is capped at 600 s (a larger `--timeout` is clamped with a warning, a negative one is a usage
@@ -123,8 +123,14 @@ the same device.
   --apply` downloads the release zip and its `.sha256`, verifies the digest and
   only then runs the bundle's `install.sh`, and `GET /api/update` is the same
   state as a read (`?force` runs a fresh check at once — the console's check
-  button uses it, and its install button confirms first and then applies the
-  same gated path). The digest comes from the same release as the zip, so it
+  button uses it). The console's install button confirms first, then starts
+  `corral update --apply --repo <owner/name>` as a **detached** process, so
+  closing the window no longer interrupts an apply; the console polls the daemon
+  until the new version reports in. A CLI-driven apply replaces the jars and
+  restarts the daemon but leaves a running console on its old code, so restart
+  the console afterwards — its Settings → Client → Version row says so when the
+  console and daemon versions disagree. The digest comes from the same release
+  as the zip, so it
   proves the download was intact — **not** that the publisher is genuine:
   anyone who can publish a release there runs `install.sh`, i.e. arbitrary code
   as you, on every host that applies it. Jars are replaced by rename, so a
@@ -198,8 +204,11 @@ the same device.
   fallback; `shell_skip`/`init_floor` are file-only, so edit `~/.config/corral/rules` directly.
   Settings also
   holds the update row: the last check's honest state, a "check now" that asks for a fresh check
-  (`?force`), and an install that confirms first and then runs the same checksum-gated applier as
-  `corral update --apply`. The interface is English, and the theme (System/Light/Dark) applies
+  (`?force`), and an install that confirms first and then starts the checksum-gated CLI apply as a
+  detached process (closing the window does not interrupt it; the console polls until the daemon
+  reports the new version). A CLI-driven apply updates the jars and restarts the daemon but the
+  console window must be restarted, and the Version row explains a console/daemon mismatch. The
+  interface is English, and the theme (System/Light/Dark) applies
   immediately and persists, with the client's window geometry, to `~/.config/corral/ui.conf`.
   Force-free sits behind a confirm dialog naming the holder, and a scrcpy live view is strictly
   read-only (`--no-control`, `--no-clipboard-autosync`, `--no-audio`), so an observer can watch a

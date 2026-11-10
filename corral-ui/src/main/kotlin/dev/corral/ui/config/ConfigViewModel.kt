@@ -1,8 +1,8 @@
 package dev.corral.ui.config
 
 import dev.corral.ApplyResult
-import dev.corral.CONSOLE_RELAUNCH_UNKNOWN
-import dev.corral.UpdateApplier
+import dev.corral.UpdateInfo
+import dev.corral.UpdateReason
 import dev.corral.UpdateState
 import dev.corral.ui.ConfigApiException
 import dev.corral.ui.CorralApi
@@ -11,17 +11,29 @@ import dev.corral.ui.data.ConfigResponse
 import dev.corral.ui.data.ConfigRules
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+/** ~5 minutes: long enough for a download + install, short enough not to poll forever. */
+private const val UPDATE_POLL_ATTEMPTS = 200
+private const val UPDATE_POLL_INTERVAL_MS = 1_500L
+
+/** ~10 seconds: the daemon's post-restart cache is empty for a moment, not forever. */
+private const val UPDATE_REFRESH_ATTEMPTS = 7
+
+private const val UPDATE_BACKGROUND_MESSAGE =
+    "the update is still running in the background — see ~/.corral/update-<tag>.log for progress or errors, then restart the console once it finishes"
 
 class ConfigViewModel(
     private val apiFactory: () -> CorralApi?,
     vmScope: CoroutineScope,
     /**
-     * The confirmed apply, injected so a test never downloads or spawns anything. The default is the
-     * real applier, bound to this console's own relaunch. It runs only on [ConfigIntent.ConfirmInstall].
+     * The confirmed apply, injected so a test never spawns anything. The default starts the CLI's
+     * detached apply; it is called synchronously from [ConfigIntent.ConfirmInstall], before any
+     * coroutine, so closing the window cannot abort it.
      */
-    private val applyUpdate: (String) -> ApplyResult = { tag ->
-        UpdateApplier.forConsole(tag)?.run() ?: ApplyResult.Failed(CONSOLE_RELAUNCH_UNKNOWN)
+    private val startUpdate: (tag: String, repo: String?) -> ApplyResult = { tag, repo ->
+        UpdateLaunch.start(tag, repo)
     },
 ) : BaseMviViewModel<ConfigIntent, ConfigState, ConfigEffect>(vmScope) {
 
@@ -97,14 +109,31 @@ class ConfigViewModel(
     }
 
     private suspend fun refreshUpdate(api: CorralApi, force: Boolean) {
-        try {
-            val info = api.update(force)
-            // A fresh result invalidates the "installed" caption: it described the previous state.
-            reduceState { copy(update = info, updateChecking = false, updateCheckFailed = false, installed = false) }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (_: Exception) {
-            reduceState { copy(updateChecking = false, updateCheckFailed = true) }
+        var last: UpdateInfo? = null
+        var failed = false
+        repeat(UPDATE_REFRESH_ATTEMPTS) { attempt ->
+            val info = try {
+                api.update(force && attempt == 0)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                failed = true
+                null
+            }
+            if (info != null) {
+                last = info
+                failed = false
+                // NOT_CHECKED is transient right after a restart; every other state is an answer.
+                val transient = info.state == UpdateState.UNKNOWN && info.reason == UpdateReason.NOT_CHECKED
+                if (!transient) {
+                    reduceState { copy(update = info, updateChecking = false, updateCheckFailed = false, installed = false) }
+                    return
+                }
+            }
+            if (attempt < UPDATE_REFRESH_ATTEMPTS - 1) delay(UPDATE_POLL_INTERVAL_MS)
+        }
+        reduceState {
+            copy(update = last ?: update, updateChecking = false, updateCheckFailed = failed, installed = false)
         }
     }
 
@@ -121,24 +150,55 @@ class ConfigViewModel(
             return
         }
         reduceState { copy(confirmInstall = false, installing = true, installed = false, installError = null) }
-        vmScope.launch {
-            // The applier is built for ApplyResult, but a throw must not escape into the scope and
-            // leave installing latched with no error: turn any exception into an honest Failed.
-            val result = try {
-                applyUpdate(tag)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                ApplyResult.Failed("update failed: ${e.message ?: e::class.simpleName ?: "unknown error"}")
+        // Synchronous and before any coroutine: the CLI owns the apply, so a window close has
+        // nothing left to abort.
+        val started = try {
+            startUpdate(tag, repoFromReleaseUrl(info.releaseUrl))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            ApplyResult.Failed("update failed: ${e.message ?: e::class.simpleName ?: "unknown error"}")
+        }
+        when (started) {
+            is ApplyResult.Completed -> {}
+            is ApplyResult.Refused -> {
+                reduceState { copy(installing = false, installError = started.reason) }
+                return
             }
-            reduceState {
-                when (result) {
-                    is ApplyResult.Completed -> copy(installing = false, installed = true, installError = null)
-                    is ApplyResult.Refused -> copy(installing = false, installError = result.reason)
-                    is ApplyResult.Failed -> copy(installing = false, installError = result.reason)
-                }
+            is ApplyResult.Failed -> {
+                reduceState { copy(installing = false, installError = started.reason) }
+                return
             }
         }
+        val api = apiFactory() ?: run {
+            reduceState { copy(installing = false, installError = UPDATE_BACKGROUND_MESSAGE) }
+            return
+        }
+        vmScope.launch { awaitInstalled(api, tag.trim().removePrefix("v").removePrefix("V")) }
+    }
+
+    /** Polls the daemon through its restart; a throw is expected there, so it means "keep polling". */
+    private suspend fun awaitInstalled(api: CorralApi, target: String) {
+        repeat(UPDATE_POLL_ATTEMPTS) {
+            delay(UPDATE_POLL_INTERVAL_MS)
+            val info = try {
+                api.update(force = false)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null
+            }
+            if (info != null && info.currentVersion.trim() == target) {
+                reduceState {
+                    copy(
+                        installing = false, installed = true, update = info,
+                        updateChecking = false, updateCheckFailed = false,
+                    )
+                }
+                return
+            }
+        }
+        reduceState { copy(installing = false, installError = UPDATE_BACKGROUND_MESSAGE) }
     }
 
     private fun discard() {

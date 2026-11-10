@@ -41,7 +41,7 @@ class ComposeResourcesTest {
     }
 
     @Test fun versionStringsExistInBothLanguages() {
-        listOf("settings_version", "settings_version_unknown").forEach { name ->
+        listOf("settings_version", "settings_version_unknown", "settings_version_mismatch").forEach { name ->
             assertTrue(stringValue(enStrings, name).isNotBlank(), "en missing or blank: $name")
             assertTrue(stringValue(beStrings, name).isNotBlank(), "be missing or blank: $name")
         }

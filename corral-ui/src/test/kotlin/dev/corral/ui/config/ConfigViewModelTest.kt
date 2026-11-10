@@ -4,10 +4,8 @@ import dev.corral.Device
 import dev.corral.QueueEntry
 import dev.corral.StatusResponse
 import dev.corral.ApplyResult
-import dev.corral.InstalledComponents
-import dev.corral.Relaunch
-import dev.corral.UpdateApplier
 import dev.corral.UpdateInfo
+import dev.corral.UpdateReason
 import dev.corral.UpdateState
 import dev.corral.ui.AvdStatus
 import dev.corral.ui.Capabilities
@@ -19,14 +17,13 @@ import dev.corral.ui.data.ConfigSetting
 import dev.corral.ui.data.DoctorResponse
 import dev.corral.ui.data.PutConfigResponse
 import java.io.IOException
-import java.nio.file.Files
-import java.nio.file.Path
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -48,11 +45,13 @@ class ConfigViewModelTest {
     ) : CorralApi {
         val putCalls = mutableListOf<Pair<Map<String, String>, ConfigRules?>>()
         val updateForces = mutableListOf<Boolean>()
+        val updateQueue = ArrayDeque<UpdateInfo>()
         var putGate: CompletableDeferred<Unit>? = null
 
         override suspend fun config(): ConfigResponse = configError?.let { throw it } ?: configResponse
         override suspend fun update(force: Boolean): UpdateInfo {
             updateForces += force
+            updateQueue.removeFirstOrNull()?.let { return it }
             return updateError?.let { throw it } ?: updateResponse
         }
         override suspend fun putConfig(settings: Map<String, String>, rules: ConfigRules?): Result<PutConfigResponse> {
@@ -320,78 +319,128 @@ class ConfigViewModelTest {
         assertEquals(listOf(true), api.updateForces)   // "Check now" forces a fresh check
     }
 
-    @Test fun installUpdateRunsTheApplierAndSurfacesTheResult() = runTest {
-        val api = FakeApi(updateResponse = available("9.9.9"))
-        val applied = mutableListOf<String>()
-        val vm = ConfigViewModel({ api }, backgroundScope) { tag ->
-            applied += tag
-            ApplyResult.Completed(listOf(listOf("unzip", "-o", "bundle.zip", "-d", "bundle")))
+    @Test fun installSpawnsTheCliDetachedAndWaitsForTheNewVersion() = runTest {
+        val api = FakeApi(updateResponse = available("v9.9.9"))
+        val spawned = mutableListOf<Pair<String, String?>>()
+        val vm = ConfigViewModel({ api }, backgroundScope) { tag, repo ->
+            spawned += tag to repo
+            api.updateResponse = UpdateInfo(currentVersion = "9.9.9", state = UpdateState.CURRENT,
+                latestVersion = "9.9.9")
+            ApplyResult.Completed(emptyList())
         }
         vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
         vm.onIntent(ConfigIntent.AskInstall)
         assertTrue(vm.state.value.confirmInstall)
 
-        vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall)
 
-        assertEquals(listOf("9.9.9"), applied)
+        // The spawn is synchronous: it happened before any coroutine turn.
+        assertEquals(listOf<Pair<String, String?>>("v9.9.9" to "ciszkin/corral"), spawned)
+        assertTrue(vm.state.value.installing)
+        advanceTimeBy(1_501); runCurrent()
+
         assertTrue(vm.state.value.installed)
         assertFalse(vm.state.value.installing)
         assertNull(vm.state.value.installError)
+        assertEquals("9.9.9", vm.state.value.update?.currentVersion)
     }
 
     @Test fun installUpdateSurfacesAFailureHonestly() = runTest {
         val api = FakeApi(updateResponse = available("9.9.9"))
-        val vm = ConfigViewModel({ api }, backgroundScope) {
-            ApplyResult.Failed("checksum mismatch for corral-9.9.9.zip: expected sha256 aa but the archive is bb — refusing to install")
+        val vm = ConfigViewModel({ api }, backgroundScope) { _, _ ->
+            ApplyResult.Failed("could not find the corral CLI — expected /home/u/bin/corral")
         }
         vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
         vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
 
         assertFalse(vm.state.value.installed)
         assertFalse(vm.state.value.installing)
-        assertTrue(vm.state.value.installError!!.contains("checksum mismatch"))
-    }
-
-    /** A regular file where the scratch parent should be: the applier must report Failed, not throw. */
-    private fun uncreatableWorkDir(): Path = Files.createTempFile("corral-blocked", ".tmp").resolve("scratch")
-
-    @Test fun installReleasesInstallingAndShowsErrorWhenTheScratchDirCannotBeCreated() = runTest {
-        val api = FakeApi(updateResponse = available("9.9.9"))
-        val workDir = uncreatableWorkDir()
-        val vm = ConfigViewModel({ api }, backgroundScope) { tag ->
-            UpdateApplier(
-                tag = tag, repo = "ciszkin/corral", workDir = workDir,
-                components = InstalledComponents(daemon = true, ui = true), relaunch = Relaunch.None,
-            ).run()
-        }
-        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
-        vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
-
-        assertFalse(vm.state.value.installing, "the section must not stay busy-locked")
-        assertFalse(vm.state.value.installed)
-        assertTrue(vm.state.value.installError!!.contains("scratch"), vm.state.value.installError!!)
+        assertTrue(vm.state.value.installError!!.contains("could not find the corral CLI"))
     }
 
     @Test fun installReleasesInstallingAndShowsErrorWhenTheApplierThrows() = runTest {
         val api = FakeApi(updateResponse = available("9.9.9"))
-        val vm = ConfigViewModel({ api }, backgroundScope) {
-            throw IOException("could not create the update scratch directory at /x: Not a directory")
+        val vm = ConfigViewModel({ api }, backgroundScope) { _, _ ->
+            throw IOException("could not start the update: Permission denied")
         }
         vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
         vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
 
         assertFalse(vm.state.value.installing, "a throw must never latch installing")
         assertFalse(vm.state.value.installed)
-        assertTrue(vm.state.value.installError!!.contains("scratch"), vm.state.value.installError!!)
+        assertTrue(vm.state.value.installError!!.contains("Permission denied"), vm.state.value.installError!!)
+    }
+
+    @Test fun installTimeoutSaysTheUpdateIsStillRunningInTheBackground() = runTest {
+        val api = FakeApi(updateResponse = available("9.9.9"))
+        val vm = ConfigViewModel({ api }, backgroundScope) { _, _ -> ApplyResult.Completed(emptyList()) }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall)
+        advanceTimeBy(300_001); runCurrent()
+
+        assertFalse(vm.state.value.installing)
+        assertFalse(vm.state.value.installed)
+        assertTrue(vm.state.value.installError!!.contains("background"), vm.state.value.installError!!)
+    }
+
+    @Test fun updateNotCheckedIsRetriedWithoutForce() = runTest {
+        val api = FakeApi()
+        api.updateQueue.addLast(
+            UpdateInfo(currentVersion = "1.0.0", state = UpdateState.UNKNOWN, reason = UpdateReason.NOT_CHECKED),
+        )
+        api.updateResponse = UpdateInfo(currentVersion = "1.0.0", state = UpdateState.CURRENT,
+            latestVersion = "1.0.0")
+        val vm = newVm(api)
+        vm.onIntent(ConfigIntent.Load); runCurrent()
+        assertEquals(listOf(false), api.updateForces)
+
+        advanceTimeBy(1_501); runCurrent()
+
+        assertEquals(listOf(false, false), api.updateForces)
+        assertEquals(UpdateState.CURRENT, vm.state.value.update?.state)
+        assertFalse(vm.state.value.updateCheckFailed)
+    }
+
+    @Test fun aTerminalUnknownIsAnAnswerAndIsNotRetried() = runTest {
+        val api = FakeApi(
+            updateResponse = UpdateInfo(currentVersion = "1.0.0", state = UpdateState.UNKNOWN,
+                reason = UpdateReason.UNREACHABLE),
+        )
+        val vm = newVm(api)
+        vm.onIntent(ConfigIntent.Load); runCurrent()
+
+        assertEquals(listOf(false), api.updateForces)
+        assertEquals(UpdateReason.UNREACHABLE, vm.state.value.update?.reason)
+    }
+
+    @Test fun aThrowingDaemonIsRetried() = runTest {
+        val api = FakeApi()
+        api.updateError = IOException("connection refused")
+        val vm = newVm(api)
+        vm.onIntent(ConfigIntent.Load); runCurrent()
+        assertEquals(listOf(false), api.updateForces)
+
+        api.updateError = null
+        advanceTimeBy(1_501); runCurrent()
+
+        assertEquals(listOf(false, false), api.updateForces)
+        assertEquals(UpdateState.DISABLED, vm.state.value.update?.state)
+        assertFalse(vm.state.value.updateCheckFailed)
     }
 
     @Test fun aFreshCheckClearsTheInstalledCaption() = runTest {
         val api = FakeApi(updateResponse = available("9.9.9"))
-        val vm = ConfigViewModel({ api }, backgroundScope) { ApplyResult.Completed(emptyList()) }
+        val vm = ConfigViewModel({ api }, backgroundScope) { _, _ ->
+            api.updateResponse = UpdateInfo(currentVersion = "9.9.9", state = UpdateState.CURRENT,
+                latestVersion = "9.9.9")
+            ApplyResult.Completed(emptyList())
+        }
         vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
-        vm.onIntent(ConfigIntent.ConfirmInstall); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall)
+        advanceTimeBy(1_501); runCurrent()
         assertTrue(vm.state.value.installed)
 
+        api.updateResponse = available("9.9.9")
         vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
 
         assertFalse(vm.state.value.installed, "a fresh state must not sit next to the stale caption")
@@ -400,7 +449,7 @@ class ConfigViewModelTest {
 
     private fun available(tag: String) =
         UpdateInfo(currentVersion = "1.0.0", state = UpdateState.UPDATE_AVAILABLE, latestVersion = tag,
-            releaseUrl = "https://example/$tag")
+            releaseUrl = "https://github.com/ciszkin/corral/releases/tag/$tag")
 
     private companion object {
         fun response(

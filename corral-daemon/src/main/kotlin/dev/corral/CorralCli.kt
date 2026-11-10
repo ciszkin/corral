@@ -52,6 +52,29 @@ internal const val UPDATE_CHECK_TIMEOUT_SECONDS = 15L
 internal const val SCREENSHOT_TIMEOUT_SECONDS = 30L
 internal const val EVENTS_CONNECT_TIMEOUT_SECONDS = 10L
 
+/** `--repo` is an `owner/name` pair: exactly one slash, no whitespace. */
+internal fun validRepo(repo: String): Boolean {
+    val parts = repo.split('/')
+    return parts.size == 2 && parts.all { it.isNotBlank() && it.none(Char::isWhitespace) }
+}
+
+/** `--repo owner/name` or `--repo=owner/name`; a repeat takes the last, as every other flag does. */
+internal data class RepoFlag(val present: Boolean, val value: String?)
+
+internal fun parseRepoFlag(args: List<String>): RepoFlag {
+    var present = false
+    var value: String? = null
+    var i = 0
+    while (i < args.size) {
+        when {
+            args[i] == "--repo" -> { present = true; value = args.getOrNull(i + 1); i += 2 }
+            args[i].startsWith("--repo=") -> { present = true; value = args[i].substringAfter("="); i++ }
+            else -> i++
+        }
+    }
+    return RepoFlag(present, value)
+}
+
 /** Percent-encodes a path segment; spaces must be `%20`, not the form-encoding `+`. */
 internal fun pathSegment(s: String): String =
     URLEncoder.encode(s, StandardCharsets.UTF_8).replace("+", "%20")
@@ -871,7 +894,14 @@ object CorralCli {
                 if (problems > 0) exitProcess(1)
             }
             "update" -> {
-                val apply = args.drop(1).any { it == "--apply" }
+                val rest = args.drop(1)
+                val apply = rest.any { it == "--apply" }
+                val repoFlag = parseRepoFlag(rest)
+                val repo = repoFlag.value
+                if (repoFlag.present && (repo == null || !validRepo(repo))) {
+                    System.err.println("corral: --repo must be owner/name")
+                    exitProcess(2)
+                }
                 val info = fetchUpdate()
                 println(updateSummary(info))
                 // Without --apply this downloads nothing and runs nothing — the explicit-apply rule.
@@ -881,7 +911,8 @@ object CorralCli {
                     System.err.println("corral: no update available to install — refusing to download or change anything")
                     exitProcess(1)
                 }
-                when (val result = UpdateApplier.forCli(tag).run()) {
+                val applier = if (repo != null) UpdateApplier.forCli(tag, repo = repo) else UpdateApplier.forCli(tag)
+                when (val result = applier.run()) {
                     is ApplyResult.Completed -> {
                         // The feed's tag is not a claim we verified; read the version back off disk.
                         val installed = installedDaemonVersion(Path.of(System.getProperty("user.home")))
@@ -1115,7 +1146,7 @@ object CorralCli {
 
     private fun usage(code: Int): Nothing {
         println("usage: corral devices|status|queue|owner|doctor|check [--owner <o>] [<serial>...]" +
-            "|update [--apply]" +
+            "|update [--apply] [--repo owner/name]" +
             "|claim [--all|<serial>] [selector]|free [--all|<serial>]|renew <serial>" +
             "|wait [--timeout S (max 600)] [selector]|lease [--all | --timeout S (max 600)] [selector] -- <cmd>" +
             "|gate [--owner o] -- <adb args>" +

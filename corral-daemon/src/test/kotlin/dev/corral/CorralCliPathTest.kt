@@ -2,6 +2,8 @@ package dev.corral
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class CorralCliPathTest {
     @Test fun percentEncodesSpaces() {
@@ -23,5 +25,23 @@ class CorralCliPathTest {
     @Test fun deviceDecodeToleratesFieldsANewerDaemonAdds() {
         val devices = decodeDeviceList("""[{"serial":"emulator-5554","state":"offline","futureField":1}]""")
         assertEquals("emulator-5554", devices.single().serial)
+    }
+
+    @Test fun repoFlagAcceptsOnlyOwnerSlashName() {
+        assertTrue(validRepo("ciszkin/corral"))
+        assertFalse(validRepo("ciszkin"))
+        assertFalse(validRepo("a/b/c"))
+        assertFalse(validRepo("cisz kin/corral"))
+        assertFalse(validRepo("ciszkin/"))
+        assertFalse(validRepo("/corral"))
+    }
+
+    @Test fun repoFlagAcceptsSpaceAndEqualsFormsAndTheLastWins() {
+        assertEquals(RepoFlag(false, null), parseRepoFlag(listOf("--apply")))
+        assertEquals(RepoFlag(true, "a/b"), parseRepoFlag(listOf("--repo", "a/b")))
+        assertEquals(RepoFlag(true, "a/b"), parseRepoFlag(listOf("--repo=a/b")))
+        assertEquals(RepoFlag(true, "c/d"), parseRepoFlag(listOf("--repo", "a/b", "--repo=c/d")))
+        assertEquals(RepoFlag(true, ""), parseRepoFlag(listOf("--repo=")))
+        assertEquals(RepoFlag(true, null), parseRepoFlag(listOf("--repo")))
     }
 }

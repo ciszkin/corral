@@ -75,6 +75,7 @@ import dev.corral.ui.resources.settings_theme_desc
 import dev.corral.ui.resources.settings_url
 import dev.corral.ui.resources.settings_url_desc
 import dev.corral.ui.resources.settings_version
+import dev.corral.ui.resources.settings_version_mismatch
 import dev.corral.ui.resources.settings_version_unknown
 import dev.corral.ui.resources.theme_dark
 import dev.corral.ui.resources.theme_light
@@ -109,6 +110,21 @@ import org.jetbrains.compose.resources.stringResource
 
 /** The version row's value: the honest version, or an explicit placeholder when the jar reported none. */
 internal fun versionText(version: String, unknown: String): String = version.ifBlank { unknown }
+
+private const val DEV_VERSION = "0.0.0-dev"
+
+/**
+ * Null when there is nothing to explain; otherwise a short sentence naming both versions. A console
+ * left running across a CLI apply is old while the jar on disk is new.
+ */
+internal fun versionMismatchHint(consoleVersion: String, daemonVersion: String): String? {
+    val console = consoleVersion.trim()
+    val daemon = daemonVersion.trim()
+    if (console.isBlank() || daemon.isBlank()) return null
+    if (console == DEV_VERSION || daemon == DEV_VERSION) return null
+    if (console == daemon) return null
+    return "console v$console differs from daemon v$daemon — restart the console to load the installed version"
+}
 
 /** The update-source row's value: the daemon's repo, or a placeholder for a daemon that predates it. */
 internal fun updateRepoText(loaded: ConfigResponse, unknown: String): String =
@@ -193,6 +209,13 @@ private fun ClientGroup(
         FieldBlock(stringResource(Res.string.settings_version)) {
             Text(versionText(UiVersionSource.version, stringResource(Res.string.settings_version_unknown)),
                 fontFamily = LocalMonoFont.current, style = MaterialTheme.typography.body2)
+            if (versionMismatchHint(UiVersionSource.version, app.daemonVersion) != null) {
+                Text(
+                    stringResource(Res.string.settings_version_mismatch, UiVersionSource.version, app.daemonVersion),
+                    style = MaterialTheme.typography.caption,
+                    color = LocalExtendedColors.current.onSurfaceVariant,
+                )
+            }
         }
         SettingField(url, stringResource(Res.string.settings_url),
             desc = stringResource(Res.string.settings_url_desc),

@@ -77,6 +77,7 @@
     <string name="settings_daemon">Daemon</string>
     <string name="settings_version">Version</string>
     <string name="settings_version_unknown">unknown</string>
+    <string name="settings_version_mismatch">console v%1$s differs from daemon v%2$s — restart the console to load the installed version</string>
     <string name="settings_restart_hint">restart required — systemctl --user restart corral</string>
     <string name="settings_reset_defaults">Reset to defaults</string>
     <string name="settings_theme">Theme</string>
@@ -206,9 +207,9 @@
     <string name="update_state_unknown">unknown</string>
     <string name="update_check_failed">check failed — the daemon is unreachable</string>
     <string name="update_installing">installing…</string>
-    <string name="update_installed">update installed — the daemon is restarting and this console will relaunch</string>
+    <string name="update_installed">update installed — the daemon is restarting; restart the console to see the new version</string>
     <string name="update_install_failed">install failed: %1$s</string>
     <string name="update_confirm_title">Install update v%1$s?</string>
-    <string name="update_confirm_body">Corral will download the release, verify its checksum, install it, restart the daemon and relaunch this console. Active leases and connected devices are interrupted.</string>
+    <string name="update_confirm_body">Corral will download the release, verify its checksum, install it and restart the daemon. The update runs in the background, so closing this window will not interrupt it. Active leases and connected devices are interrupted; restart the console afterwards.</string>
     <string name="update_pill">v%1$s available</string>
 </resources>

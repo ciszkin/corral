@@ -80,6 +80,7 @@
     <!-- Draft additions pending OWNER REVIEW — version rows -->
     <string name="settings_version">Версія</string>
     <string name="settings_version_unknown">невядома</string>
+    <string name="settings_version_mismatch">кансоль v%1$s адрозніваецца ад дэмана v%2$s — перазапусціце кансоль, каб загрузіць усталяваную версію</string>
     <string name="settings_restart_hint">патрабуецца перазапуск — systemctl --user restart corral</string>
     <string name="settings_reset_defaults">Скінуць да стандартных</string>
     <string name="settings_theme">Тэма</string>
@@ -224,9 +225,9 @@
     <string name="update_state_unknown">невядома</string>
     <string name="update_check_failed">праверка не ўдалася — дэман недасяжны</string>
     <string name="update_installing">усталяванне…</string>
-    <string name="update_installed">абнаўленне ўсталявана — дэман перазапускаецца, і гэта кансоль перазапусціцца</string>
+    <string name="update_installed">абнаўленне ўсталявана — дэман перазапускаецца; перазапусціце кансоль, каб убачыць новую версію</string>
     <string name="update_install_failed">усталяванне не ўдалося: %1$s</string>
     <string name="update_confirm_title">Устанавіць абнаўленне v%1$s?</string>
-    <string name="update_confirm_body">Corral спампуе рэліз, праверыць яго кантрольную суму, усталюе яго, перазапусціць дэман і перазапусціць гэту кансоль. Актыўныя лизы і падключаныя прылады будуць перапынены.</string>
+    <string name="update_confirm_body">Corral спампуе рэліз, праверыць яго кантрольную суму, усталюе яго і перазапусціць дэман. Абнаўленне выконваецца ў фоне, таму закрыццё гэтага акна яго не перапыніць. Актыўныя лизы і падключаныя прылады будуць перапынены; пасля гэтага перазапусціце кансоль.</string>
     <string name="update_pill">даступна v%1$s</string>
 </resources>

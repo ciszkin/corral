@@ -315,8 +315,8 @@ The status bar carries the connection state with the last event `seq` and the da
 (`0.0.0-dev` for an untagged build, shown as-is); an update pill appears when a newer release is known,
 and Settings shows the console's own version beside the daemon's. Settings also holds the update
 row: the last check's honest state, a check-now that asks the daemon for a fresh check, and an
-install that confirms first and then runs the same checksum-gated applier as `corral update
---apply`.
+install that confirms first and then starts `corral update --apply` as a **detached** process;
+the console itself runs no applier, so restart it afterwards to see the new version.
 
 It is an observer, not a leaser: its identity is `CORRAL_OWNER` (default
 `corral-ui`), and its scrcpy live view is strictly read-only. Install it with
@@ -394,7 +394,9 @@ corral update --apply
 
 Without `--apply`, nothing is downloaded and nothing is run. The console's **Install** button is the
 same explicit step from the other surface: it names the version, asks for confirmation, and then
-runs the same applier. Applying downloads the release `corral-<version>.zip` and its
+starts `corral update --apply` as a detached process (closing the console does not interrupt it;
+restart the console afterwards, and its Version row explains a console/daemon mismatch). Applying
+downloads the release `corral-<version>.zip` and its
 `.zip.sha256` from the same release, verifies the SHA-256, and only then extracts the bundle and
 runs its `install.sh`, which restarts the daemon. On Windows (or any host without a systemd user
 session) the apply refuses up front and tells you to unpack the zip and run `install.sh` by hand.

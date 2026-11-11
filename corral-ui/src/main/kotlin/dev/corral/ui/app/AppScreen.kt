@@ -199,6 +199,10 @@ fun AppScreen(
     }
     LaunchedEffect(poolState.confirmFree) { forceFreeError = null }
     LaunchedEffect(poolState.emulators) { emulatorError = null }
+    // The replacement console is already running; exit this one so exactly one window remains.
+    LaunchedEffect(configState.relaunching) {
+        if (configState.relaunching) onQuit()
+    }
     LaunchedEffect(state.url, state.connection is Connection.Connected) {
         if (state.connection is Connection.Connected) config.onIntent(ConfigIntent.Load)
     }

@@ -111,8 +111,6 @@ import org.jetbrains.compose.resources.stringResource
 /** The version row's value: the honest version, or an explicit placeholder when the jar reported none. */
 internal fun versionText(version: String, unknown: String): String = version.ifBlank { unknown }
 
-private const val DEV_VERSION = "0.0.0-dev"
-
 /**
  * Null when there is nothing to explain; otherwise a short sentence naming both versions. A console
  * left running across a CLI apply is old while the jar on disk is new.

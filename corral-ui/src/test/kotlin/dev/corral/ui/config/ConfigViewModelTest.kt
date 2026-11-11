@@ -345,6 +345,72 @@ class ConfigViewModelTest {
         assertEquals("9.9.9", vm.state.value.update?.currentVersion)
     }
 
+    @Test fun relaunchesTheConsoleWhenTheDaemonAndTheDiskJarBothReportTheTarget() = runTest {
+        val api = FakeApi(updateResponse = available("v9.9.9"))
+        var relaunches = 0
+        val vm = ConfigViewModel(
+            { api }, backgroundScope,
+            runningVersion = "1.0.0",
+            onDiskVersion = { "9.9.9" },
+            relaunchConsole = { relaunches++; true },
+        ) { _, _ ->
+            api.updateResponse = UpdateInfo(currentVersion = "9.9.9", state = UpdateState.CURRENT,
+                latestVersion = "9.9.9")
+            ApplyResult.Completed(emptyList())
+        }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall)
+        advanceTimeBy(1_501); runCurrent()
+
+        assertEquals(1, relaunches)
+        assertTrue(vm.state.value.relaunching)
+        assertTrue(vm.state.value.installed)
+    }
+
+    @Test fun doesNotRelaunchWhenTheDiskJarIsNotTheTarget() = runTest {
+        val api = FakeApi(updateResponse = available("v9.9.9"))
+        var relaunches = 0
+        val vm = ConfigViewModel(
+            { api }, backgroundScope,
+            runningVersion = "1.0.0",
+            onDiskVersion = { "1.0.0" },
+            relaunchConsole = { relaunches++; true },
+        ) { _, _ ->
+            api.updateResponse = UpdateInfo(currentVersion = "9.9.9", state = UpdateState.CURRENT,
+                latestVersion = "9.9.9")
+            ApplyResult.Completed(emptyList())
+        }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall)
+        advanceTimeBy(1_501); runCurrent()
+
+        assertEquals(0, relaunches)
+        assertFalse(vm.state.value.relaunching)
+        assertTrue(vm.state.value.installed, "the mismatch hint still has a job to do")
+    }
+
+    @Test fun doesNotExitWhenTheConsoleArgvCannotBeDerived() = runTest {
+        val api = FakeApi(updateResponse = available("v9.9.9"))
+        var relaunches = 0
+        val vm = ConfigViewModel(
+            { api }, backgroundScope,
+            runningVersion = "1.0.0",
+            onDiskVersion = { "9.9.9" },
+            relaunchConsole = { relaunches++; false },
+        ) { _, _ ->
+            api.updateResponse = UpdateInfo(currentVersion = "9.9.9", state = UpdateState.CURRENT,
+                latestVersion = "9.9.9")
+            ApplyResult.Completed(emptyList())
+        }
+        vm.onIntent(ConfigIntent.CheckUpdate); runCurrent()
+        vm.onIntent(ConfigIntent.ConfirmInstall)
+        advanceTimeBy(1_501); runCurrent()
+
+        assertEquals(1, relaunches, "it tried, and the failure is not a reason to close")
+        assertFalse(vm.state.value.relaunching)
+        assertTrue(vm.state.value.installed)
+    }
+
     @Test fun installUpdateSurfacesAFailureHonestly() = runTest {
         val api = FakeApi(updateResponse = available("9.9.9"))
         val vm = ConfigViewModel({ api }, backgroundScope) { _, _ ->

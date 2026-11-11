@@ -6,6 +6,7 @@ import dev.corral.UpdateReason
 import dev.corral.UpdateState
 import dev.corral.ui.ConfigApiException
 import dev.corral.ui.CorralApi
+import dev.corral.ui.UiVersionSource
 import dev.corral.ui.architecture.BaseMviViewModel
 import dev.corral.ui.data.ConfigResponse
 import dev.corral.ui.data.ConfigRules
@@ -27,6 +28,11 @@ private const val UPDATE_BACKGROUND_MESSAGE =
 class ConfigViewModel(
     private val apiFactory: () -> CorralApi?,
     vmScope: CoroutineScope,
+    /** This process's own version, and the version of the jar the launcher would run next. */
+    private val runningVersion: String = UiVersionSource.version,
+    private val onDiskVersion: () -> String? = { jarVersion(consoleJarPath()) },
+    /** Starts the new console and returns whether it started; injected so tests spawn nothing. */
+    private val relaunchConsole: () -> Boolean = ::relaunchCurrentConsole,
     /**
      * The confirmed apply, injected so a test never spawns anything. The default starts the CLI's
      * detached apply; it is called synchronously from [ConfigIntent.ConfirmInstall], before any
@@ -195,10 +201,22 @@ class ConfigViewModel(
                         updateChecking = false, updateCheckFailed = false,
                     )
                 }
+                maybeRelaunch(target)
                 return
             }
         }
         reduceState { copy(installing = false, installError = UPDATE_BACKGROUND_MESSAGE) }
+    }
+
+    /**
+     * The daemon now runs the target but this window still runs the old code. Replace it only when
+     * the jar on disk is that same release; otherwise keep the window and let the mismatch hint say
+     * so. One-shot: a second poll must not start a second console.
+     */
+    private fun maybeRelaunch(target: String) {
+        if (state.value.relaunching) return
+        if (!shouldRelaunch(runningVersion, target, onDiskVersion())) return
+        if (relaunchConsole()) reduceState { copy(relaunching = true) }
     }
 
     private fun discard() {

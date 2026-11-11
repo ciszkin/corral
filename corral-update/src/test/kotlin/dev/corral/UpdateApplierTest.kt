@@ -21,22 +21,18 @@ class UpdateApplierTest {
 
     private fun applier(
         workDir: Path,
-        rel: Relaunch = Relaunch.None,
         components: InstalledComponents = InstalledComponents(daemon = true, ui = true),
         refusal: String? = null,
         download: (URI, Path) -> Unit = { _, _ -> },
         execute: (List<String>) -> Int = { 0 },
-        spawn: (List<String>) -> Unit = ::spawnProcess,
     ) = UpdateApplier(
         tag = "v1.2.3",
         repo = "ciszkin/corral",
         workDir = workDir,
         components = components,
-        relaunch = rel,
         platformRefusal = refusal,
         download = download,
         execute = execute,
-        spawn = spawn,
     )
 
     @Test fun httpDownloadFollowsTheReleaseRedirect() {
@@ -67,10 +63,9 @@ class UpdateApplierTest {
 
     @Test fun commandsAreTheInstallerPipeline() {
         val workDir = Path.of("/tmp/corral-update")
-        val relaunch = Relaunch.Console(listOf("java", "-cp", "/home/u/.corral/corral-ui-all.jar", "dev.corral.ui.CorralUiKt"))
         val applier = UpdateApplier(
             tag = "v1.2.3", repo = "ciszkin/corral", workDir = workDir,
-            components = InstalledComponents(daemon = true, ui = true), relaunch = relaunch,
+            components = InstalledComponents(daemon = true, ui = true),
         )
 
         assertEquals(
@@ -79,7 +74,6 @@ class UpdateApplierTest {
                     "-d", workDir.resolve("bundle").toString()),
                 listOf("bash", workDir.resolve("bundle").resolve("install.sh").toString(), "--ui"),
                 listOf("systemctl", "--user", "restart", "corral"),
-                listOf("java", "-cp", "/home/u/.corral/corral-ui-all.jar", "dev.corral.ui.CorralUiKt"),
             ),
             applier.commands(),
         )
@@ -221,7 +215,6 @@ class UpdateApplierTest {
         )
         assertNull(relaunchArgv(null, null, null))
         assertNull(relaunchArgv("java", listOf("-cp", "/opt/other.jar", "dev.other.Main"), null))
-        assertTrue(CONSOLE_RELAUNCH_UNKNOWN.isNotBlank())
     }
 
     @Test fun aVerifiedBundleProceedsThroughExtractAndInstall() {

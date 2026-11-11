@@ -126,7 +126,9 @@ the same device.
   button uses it). The console's install button confirms first, then starts
   `corral update --apply --repo <owner/name>` as a **detached** process, so
   closing the window no longer interrupts an apply; the console polls the daemon
-  until the new version reports in. A CLI-driven apply replaces the jars and
+  until the new version reports in, and when the console jar on disk is that
+  same release it starts the new console and exits, leaving one window open on
+  the new version. A CLI-driven apply replaces the jars and
   restarts the daemon but leaves a running console on its old code, so restart
   the console afterwards — its Settings → Client → Version row says so when the
   console and daemon versions disagree. The digest comes from the same release
@@ -206,8 +208,9 @@ the same device.
   holds the update row: the last check's honest state, a "check now" that asks for a fresh check
   (`?force`), and an install that confirms first and then starts the checksum-gated CLI apply as a
   detached process (closing the window does not interrupt it; the console polls until the daemon
-  reports the new version). A CLI-driven apply updates the jars and restarts the daemon but the
-  console window must be restarted, and the Version row explains a console/daemon mismatch. The
+  reports the new version and then relaunches itself into that release). A CLI-driven apply updates
+  the jars and restarts the daemon but the console window must be restarted, and the Version row
+  explains a console/daemon mismatch. The
   interface is English, and the theme (System/Light/Dark) applies
   immediately and persists, with the client's window geometry, to `~/.config/corral/ui.conf`.
   Force-free sits behind a confirm dialog naming the holder, and a scrcpy live view is strictly

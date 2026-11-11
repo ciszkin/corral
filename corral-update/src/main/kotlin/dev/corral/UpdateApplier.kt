@@ -23,7 +23,7 @@ private const val CONSOLE_JAR_MARKER = "corral-ui"
 /**
  * What the update applier reports back. Refused is a deliberate stop before anything was touched
  * (an unsupported host); Failed is a step that ran and did not finish; Completed is the whole
- * pipeline, including the console relaunch (the process is normally replaced at that point).
+ * pipeline.
  */
 sealed interface ApplyResult {
     data class Completed(val commands: List<List<String>>) : ApplyResult
@@ -35,10 +35,6 @@ sealed interface ApplyResult {
 
 /** A download that verified as neither, or a `.sha256` that was missing or unreadable. */
 class ChecksumException(message: String) : IOException(message)
-
-/** The honest failure when the console's own command line cannot be re-derived. */
-const val CONSOLE_RELAUNCH_UNKNOWN: String =
-    "could not determine how to relaunch this console — start it again from its launcher after the update"
 
 /**
  * Which corral components are installed under the install root. `install.sh` takes only a UI switch
@@ -57,42 +53,29 @@ data class InstalledComponents(val daemon: Boolean, val ui: Boolean) {
     }
 }
 
-/** Whether the apply relaunches a console, or is the CLI applying on behalf of the host. */
-sealed interface Relaunch {
-    /** Re-running exactly these argv restores this console window. */
-    data class Console(val argv: List<String>) : Relaunch
-
-    /** The CLI has no console window to restore. */
-    data object None : Relaunch
-}
-
 /**
  * Applies one released bundle. The command list is a pure function so a reviewer can read the whole
  * update path without running one; [run] is the only part that touches the network or the host.
  *
  * Order of operations in [run]: download the zip and its `.sha256`, VERIFY THE CHECKSUM, and only
  * then execute [commands] (extract to a scratch dir, run the bundle's `install.sh` with the
- * installed component set, restart the daemon, relaunch the console). The check is the gate: a
- * mismatch, a missing `.sha256`, or an unreadable one stops before any file is extracted, and the
- * message names both digests. There is no warn-and-continue path.
+ * installed component set, restart the daemon). The check is the gate: a mismatch, a missing
+ * `.sha256`, or an unreadable one stops before any file is extracted, and the message names both
+ * digests. There is no warn-and-continue path.
  *
- * Every step is waited on EXCEPT the console relaunch, which is fire-and-forget: the old console
- * must not hang showing "installing…" for the whole lifetime of the new one. Firing it and leaving
- * lets this process exit while the replacement takes over.
+ * The console is never relaunched from here: it starts this CLI detached, watches the daemon for
+ * the new version, and replaces its own window when the jar on disk is that release.
  */
 class UpdateApplier(
     private val tag: String,
     private val repo: String,
     private val workDir: Path,
     private val components: InstalledComponents,
-    private val relaunch: Relaunch,
     private val restart: List<String> = listOf("systemctl", "--user", "restart", "corral"),
     /** Non-null on a host that cannot restart the user unit; [run] refuses before anything runs. */
     private val platformRefusal: String? = null,
     private val download: (URI, Path) -> Unit = ::httpDownload,
     private val execute: (List<String>) -> Int = ::runProcess,
-    /** Starts the console replacement and returns at once — [run] never waits on the relaunch. */
-    private val spawn: (List<String>) -> Unit = ::spawnProcess,
     /** Set when the applier could not even be prepared: [run] reports it instead of running. */
     private val setupError: String? = null,
 ) {
@@ -100,15 +83,13 @@ class UpdateApplier(
     private val zip: Path = workDir.resolve("corral-$version.zip")
     private val sha: Path = workDir.resolve("corral-$version.zip.sha256")
     private val extractDir: Path = workDir.resolve("bundle")
-    private val consoleRelaunchArgv: List<String>? = (relaunch as? Relaunch.Console)?.argv
 
     /** The argv the apply performs, in order. Side-effect free; [run] verifies the checksum first. */
-    fun commands(): List<List<String>> = buildList {
-        add(listOf("unzip", "-o", zip.toString(), "-d", extractDir.toString()))
-        add(listOf("bash", extractDir.resolve("install.sh").toString(), components.uiFlag))
-        add(restart)
-        consoleRelaunchArgv?.let { add(it) }
-    }
+    fun commands(): List<List<String>> = listOf(
+        listOf("unzip", "-o", zip.toString(), "-d", extractDir.toString()),
+        listOf("bash", extractDir.resolve("install.sh").toString(), components.uiFlag),
+        restart,
+    )
 
     fun run(): ApplyResult {
         // Preparing the applier can fail before run() is ever entered; report that, never throw it.
@@ -125,11 +106,6 @@ class UpdateApplier(
             Files.createDirectories(extractDir)
             val pipeline = commands()
             for (argv in pipeline) {
-                // The relaunch replaces this process: fire it and return Completed without waiting.
-                if (argv == consoleRelaunchArgv) {
-                    spawn(argv)
-                    continue
-                }
                 val code = execute(argv)
                 if (code != 0) {
                     return ApplyResult.Failed("update step failed (exit $code): ${argv.joinToString(" ")}")
@@ -163,29 +139,13 @@ class UpdateApplier(
     }
 
     companion object {
-        /** The CLI applies for the host; it has no console window to relaunch. */
+        /** The CLI applies for the host; the console watches the daemon and replaces its own window. */
         fun forCli(
             tag: String,
             home: Path = userHome(),
             repo: String = defaultRepo(),
             workDir: Path = scratchDir(),
-        ): UpdateApplier = build(tag, home, repo, workDir, Relaunch.None)
-
-        /** The console applies and then relaunches itself; null when its own argv cannot be re-derived. */
-        fun forConsole(
-            tag: String,
-            home: Path = userHome(),
-            repo: String = defaultRepo(),
-            workDir: Path = scratchDir(),
-        ): UpdateApplier? {
-            val info = ProcessHandle.current().info()
-            val argv = relaunchArgv(
-                info.command().orElse(null),
-                info.arguments().orElse(null)?.toList(),
-                info.commandLine().orElse(null),
-            ) ?: return null
-            return build(tag, home, repo, workDir, Relaunch.Console(argv))
-        }
+        ): UpdateApplier = build(tag, home, repo, workDir)
 
         /**
          * Everything a factory does besides pick the scratch path touches the filesystem (detecting
@@ -193,19 +153,17 @@ class UpdateApplier(
          * exception: a caller that only understands [ApplyResult] must never get a throw before
          * [run]. On failure, hand back an applier whose [run] reports the honest Failed instead.
          */
-        private fun build(tag: String, home: Path, repo: String, workDir: Path, relaunch: Relaunch): UpdateApplier =
+        private fun build(tag: String, home: Path, repo: String, workDir: Path): UpdateApplier =
             runCatching {
                 UpdateApplier(
                     tag = tag, repo = repo, workDir = workDir,
                     components = InstalledComponents.detect(corralHome(home)),
-                    relaunch = relaunch,
                     platformRefusal = defaultPlatformRefusal(),
                 )
             }.getOrElse { e ->
                 UpdateApplier(
                     tag = tag, repo = repo, workDir = workDir,
                     components = InstalledComponents(daemon = false, ui = false),
-                    relaunch = relaunch,
                     setupError = "could not prepare the update: ${e.message ?: e::class.simpleName ?: "unknown error"}",
                 )
             }
@@ -267,6 +225,20 @@ internal fun relaunchArgv(command: String?, arguments: List<String>?, commandLin
 }
 
 private val WHITESPACE = Regex("\\s+")
+
+/**
+ * The argv that restores the console calling this, read from its own running process; null when
+ * the command line does not name the console jar. The caller decides what a null means — the
+ * console leaves its window alone rather than guessing.
+ */
+fun currentConsoleArgv(): List<String>? {
+    val info = ProcessHandle.current().info()
+    return relaunchArgv(
+        info.command().orElse(null),
+        info.arguments().orElse(null)?.toList(),
+        info.commandLine().orElse(null),
+    )
+}
 
 /**
  * The expected digest, read from the first token of the `.sha256` (`sha256sum`'s `<hex>  <name>`),
@@ -347,11 +319,6 @@ internal fun httpDownload(uri: URI, dest: Path): Unit {
         Files.deleteIfExists(dest)
         throw IOException("could not download ${uri.path.substringAfterLast('/')} (HTTP ${response.statusCode()})")
     }
-}
-
-/** Start a process and return at once; used only for the console relaunch, which must not be awaited. */
-internal fun spawnProcess(argv: List<String>) {
-    runCatching { ProcessBuilder(argv).inheritIO().start() }
 }
 
 /** Run a process and wait for it to finish; 127 when it cannot even start. */

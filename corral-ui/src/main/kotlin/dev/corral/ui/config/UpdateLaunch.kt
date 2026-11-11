@@ -6,8 +6,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 /**
- * Starts the CLI's gated apply as a detached process. The console never downloads or installs in
- * its own JVM: closing the window must not abort an apply half-way.
+ * Starts detached child processes: the CLI's gated apply, and the console that replaces this
+ * window. The console never downloads or installs in its own JVM: closing the window must not
+ * abort an apply half-way.
  */
 internal object UpdateLaunch {
     fun start(tag: String, repo: String?): ApplyResult {
@@ -17,8 +18,6 @@ internal object UpdateLaunch {
                 "or ${home.resolve(".corral/corral-daemon-all.jar")}"
         )
         val argv = buildList {
-            // A terminal hangup must not take the apply down; setsid is POSIX-only.
-            if (onPath("setsid")) add("setsid")
             addAll(cli)
             add("update")
             add("--apply")
@@ -29,15 +28,27 @@ internal object UpdateLaunch {
         }
         val log = home.resolve(".corral").resolve("update-${safeName(tag)}.log")
         return runCatching {
-            Files.createDirectories(log.parent)
-            ProcessBuilder(argv)
-                .redirectErrorStream(true)
-                .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()))
-                .start()
+            spawnDetached(argv, log)
             ApplyResult.Completed(listOf(argv))
         }.getOrElse { e ->
             ApplyResult.Failed("could not start the update: ${e.message ?: e::class.simpleName ?: "unknown error"}")
         }
+    }
+
+    /** Starts this console's replacement detached; false when the process could not be started. */
+    fun relaunch(argv: List<String>): Boolean {
+        val log = Path.of(System.getProperty("user.home")).resolve(".corral").resolve("console-relaunch.log")
+        return runCatching { spawnDetached(argv, log) }.isSuccess
+    }
+
+    /** Detached: no waitFor, a hangup must not kill it, and the child's output goes to [log]. */
+    private fun spawnDetached(argv: List<String>, log: Path) {
+        val full = if (onPath("setsid")) listOf("setsid") + argv else argv
+        Files.createDirectories(log.parent)
+        ProcessBuilder(full)
+            .redirectErrorStream(true)
+            .redirectOutput(ProcessBuilder.Redirect.appendTo(log.toFile()))
+            .start()
     }
 
     /** A launcher's PATH may not contain `~/bin`, so fall back to this JVM running the installed jar. */

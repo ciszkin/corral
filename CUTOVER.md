@@ -316,7 +316,10 @@ The status bar carries the connection state with the last event `seq` and the da
 and Settings shows the console's own version beside the daemon's. Settings also holds the update
 row: the last check's honest state, a check-now that asks the daemon for a fresh check, and an
 install that confirms first and then starts `corral update --apply` as a **detached** process;
-the console itself runs no applier, so restart it afterwards to see the new version.
+the console itself runs no applier. It polls until the daemon reports the new version, then — when
+the console jar on disk is that same release — starts the new console and exits, leaving one window
+open on the new version. A CLI-driven apply leaves a running console on its old code; restart it
+afterwards, and its Version row explains a console/daemon mismatch.
 
 It is an observer, not a leaser: its identity is `CORRAL_OWNER` (default
 `corral-ui`), and its scrcpy live view is strictly read-only. Install it with
@@ -395,7 +398,9 @@ corral update --apply
 Without `--apply`, nothing is downloaded and nothing is run. The console's **Install** button is the
 same explicit step from the other surface: it names the version, asks for confirmation, and then
 starts `corral update --apply` as a detached process (closing the console does not interrupt it;
-restart the console afterwards, and its Version row explains a console/daemon mismatch). Applying
+the console polls until the daemon reports the new version and then relaunches itself into that
+release, leaving one window open). A CLI-driven apply leaves a running console on its old code;
+restart it afterwards, and its Version row explains a console/daemon mismatch. Applying
 downloads the release `corral-<version>.zip` and its
 `.zip.sha256` from the same release, verifies the SHA-256, and only then extracts the bundle and
 runs its `install.sh`, which restarts the daemon. On Windows (or any host without a systemd user

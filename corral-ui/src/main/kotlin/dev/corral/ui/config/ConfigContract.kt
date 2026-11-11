@@ -25,6 +25,8 @@ data class ConfigState(
     val confirmInstall: Boolean = false,
     val installing: Boolean = false,
     val installed: Boolean = false,
+    /** The window must exit because a console on the new version has been started in its place. */
+    val relaunching: Boolean = false,
     /** The applier's own honest failure, shown verbatim. */
     val installError: String? = null,
 ) : MviState

@@ -229,7 +229,9 @@ on Windows, `systemctl --user status corral` on Linux.
 
 Where the docs are: `CUTOVER.md` in the install bundle (or the repo) is the adoption guide —
 requirements, install, core loop, selectors, Gradle, emulators, config, doctor, updates, uninstall,
-known limits; `README.md` in the repo describes the design; `SECURITY.md` holds the threat model
+known limits, then a behaviour reference (gates, pool, HTTP/WS/MCP, config API, self-healing) and
+the repo/build shape; `README.md` in the repo is the front door — what it is, install, the gates,
+the status table, and links into the guide; `SECURITY.md` holds the threat model
 and the bypass list. The default gate rules file is `corral-rules` beside the installer in the
 bundle (`scripts/corral-rules` in a source checkout), installed as `~/.config/corral/rules`. This
 skill lives at `~/.agents/skills/corral/SKILL.md` on the house install, and `corral update --apply`

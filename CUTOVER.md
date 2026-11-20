@@ -33,9 +33,9 @@ a per-user `CorralDaemon` Scheduled Task (there is no systemd and no `~/bin` she
 shim). The desktop console is verified on Windows with JDK 25, and Windows was
 host-verified on one box for the install and uninstall paths, the per-user
 `CorralDaemon` Scheduled Task, the `.bat` shims (including a call in flight across
-an install), and the process-ancestry identity walk. macOS is not an install
-target: the daemon and CLI are portable Java, but there is no installer, service
-or host verification for it.
+an install), the Gradle gate, the console, and the process-ancestry identity walk.
+macOS is not an install target: the daemon and CLI are portable Java, but there is
+no installer, service or host verification for it.
 
 Two Windows nuances remain, and both are reported by the installer rather than hidden:
 
@@ -138,7 +138,9 @@ corral free "$serial"
 ```
 
 A claim's TTL is the hold, and its owner string is the identity, so a claim
-outlives the process that made it. `corral free --all` drops everything you
+outlives the process that made it. `corral claim <serial>` pins one device and
+`corral claim --all` claims every free device that matches the selector (it exits non-zero
+when none is free). `corral free --all` drops everything you
 own, and a bare `corral free` does the same; `corral free <serial>` releases
 that one device, and only if it is yours.
 
@@ -212,8 +214,20 @@ when you want to know which device you would get and then decide what to do; use
 is dropped after about 30 seconds. `corral queue` lists the outstanding tickets, and
 `corral status` names the current holder of every device.
 
+An offer that is not polled within a short hold is dropped and the device moves on.
+Every freed, expired or reclaimed device goes to the longest-waiting ticket that is
+still polling. A ticket that pauses keeps its position but loses offers, including to
+direct claims, and a direct claim cannot overtake a ticket that is polling. Nothing is
+parked server-side, so a crashed client simply leaves an expiring ticket.
+
+Leases survive a daemon restart: they are persisted in SQLite (WAL), with an append-only
+audit log. `corral renew <serial>` extends a lease you hold.
+
 The rest of the CLI:
 
+- `corral devices` prints the daemon's device list — the live pool with each entry's
+  state and the attributes a selector matches on; the lease on each entry is in
+  `corral status`.
 - `corral check [--owner O] [serial...]` asks the same question the gate asks — may this owner use
   each device — and exits non-zero listing the ones it may not; useful in a script or a CI step.
 - `corral gate -- <adb args>` runs the wrapper's classification and then, only when the call is
@@ -277,7 +291,7 @@ corral avd stop Pixel_7_API_34          # refused while leased; --force override
 ```
 
 A freshly started AVD joins the pool **unbooted** and is not claimable until
-Android reports boot complete. `corral lease --timeout S --type emulator -- <cmd>`
+Android reports `sys.boot_completed=1`. `corral lease --timeout S --type emulator -- <cmd>`
 queues until the flip lands, then runs the command **holding** that AVD; a plain
 `corral claim --type emulator` teaches you the same. (`corral wait --type emulator`
 waits for the flip too, but it hands the lease back when it exits, so it is the
@@ -286,7 +300,26 @@ the installed `corral.service` unit, each AVD runs in its own transient
 `systemd-run --user` unit that survives a daemon restart, with its output at
 `~/.corral/emulator-<avd>.log` (`CORRAL_EMULATOR_LAUNCHER=systemd` forces that
 path, `direct` forces a plain child process; unset auto-detects). Stopping an
-emulator releases its lease.
+emulator releases its lease, and an emulator lease is dropped when its serial leaves
+the pool, while physical and WiFi leases survive a replug.
+
+The emulator binary resolves from `CORRAL_EMULATOR`, else the SDK's `emulator/emulator`
+beside adb, else an `emulator` on `PATH`. A start dedupes on a live spawn under a
+per-AVD lock, not just on the pool, so concurrent or repeated starts of an AVD that is
+already spawned or booting answer `alreadyRunning` and exactly one process runs. By
+default the AVD is a child process of the daemon, destroyed on a graceful daemon stop
+(a `SIGKILL`ed daemon can orphan it untracked). The `systemd-run` path described above
+is what keeps an AVD across a daemon restart; it also forwards the daemon's `ANDROID_*`
+environment, and every start truncates that AVD's log. The same operations are on
+`GET`/`POST /api/emulators` and the MCP `start_emulator` / `stop_emulator` tools. Stop
+takes a force in the CLI (`--force`) and in the REST body (`{"force":true}`) but not from
+MCP: `stop_emulator` and `free` have no force.
+
+`GET /api/emulators` carries an AVD's last log line as `error` only when its last run
+exited non-zero — a late boot failure or a crash. A run that ends cleanly on its own
+(exit 0, e.g. the emulator window was closed) and one Corral stopped both report no
+`error`: `stop` rotates the log to `~/.corral/emulator-<avd>.log.1`, keeping the
+evidence, and clears the exit status, and every start writes a fresh log.
 
 ## The desktop console
 
@@ -311,8 +344,17 @@ a single screen with a left rail and six sections:
 - **Rules** — the gate rules;
 - **Settings** — the daemon knobs and this client's own preferences.
 
+The interface is English. The theme (System/Light/Dark) applies immediately and persists,
+with the window geometry, to `~/.config/corral/ui.conf`.
+
+Rules and Settings are editors: the gate rules and the daemon knobs go over the daemon's
+config API — the `readonly` / `valueflags` lists, the knobs with the restart-required hint
+and per-field validation — while the console's own `CORRAL_URL` and `CORRAL_OWNER` apply on
+save. `shell_skip` / `init_floor` are file-only, so edit `~/.config/corral/rules` directly.
+
 The status bar carries the connection state with the last event `seq` and the daemon's version
-(`0.0.0-dev` for an untagged build, shown as-is); an update pill appears when a newer release is known,
+(`0.0.0-dev` only when no version could be derived — no tag and no `CORRAL_VERSION` — and
+shown as-is); an update pill appears when a newer release is known,
 and Settings shows the console's own version beside the daemon's. Settings also holds the update
 row: the last check's honest state, a check-now that asks the daemon for a fresh check, and an
 install that confirms first and then starts `corral update --apply` as a **detached** process;
@@ -325,6 +367,28 @@ It is an observer, not a leaser: its identity is `CORRAL_OWNER` (default
 `corral-ui`), and its scrcpy live view is strictly read-only. Install it with
 `install.sh --ui`. Its own traffic is HTTP/WebSocket to the daemon; it never
 talks adb itself.
+
+The live view runs scrcpy with `--no-control`, `--no-clipboard-autosync` and
+`--no-audio`, so an observer can watch a leased device but never touch it, and
+force-freeing a device sits behind a confirm dialog that names the holder. Because
+screenshots are strict by default, `install.sh --ui` seeds
+`CORRAL_SCREENSHOT_OBSERVERS=corral-ui` into the daemon unit's environment when the
+console is installed and the line is absent (POSIX unit only) — visible and editable
+forever after, and emptying it disables observers and survives reinstalls. A remote
+console denied with `403` raises a banner naming the variable.
+
+The window and the tray use the Corral mark. The close button parks the window in the
+system tray where the platform has one — Windows, macOS and X11 desktops other than
+GNOME; a Wayland session or a GNOME desktop quits instead, because a close only parks
+where Compose reports `isTraySupported` and the session is neither. Clicking the tray
+icon (either button) brings the window back, so **Quit** sits at the foot of the left
+rail and asks for confirmation. Where close quits, the **Corral** launcher that
+`install.sh --ui` drops into `~/.local/share/applications` (app grid, pinnable to the
+dock, `Icon=` the Corral mark) is the way back.
+
+The console is verified on JDK 17 (Linux) and on Windows with JDK 25 — see
+[Windows](#windows); other very new JDKs are untested. The daemon and CLI are unaffected
+either way.
 
 ## Configuration
 
@@ -395,7 +459,10 @@ Applying an update is always explicit:
 corral update --apply
 ```
 
-Without `--apply`, nothing is downloaded and nothing is run. The console's **Install** button is the
+Without `--apply`, nothing is downloaded and nothing is run. `--repo owner/name`
+points that one apply at another repository (`owner/name` is validated, and a malformed
+value is a usage error), which is what the console passes when it starts an apply. The
+console's **Install** button is the
 same explicit step from the other surface: it names the version, asks for confirmation, and then
 starts `corral update --apply` as a detached process (closing the console does not interrupt it;
 the console polls until the daemon reports the new version and then relaunches itself into that
@@ -469,3 +536,155 @@ an agent host.
   `systemd-run` path are Linux-only; Windows runs the daemon from a per-user Scheduled
   Task instead (see [Windows](#windows)), and macOS has no installer. The daemon and
   CLI themselves are OS-agnostic Java.
+
+## Behaviour reference
+
+Reference material for what the daemon and CLI promise. The guide above is the path
+through it.
+
+### The pool
+
+The pool is the live inventory from `adb track-devices`, so USB, WiFi and emulators show
+up and disappear as they connect and disconnect. Each entry is enriched with its model
+and OS version, and with the AVD name for an emulator. A selector (see
+[Selectors](#selectors)) matches on that inventory.
+
+### Exec-time enforcement
+
+Three complementary gates on a POSIX install:
+
+- an `adb` wrapper on `PATH` checks every PATH-resolved adb invocation;
+- an SDK `platform-tools/adb` shim catches absolute-path calls (IDE, scripts);
+- a Gradle `init.d` gate pre-flights `install*` / `connected*AndroidTest` tasks — AGP
+  bypasses the adb binary entirely, so only a build-level gate can cover it. A build
+  pinned with `ANDROID_SERIAL` is checked against that device only, and the check runs at
+  task execution, so gated builds stay configuration-cache compatible.
+
+A Windows install has two layers — the `.bat` wrapper and the Gradle gate — because the
+SDK's `adb.exe` is not shimmed there.
+
+The wrapper's read-only-command and value-flag lists live in one editable file,
+`~/.config/corral/rules` (override `CORRAL_RULES`), read by both the bash wrapper and the
+CLI. The Windows `.bat` twin delegates to `corral gate`, so the three cannot drift. A
+missing rules file fails closed. Denials are self-teaching: they name the two working
+forms.
+
+Who the caller is, and where that is read from:
+
+- `CORRAL_OWNER` wins when it is declared;
+- otherwise process ancestry — `proc:<comm>:<pid>:<starttime>` — read from `/proc` on
+  Linux and from `ProcessHandle` on Windows/macOS, with `user:$USER` as the floor;
+- where `/proc` is unreadable (macOS; Windows never installs the bash wrapper) the PATH
+  wrapper delegates its identity to `corral owner` — one JVM spawn per adb call, because
+  the owner is computed before the pin — so wrapper and CLI still agree, and
+  `user:$USER` if `corral` is off `PATH`. The wrapper needs bash 4+ (stock macOS
+  `/bin/bash` is 3.2), and the Windows `.bat` twin instead delegates to `corral gate`
+  and fails closed when `corral` is not on `PATH`;
+- the `shell_skip` / `init_floor` lists live in the same editable rules file as the gate
+  lists; a file from an older install without those keys keeps the built-in defaults;
+- the pid is only a liveness *hint*, recorded when the process actually spans the work —
+  so a harness whose session outlives a single process (per-prompt or per-tool-call)
+  sets `CORRAL_OWNER` and gets a durable identity.
+
+Self-healing: while the daemon runs it checks the SDK adb shim every 10 seconds and
+restores it after an SDK update, keeping the updated binary as `adb.real`; if the daemon
+was stopped when the SDK updated, it heals at the next start. It also restores a missing
+or blank `~/.config/corral/rules` from the jar default.
+
+`corral doctor` reports each layer it can inspect — `daemon`, `sdk-shim` and `rules`,
+plus `emulators` while an AVD is wedged — and `GET /api/doctor` mirrors it read-only. The
+`rules` layer reports `warn` when a hand-edited `readonly` holds a non-host-only command
+or the identity lists differ from the defaults. An empty pool stays `ok`, but the
+`daemon` layer (and `corral doctor`) then adds a hint that an `adb reconnect` can leave
+the adb server's device list empty until the server is restarted, with the
+`adb kill-server && adb start-server` recovery — so zero devices no longer reads as only
+"nothing is plugged in". It cannot see whether the Gradle `init.d` script is installed
+(see [Gradle builds](#gradle-builds)); re-running the installer or `corral update --apply`
+is the manual fallback, not a routine step after an SDK update.
+
+### HTTP, WebSocket and MCP
+
+- **Screenshot** — `GET /api/devices/{serial}/screenshot?owner=O` returns a PNG
+  (`adb -s <serial> exec-out screencap -p`, single-flight per serial with a 1 s
+  coalescing window). Strict by default: only the lease holder may read; an owner listed
+  in `CORRAL_SCREENSHOT_OBSERVERS` (empty unless configured — the console opts in), or
+  anyone when `CORRAL_SCREENSHOTS=open`, is also allowed. Observer names are
+  case-sensitive. Strict mode answers `403` for any serial the caller may not read,
+  including unknown or unusable ones (no existence leak); `404` and `502` apply once
+  access is allowed. The MCP `screenshot` tool returns an image content block, and
+  `corral screenshot <serial> [--out F]` writes the file.
+- **Events** — `GET /ws/events` streams a `hello` frame and then additive `state.changed`
+  nudges: `{"type","resources","seq"}`, with resources `devices` and `queue`. A client
+  ignores unknown types, refetches on an unknown resource, and treats a seq gap after a
+  reconnect as refetch-all. `corral events` prints the frames as raw JSON.
+- **MCP** — the lease API over streamable HTTP at `/mcp` as eight tools: `list_devices`,
+  `queue`, `claim`, `free`, `renew`, `screenshot`, `start_emulator`, `stop_emulator`,
+  with one identity per MCP session. `claim` with `waitSeconds > 0` returns a ticket;
+  re-call `claim` with that ticket to pick up the device. Each ticket carries a poll
+  cadence (MCP advertises 5 s; a client may propose its own, clamped to 1–10 s) and the
+  accepted value comes back in `retryAfterMs`.
+- **Origin checks** — every mutating route (claim, ticket, free, renew, emulator
+  start/stop, config) rejects an `Origin` that is not loopback, or whose port differs
+  from the request's `Host`, with `403`.
+
+### The config API
+
+`GET /api/config` reports every daemon knob with its **effective** value, its built-in
+default and a `restartRequired` flag, plus the gate rules, the `rules` / `daemon.env`
+paths and the update source. An unusable file value falls through to inherited
+environment, then the built-in default.
+
+`PUT /api/config` validates the whole payload before writing anything: an unknown setting
+key is refused with a `400` that names the accepted ones, `CORRAL_REPO` is refused with a
+read-only message, control characters are rejected, settings paths are checked, and the
+port must be 1024–65535 — so a bad request is a `400` and writes nothing. A rules entry
+that cannot round-trip through the rules file (whitespace, `,`, `#`, `=`) is refused, as
+is a `valueflags` entry without a leading dash. Over the API `readonly` is an
+**allowlist** of host-only commands (`devices`, `start-server`, `kill-server`,
+`track-devices`, `version`, `help`), and `shell_skip` / `init_floor` are file-only: any
+submitted change is refused, including a revert to the defaults, so edit
+`~/.config/corral/rules` directly for a device-touching exemption or an identity change.
+A rules `PUT` is idempotent for `GET`→`PUT`: a list equal to the file's current list, or
+an empty list, means "no change", so a save on a hand-edited host works; otherwise
+`readonly` / `valueflags` replace the whole list.
+
+The response is honest about scope: `restartRequired` covers settings, while `rulesLive`
+marks rules the wrapper reads live. Startup logs and falls back (rather than exiting) on
+an unusable `daemon.env` value, and the installer seeds that file absent-only, so a fresh
+host still starts.
+
+## Repository shape and build
+
+Four Gradle modules, one repository:
+
+- `corral-common` — the DTOs the daemon, CLI and console share (pure Kotlin +
+  kotlinx-serialization, KMP-ready, no `java.*`);
+- `corral-update` — the release-apply gate: download, verify the published `.sha256`,
+  then run the bundle's `install.sh`. Zero dependencies, shared by the daemon's CLI and
+  the console, so one module owns the security-critical check;
+- `corral-daemon` — the headless Kotlin/Ktor daemon (`java -jar`, OS-agnostic: leases,
+  HTTP/WS/MCP API, SQLite, emulator control) and the `corral` CLI;
+- `corral-ui` — the Compose Desktop operator console.
+
+```sh
+./gradlew test                        # all four modules; offline, no adb, no device
+./gradlew :corral-daemon:shadowJar    # -> corral-daemon/build/libs/corral-daemon-all.jar
+./gradlew :corral-ui:shadowJar        # -> corral-ui/build/libs/corral-ui-all.jar
+scripts/make-installer.sh             # build both jars and mirror scripts/ + docs into the bundle
+scripts/make-installer.sh --check     # report bundle drift, write nothing
+```
+
+`scripts/test_wrapper.sh` drives the gate through the bundled wrapper,
+`SLOW=1 scripts/test_e2e.sh` runs the daemon end to end against fake devices, and
+`scripts/test_install.sh` installs into a sandbox home; CI runs all three plus both
+shadow jars and the bundle drift check.
+
+The tree is feature-complete for a first release, and every finding from 52 independent
+review passes is closed.
+
+`scripts/install.sh` and the self-contained `corral-installer/` bundle are the two install
+paths on a Linux host, or Windows goes through the installer's Windows branch (see
+[Windows](#windows)). The installer manages the components it installed — the daemon unit
+or Scheduled Task, the shims, the SDK adb shim on POSIX, the Gradle gate, the agent skill
+and the optional console; `--uninstall` removes what is still its own and names edited
+files under "Left alone".

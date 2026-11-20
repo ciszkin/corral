@@ -791,7 +791,7 @@ object CorralCli {
         when (args.firstOrNull() ?: "help") {
             // Version is answered from the jar's own resource, with no daemon and no device.
             "--version", "-V" -> { println(VersionSource.version); exitProcess(0) }
-            "demo" -> exitProcess(runDemo(args.drop(1)))
+            "demo" -> exitProcess(runDemo(args.drop(1), demoOutput()))
             "devices" -> println(get("/api/devices"))
             "status" -> println(get("/api/status"))
             "owner" -> println(owner)
@@ -1153,7 +1153,7 @@ object CorralCli {
             "|gate [--owner o] -- <adb args>" +
             "|screenshot <serial> [--out F]|events" +
             "|avd [list|start A|stop A [--force]]" +
-            "|demo [--port P] [--keep] [--home DIR] | --clean" +
+            "|demo [--port P] [--speed X] [--loop] [--no-script] [--keep] [--plain] [--home DIR] | --clean" +
             "\n  selector: --serial S --model M --os V(min) --type usb|wifi|emulator --avd A")
         exitProcess(code)
     }

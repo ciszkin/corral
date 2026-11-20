@@ -1,0 +1,24 @@
+{
+  "_comment": "corral demo narrative (plan §8). `at` is the wall-clock second at --speed 1; `--speed X` divides the beat delays only, never a lease, a boot or a TTL. The beat ids are handled by DemoNarrative; timing and wording live here so the script can be tuned without touching the logic. The three working names are (demo)-labelled wherever a human reads them.",
+  "serial": "DEMO01234567",
+  "avd": "DemoAVD",
+  "agentA": "demo:agent-a",
+  "agentB": "demo:agent-b",
+  "agentC": "demo:agent-c",
+  "ttlSeconds": 60,
+  "queueSeconds": 30,
+  "beats": [
+    {"at": 0, "beat": "devices", "title": "devices",
+     "note": "a booting emulator is listed but cannot be claimed or offered"},
+    {"at": 2, "beat": "claim", "title": "demo:agent-a claims the USB device",
+     "note": "simulated work: ./gradlew :app:connectedDemoDebugAndroidTest (nothing is spawned)"},
+    {"at": 5, "beat": "deny", "title": "demo:agent-b asks for the same device"},
+    {"at": 8, "beat": "queue", "title": "demo:agent-b queues and holds (FIFO)"},
+    {"at": 12, "beat": "hint", "title": "watch it live in the console"},
+    {"at": 15, "beat": "release", "title": "demo:agent-a's work exits - the ticket is served",
+     "note": "simulated work for demo:agent-b: ./gradlew :app:test (nothing is spawned)"},
+    {"at": 20, "beat": "work-end", "title": "demo:agent-b's work exits"},
+    {"at": 21, "beat": "avd", "title": "an emulator boots behind a queued ticket"},
+    {"at": 28, "beat": "summary", "title": "summary"}
+  ]
+}

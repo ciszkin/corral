@@ -45,8 +45,23 @@ class DemoWorldTest {
         assertEquals("192.168.1.50:5555", wifi.serial, "a wifi serial keeps its real shape")
         val emu = devices.first { it.transport == "emulator" }
         assertFalse(emu.booted, "an emulator the world has not booted must not be claimable")
-        assertEquals("DemoAVD", emu.avd)
+        assertNull(emu.avd, "an emulator that has not booted cannot name its AVD: real `emu avd name` needs an online device")
         assertEquals(listOf("DemoAVD", "DemoTabletAVD"), w.list())
+    }
+
+    @Test fun theShippedWorldPairsUnbootedEmulatorsWithTheirAvdSoAStartCanCreateTheInstance() {
+        val shipped = DemoWorld::class.java.getResourceAsStream("/demo/world.json")!!.bufferedReader().use { it.readText() }
+        var clock = 0L
+        val w = world(shipped) { clock }
+        assertTrue(w.start("DemoAVD"), "the AVD is in the world even though no booted device names it")
+        val emu = w.devices.first { it.transport == "emulator" }
+        assertEquals("emulator-5554", emu.serial)
+        assertEquals("DemoAVD", emu.avd, "a started AVD takes its instance")
+        assertEquals("sdk_gphone64 (demo)", emu.model)
+        assertFalse(emu.booted, "a fresh boot starts unbooted")
+        clock += 6_000
+        assertTrue(w.refresh())
+        assertTrue(w.devices.first { it.transport == "emulator" }.booted)
     }
 
     @Test fun bootFlipIsAValueNotASleep() {

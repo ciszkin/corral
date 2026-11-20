@@ -4,6 +4,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.decodeFromString
+import java.io.FileDescriptor
+import java.io.FileOutputStream
 import java.io.PrintStream
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -11,6 +13,7 @@ import java.net.URI
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.Duration
@@ -21,13 +24,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.system.exitProcess
 
 /*
- * `corral demo` - a supervised, isolated demo daemon (plan §5). This file owns the supervisor and
- * the two daemon-side demo helpers; the pool/screenshot/emulator simulation itself is DemoWorld.
+ * `corral demo` - a supervised, isolated demo daemon (plan §5) and its narrative (plan §8). This
+ * file owns the supervisor, the demo home and the two daemon-side demo helpers; the pool/screenshot/
+ * emulator simulation is DemoWorld and the scripted beats are DemoNarrative.
  *
  * The supervisor never touches a device, a gate or the real home. It creates a home under the JVM's
  * temp directory, spawns the same jar with `CORRAL_DEMO=1` and a `-Duser.home` pointing at that
- * home, and removes the home on a graceful stop. Everything it writes carries the marker below, so
- * `--clean` can never remove a directory it did not create (I10).
+ * home, drives the narrative over loopback HTTP, and removes the home when the demo ends.
+ * Everything it writes carries the marker below, so `--clean` can never remove a directory it did
+ * not create (I10).
  */
 
 /** The plan's default. A real daemon owns 8798 and the wrapper suite owns 8799; the demo scans up. */
@@ -212,13 +217,52 @@ private fun logTail(home: Path, lines: Int = 10): String = runCatching {
     Files.readAllLines(home.resolve("daemon.log")).takeLast(lines).joinToString("\n")
 }.getOrDefault("")
 
-private fun removeTree(dir: Path): Boolean {
-    runCatching {
-        Files.walk(dir).use { walk ->
-            walk.sorted(Comparator.reverseOrder()).forEach { runCatching { Files.deleteIfExists(it) } }
+/**
+ * Remove a demo home: retried, and never left un-marked (review F1).
+ *
+ * On Windows the child's `java.io.tmpdir` is `<home>/tmp`, so sqlite-jdbc's extracted native
+ * library is a *mapped image* the filesystem refuses to unlink the instant the process object
+ * exits. That is a filesystem fact, not a shutdown one — so this waits a moment and tries again
+ * rather than spending more of the child's stop budget. And the marker is the home's provenance:
+ * it is deleted **last**, only once nothing else remains, because a residue that loses its marker
+ * is one `corral demo --clean` can never collect (I10).
+ *
+ * [delete] is the seam the tests use to make a single file refuse to go; it is
+ * `Files.deleteIfExists` everywhere else.
+ */
+internal fun removeTree(dir: Path, attempts: Int = 3, pauseMs: Long = 350,
+                        delete: (Path) -> Unit = { Files.deleteIfExists(it) }): Boolean {
+    if (!Files.exists(dir)) return true
+    val marker = dir.resolve(DEMO_MARKER)
+    repeat(attempts) { attempt ->
+        runCatching {
+            Files.walk(dir).use { walk ->
+                walk.sorted(Comparator.reverseOrder())
+                    .filter { it != dir && it.fileName.toString() != DEMO_MARKER }
+                    .forEach { runCatching { delete(it) } }
+            }
         }
+        // Anything but the marker still inside means the tree did not go: the marker stays. A
+        // listing that fails is read as "something is left", never as "empty, safe to unmark".
+        val residue = runCatching { Files.list(dir).use { s -> s.anyMatch { it != marker } } }.getOrDefault(true)
+        if (!residue) {
+            runCatching { delete(marker) }
+            runCatching { delete(dir) }
+            if (!Files.exists(dir)) return true
+        }
+        if (attempt < attempts - 1) runCatching { Thread.sleep(pauseMs) }
     }
     return !Files.exists(dir)
+}
+
+/**
+ * Remove a home at a lifecycle boundary. [removeTree] retries, so this normally says nothing; a
+ * residue that survives the retries is named, because silence is what made F1 invisible.
+ */
+private fun removeHome(home: Path): Boolean {
+    if (removeTree(home)) return true
+    System.err.println("demo: could not remove $home - its marker stays, so `corral demo --clean` can collect it")
+    return false
 }
 
 /** One demo device in the banner: the serial, the transport, the DEMO-labelled model and readiness. */
@@ -232,18 +276,73 @@ internal fun demoDeviceLine(d: Device): String {
     return "  ${d.serial.padEnd(18)} ${d.transport.padEnd(9)} ${(d.model ?: "?").padEnd(24)}$avd  $ready"
 }
 
+/**
+ * `--speed X` (plan §6): 0.5–4, default 1, and it scales the beat delays only — a lease TTL, an
+ * emulator's boot and the FIFO queue are the daemon's, not the script's. Null means "not a speed",
+ * which the caller turns into exit 2 rather than silently clamping: a typo must not produce a demo
+ * that looks right and runs at the wrong pace.
+ */
+internal fun parseDemoSpeed(raw: String): Double? =
+    raw.trim().toDoubleOrNull()?.takeIf { it >= 0.5 && it <= 4.0 }
+
+/**
+ * The demo's own stdout, pinned to UTF-8. The summary line carries the plan's `·`, and a captured
+ * log on a host whose default charset is not UTF-8 would otherwise keep a `?` where the separator
+ * was. Tests pass their own stream and it is returned untouched.
+ */
+internal fun demoOutput(default: PrintStream = System.out): PrintStream =
+    if (default !== System.out) default
+    else PrintStream(FileOutputStream(FileDescriptor.out), true, StandardCharsets.UTF_8)
+
+/** Everything a cycle needs, so `--loop` can run the same one again with a fresh world. */
+private class DemoOptions(
+    val port: Int,
+    val home: Path?,
+    val keep: Boolean,
+    val loop: Boolean,
+    /** false = `--no-script`: start the world, print where to look, and wait. */
+    val script: Boolean,
+    val plain: Boolean,
+    val speed: Double,
+)
+
+/** The one shutdown hook a demo registers, however many `--loop` cycles it runs. */
+private class DemoHandle {
+    @Volatile var child: Process? = null
+    @Volatile var home: Path? = null
+    @Volatile var keep = false
+    val stopping = AtomicBoolean(false)
+
+    fun shutdown() {
+        stopping.set(true)
+        val c = child ?: return
+        runCatching { c.destroy() }
+        runCatching { if (!c.waitFor(2, TimeUnit.SECONDS)) c.destroyForcibly() }
+        val h = home
+        if (!keep && h != null && removeHome(h)) System.err.println("demo: removed $h")
+    }
+}
+
 private fun usage(out: PrintStream): Int {
-    out.println("usage: corral demo [--port P] [--keep] [--home DIR] | --clean | --help")
-    out.println("  --port P    first port to try (default $DEFAULT_DEMO_PORT; scans +$DEMO_PORT_SCAN for a free one)")
-    out.println("  --keep      leave the demo home in place when the demo stops")
-    out.println("  --home DIR  use DIR as the demo home (refused if it exists without a demo marker, or is a running demo's)")
-    out.println("  --clean     remove demo homes that carry a marker and are not running; names what it leaves")
+    out.println("usage: corral demo [--port P] [--speed X] [--loop] [--no-script] [--keep] [--home DIR] [--plain]")
+    out.println("                  | --clean | --help")
+    out.println("  --port P      first port to try (default $DEFAULT_DEMO_PORT; scans +$DEMO_PORT_SCAN for a free one)")
+    out.println("  --speed X     scale the beat delays by 1/X (0.5-4, default 1); a lease, a boot and a TTL stay real")
+    out.println("  --loop        run the script again with a fresh world each cycle (kiosk, GIF capture)")
+    out.println("  --no-script   start the world, print where to look, and wait (no narrative)")
+    out.println("  --plain       no ANSI colour or cursor movement, for a clean recording")
+    out.println("  --keep        leave the demo home in place when the demo stops")
+    out.println("  --home DIR    use DIR as the demo home (refused if it exists without a demo marker, or is a running demo's)")
+    out.println("  --clean       remove demo homes that carry a marker and are not running; names what it leaves")
     return DEMO_EXIT_USAGE
 }
 
 private fun help(out: PrintStream) {
     out.println("corral demo - a simulated pool. No phones, no adb, no SDK, no network; nothing is installed.")
-    out.println("It starts a second, isolated daemon on a free loopback port and prints where to look.")
+    out.println("It starts a second, isolated daemon on a free loopback port, then plays a ~30 s script:")
+    out.println("a claim, a refusal, a queued ticket that is served when the holder leaves, and an emulator")
+    out.println("that boots behind a waiting ticket. Nothing it shows is a real device; nothing is written")
+    out.println("outside the demo home it prints and removes.")
     usage(out)
 }
 
@@ -278,12 +377,19 @@ internal fun cleanDemoHomes(out: PrintStream, root: Path = demoHomesRoot()): Int
 /**
  * The `corral demo` supervisor (plan §5, §6). Returns the process exit code: 0 ok, 2 usage,
  * 3 no free port / cannot create the home, 4 refused as unsafe.
+ *
+ * One command, one or many cycles: `--loop` repeats [runCycle], each time with a fresh home and
+ * therefore a fresh world — a kiosk cannot inherit the previous run's leases or a booted emulator.
  */
 internal fun runDemo(args: List<String>, out: PrintStream = System.out): Int {
     var requested = DEFAULT_DEMO_PORT
     var homeArg: Path? = null
     var keep = false
     var clean = false
+    var loop = false
+    var noScript = false
+    var plain = false
+    var speed = 1.0
     var i = 0
     while (i < args.size) {
         val a = args[i]
@@ -315,8 +421,24 @@ internal fun runDemo(args: List<String>, out: PrintStream = System.out): Int {
                     return DEMO_EXIT_REFUSED
                 }
             }
+            a == "--speed" || a.startsWith("--speed=") -> {
+                val raw = if (a == "--speed") {
+                    val v = next() ?: run {
+                        System.err.println("corral: --speed needs a value")
+                        return usage(out)
+                    }
+                    i++; v
+                } else a.substringAfter('=')
+                speed = parseDemoSpeed(raw) ?: run {
+                    System.err.println("corral: --speed must be a number in 0.5-4 (got '$raw')")
+                    return DEMO_EXIT_USAGE
+                }
+            }
             a == "--keep" -> keep = true
             a == "--clean" -> clean = true
+            a == "--loop" -> loop = true
+            a == "--no-script" -> noScript = true
+            a == "--plain" -> plain = true
             a == "--help" || a == "-h" -> { help(out); return 0 }
             else -> { System.err.println("corral: unknown demo argument '$a'"); return usage(out) }
         }
@@ -347,6 +469,12 @@ internal fun runDemo(args: List<String>, out: PrintStream = System.out): Int {
             return DEMO_EXIT_REFUSED
         }
     }
+    // A kiosk cycle owns its home: it is created, marked, served from and removed. A fixed --home
+    // would be reused while its database still carries the previous run's leases.
+    if (loop && homeArg != null) {
+        System.err.println("corral: --loop starts a fresh world in a fresh home every cycle; --home fixes one directory, so they cannot be combined")
+        return DEMO_EXIT_USAGE
+    }
 
     val jar = daemonJar() ?: run {
         System.err.println("corral: cannot find the daemon jar to spawn - run the installed `corral` or set CORRAL_JAR")
@@ -357,8 +485,29 @@ internal fun runDemo(args: List<String>, out: PrintStream = System.out): Int {
         System.err.println("corral: no java at $java - cannot start the demo daemon")
         return DEMO_EXIT_SETUP
     }
-    val port = freeDemoPort(requested) ?: run {
-        System.err.println("corral: no free loopback port in $requested..${requested + DEMO_PORT_SCAN}")
+
+    val options = DemoOptions(requested, homeArg, keep, loop, script = !noScript, plain = plain, speed = speed)
+    val handle = DemoHandle()
+    Runtime.getRuntime().addShutdownHook(Thread { handle.shutdown() })
+
+    var cycleNo = 0
+    while (true) {
+        cycleNo++
+        val code = runCycle(options, cycleNo, java, jar, handle, out)
+        if (code != 0 || !options.loop) return code
+    }
+}
+
+/**
+ * One demo: a home, a free port, a daemon, then either the narrative or an idle pool. Returns the
+ * exit code for this cycle (0 when the script finished or a stop was clean).
+ */
+private fun runCycle(options: DemoOptions, cycleNo: Int, java: Path, jar: Path,
+                     handle: DemoHandle, out: PrintStream): Int {
+    val home = options.home
+        ?: demoHomesRoot().resolve(DEMO_HOME_PREFIX + UUID.randomUUID().toString().take(8))
+    val port = freeDemoPort(options.port) ?: run {
+        System.err.println("corral: no free loopback port in ${options.port}..${options.port + DEMO_PORT_SCAN}")
         return DEMO_EXIT_SETUP
     }
 
@@ -368,8 +517,9 @@ internal fun runDemo(args: List<String>, out: PrintStream = System.out): Int {
     }
 
     out.println("corral demo - a simulated pool. No phones, no adb, no SDK, no network; nothing is installed.")
+    if (options.loop) out.println("demo: cycle $cycleNo - a fresh world")
     out.println("demo: home $home")
-    if (port != requested) out.println("demo: port $requested is busy; using $port")
+    if (port != options.port) out.println("demo: port ${options.port} is busy; using $port")
     out.println("demo: port $port")
 
     val supervisor = ProcessHandle.current().pid()
@@ -382,46 +532,75 @@ internal fun runDemo(args: List<String>, out: PrintStream = System.out): Int {
     val started = System.currentTimeMillis()
     val child = runCatching { builder.start() }.getOrElse {
         System.err.println("corral: cannot start the demo daemon: ${it.message}")
-        if (!keep) removeTree(home)
+        if (!options.keep) removeTree(home)
         return DEMO_EXIT_SETUP
     }
     runCatching {
         Files.writeString(home.resolve(DEMO_MARKER),
             DemoMarker(supervisor, child.pid(), port, started).render(VersionSource.version))
     }
-
-    val stopping = AtomicBoolean(false)
-    Runtime.getRuntime().addShutdownHook(Thread {
-        stopping.set(true)
-        runCatching { child.destroy() }
-        runCatching { if (!child.waitFor(2, TimeUnit.SECONDS)) child.destroyForcibly() }
-        if (!keep && removeTree(home)) System.err.println("demo: removed $home")
-    })
+    handle.child = child
+    handle.home = home
+    handle.keep = options.keep
 
     val url = "http://127.0.0.1:$port"
     val devices = awaitDevices(url, child) ?: run {
         System.err.println("corral: the demo daemon did not answer on $url - its log said:")
         logTail(home).lineSequence().forEach { System.err.println("  $it") }
         runCatching { child.destroyForcibly() }
-        if (!keep) removeTree(home)
+        if (!options.keep) removeHome(home)
         return DEMO_EXIT_SETUP
     }
     out.println("demo: daemon up in ${System.currentTimeMillis() - started} ms (pid ${child.pid()})")
-    val emulatorDown = devices.count { !it.booted && it.transport == "emulator" }
-    out.println("DEMO pool - ${devices.size} simulated device(s), $emulatorDown waiting on a boot:")
-    devices.forEach { out.println(demoDeviceLine(it)) }
     out.println("demo: log ${home.resolve("daemon.log")}")
-    out.println("demo: CLI  CORRAL_URL=$url corral devices")
-    out.println("demo: console  corral-ui --url $url")
-    out.println("demo: press Ctrl-C to stop" + if (keep) " (--keep: the home is left in place)" else " and remove this home")
 
-    while (child.isAlive) Thread.sleep(200)
-    if (!stopping.get()) {
-        System.err.println("corral: the demo daemon exited (code ${runCatching { child.exitValue() }.getOrDefault(-1)}) - see ${home.resolve("daemon.log")}")
-        if (!keep) removeTree(home)
+    // --no-script: the world, where to look, and a wait. The pool table is the whole first screen.
+    if (!options.script) {
+        val emulatorDown = devices.count { !it.booted && it.transport == "emulator" }
+        out.println("DEMO pool - ${devices.size} simulated device(s), $emulatorDown waiting on a boot:")
+        devices.forEach { out.println(demoDeviceLine(it)) }
+        out.println("demo: CLI  CORRAL_URL=$url corral devices")
+        out.println("demo: console  corral-ui --url $url")
+        out.println("demo: press Ctrl-C to stop" +
+            if (options.keep) " (--keep: the home is left in place)" else " and remove this home")
+        while (child.isAlive) Thread.sleep(200)
+        return afterChildExit(child, home, options.keep, handle)
+    }
+
+    // A recording (or a log) must read as text: --plain, NO_COLOR, or a redirected stdout all mean
+    // the same thing, and only a real terminal gets colour.
+    val plain = options.plain || System.getenv("NO_COLOR") != null || System.console() == null
+    val narrative = DemoNarrative(HttpDemoTransport(url), DemoConsole(out, plain), url, options.speed)
+    runCatching { narrative.run() }.onFailure {
+        System.err.println("corral: the demo script stopped at ${it.message ?: "an unknown failure"}")
+        System.err.println("demo: the daemon's log is ${home.resolve("daemon.log")}")
+        logTail(home, 8).lineSequence().forEach { line -> System.err.println("  $line") }
+        stopChild(child, home, options.keep)
+        handle.child = null; handle.home = null
         return 1
     }
+    // The script is the demo: it ends, and so does the daemon. An idle pool is `--no-script`.
+    stopChild(child, home, options.keep)
+    handle.child = null; handle.home = null
     return 0
+}
+
+/** Stop a cycle's daemon and remove its home unless `--keep`; never leaves a JVM behind. */
+private fun stopChild(child: Process, home: Path, keep: Boolean) {
+    runCatching { child.destroy() }
+    runCatching { if (!child.waitFor(2, TimeUnit.SECONDS)) child.destroyForcibly() }
+    if (!keep) removeHome(home)
+}
+
+/** The exit code after an idle (`--no-script` / `--loop`) daemon went away on its own. */
+private fun afterChildExit(child: Process, home: Path, keep: Boolean, handle: DemoHandle): Int {
+    handle.child = null
+    if (handle.stopping.get()) return 0
+    System.err.println("corral: the demo daemon exited (code ${runCatching { child.exitValue() }.getOrDefault(-1)})" +
+        " - see ${home.resolve("daemon.log")}")
+    if (!keep) removeHome(home)
+    handle.home = null
+    return 1
 }
 
 /** Poll `/api/devices` until the demo daemon answers (bounded 15 s) — never a fixed sleep. */

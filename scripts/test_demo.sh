@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
-# corral demo-mode suite — the isolation contract for `corral demo` (plan §14 rows D2–D8, D11).
+# corral demo-mode suite — the isolation contract for `corral demo` (plan §14 rows D1–D14).
 #
 # `corral demo` supervises a second, isolated daemon whose pool is in-JVM. These rows are the
-# safety contract, one per invariant:
+# safety contract, one per invariant, and the narrative contract, one per observable beat:
+#   D1  G2  a cold start on a PATH with no adb/SDK runs the whole script: exit 0, first beat ≤3 s,
+#           full script ≤35 s, no external binary ran
+#   D1b S3  the three per-device screens are really different pictures, not one placeholder
 #   D2  I1  no external binary is ever executed (booby-trapped PATH: adb, emulator, scrcpy, gradle)
 #   D3  I2  the SDK platform-tools/adb shim is never touched, even with an absolute CORRAL_ADB
 #   D4  I3  nothing in the real ~/.corral or ~/.config/corral is read-modified or created
@@ -13,6 +16,15 @@
 #   D8  I6  a busy port moves the demo to the next free one; two demos run side by side
 #   D11 I10 SIGINT stops it (POSIX only: Git Bash cannot signal a native JVM), a killed supervisor
 #           leaves no daemon JVM, and cleanup removes marked homes only
+#   D12 G2  --speed 2 halves the wall clock without changing what happened; --no-script idles cleanly
+#   D14 S3  the denial line and the FIFO handoff are the real daemon's, byte for byte
+#   D15 S3  --loop restarts the narrative with a fresh world (kiosk / GIF capture)
+#   D16 S3  a finished narrative really removes the home it printed, and a stranded marked home is
+#           still collectable by --clean (the Windows native-library residue, review F1)
+#
+# The isolation rows (D2–D11) start the demo with --no-script: they are about what the daemon may
+# touch, not about the narrative, and a 30 s script would only make them slower and flakier.
+# The narrative rows own their ports (8901–8912), which no other suite uses.
 #
 # Isolation mirrors scripts/test_e2e.sh: a mktemp tree, `-Duser.home` at a sandbox, `-Djava.io.tmpdir`
 # at a private home directory, kill by exact pid. Nothing here starts, stops or installs the real
@@ -60,6 +72,8 @@ fi
 npath() { cygpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
 upath() { cygpath -u "$1" 2>/dev/null || printf '%s' "$1"; }
 JAVA_BIN="${JAVA_HOME:+$JAVA_HOME/bin/java}"; JAVA_BIN=${JAVA_BIN:-java}
+# D1 runs with a PATH that carries nothing but decoys, so the java binary must be absolute by then.
+case "$JAVA_BIN" in */*) ;; *) JAVA_BIN=$(command -v java 2>/dev/null || printf '%s' "$JAVA_BIN");; esac
 
 TMP=$(mktemp -d)
 TMPW=$(npath "$TMP")
@@ -154,7 +168,7 @@ marker_get() { # marker_get <home> <key>
   sed -n "s/^$2=//p" "$1/.corral-demo" 2>/dev/null | head -1
 }
 
-demo_start() { # demo_start [args...]: launch the supervisor, return once its daemon answers
+demo_start() { # demo_start [args...]: launch the supervisor (isolation rows: --no-script), return once its daemon answers
   : > "$DEMO_LOG"
   # A non-interactive bash sets SIGINT to SIG_IGN in an asynchronous child and the JVM inherits that
   # disposition, so `kill -INT` on it is dropped on the floor: D11a then times its own poll loop
@@ -166,7 +180,7 @@ demo_start() { # demo_start [args...]: launch the supervisor, return once its da
   [ "$posix_signals" = 1 ] && set -m
   PATH="$TRAP:$PATH" HOME="$SBX" \
     "$JAVA_BIN" -Duser.home="$SBXW" -Djava.io.tmpdir="$(npath "$DEMOHOMES")" -cp "$JAR" dev.corral.CorralCli \
-      demo "$@" >>"$DEMO_LOG" 2>&1 &
+      demo --no-script "$@" >>"$DEMO_LOG" 2>&1 &
   DEMO_PID=$!
   [ "$posix_signals" = 1 ] && set +m
   local i
@@ -199,6 +213,75 @@ demo_stop() {
 demo_cli() { # demo_cli <url> <args...>: the CLI against a given daemon
   local url="$1"; shift
   HOME="$SBX" CORRAL_URL="$url" "$JAVA_BIN" -Duser.home="$SBXW" -cp "$JAR" dev.corral.CorralCli "$@"
+}
+demo_cli_as() { # demo_cli_as <owner> <url> <args...>: same CLI, declared owner (CORRAL_OWNER wins in resolveOwner)
+  local owner="$1" url="$2"; shift 2
+  HOME="$SBX" CORRAL_URL="$url" CORRAL_OWNER="$owner" \
+    "$JAVA_BIN" -Duser.home="$SBXW" -cp "$JAR" dev.corral.CorralCli "$@"
+}
+
+now_ns() { date +%s%N; }
+# The same text in UTF-8. A Windows JVM writes its stderr in the ANSI code page while the demo pins
+# its own output to UTF-8, so D14 compares text, not bytes-on-a-Windows-console: on POSIX both sides
+# are already UTF-8 and this is a no-op.
+to_utf8() { # to_utf8 <file>
+  if ! command -v iconv >/dev/null 2>&1; then cat "$1"; return 0; fi
+  if iconv -f UTF-8 -t UTF-8 "$1" >/dev/null 2>&1; then cat "$1"
+  else iconv -f CP1252 -t UTF-8 "$1" 2>/dev/null || cat "$1"; fi
+}
+# Run the narrative to completion and time it, because G2 is a promise about wall time and only a
+# real run can keep it. Sets SCRIPT_RC, SCRIPT_FIRST_MS (invocation -> the banner, which is the
+# plan's t=0 beat), SCRIPT_BEAT1_MS (invocation -> the first narrative beat, which needs the child
+# daemon up) and SCRIPT_TOTAL_MS (invocation -> exit). PATH carries the decoys only: no adb, no SDK,
+# no gradle — a beat that reached for one would hit a trap script (D2's markers) and fail here.
+demo_script_run() { # demo_script_run <log> [args...]
+  local log="$1"; shift
+  : > "$log"
+  local t0; t0=$(now_ns)
+  PATH="$TRAP" HOME="$SBX" \
+    "$JAVA_BIN" -Duser.home="$SBXW" -Djava.io.tmpdir="$(npath "$DEMOHOMES")" -cp "$JAR" dev.corral.CorralCli \
+      demo --plain "$@" </dev/null >>"$log" 2>&1 &
+  local pid=$!
+  local i banner="" beat1=""
+  for i in $(seq 1 400); do
+    if [ -z "$banner" ] && grep -qa '^corral demo - ' "$log" 2>/dev/null; then banner=$(now_ns); fi
+    if [ -n "$banner" ] && grep -qa '^-- beat 1' "$log" 2>/dev/null; then beat1=$(now_ns); break; fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.05
+  done
+  SCRIPT_RC=0; wait "$pid" || SCRIPT_RC=$?
+  local t1; t1=$(now_ns)
+  SCRIPT_TOTAL_MS=$(( (t1 - t0) / 1000000 ))
+  if [ -n "$banner" ]; then SCRIPT_FIRST_MS=$(( (banner - t0) / 1000000 )); else SCRIPT_FIRST_MS=-1; fi
+  if [ -n "$beat1" ]; then SCRIPT_BEAT1_MS=$(( (beat1 - t0) / 1000000 )); else SCRIPT_BEAT1_MS=-1; fi
+  return 0
+}
+
+# The FIFO handoff, observed the same way on any daemon (demo or real): one owner holds, a second
+# owner waits, the hold is released, the waiter is served. Emits a line that can be compared
+# byte-for-byte, so a demo that invented its own queue would fail D14.
+queue_probe() { # queue_probe <url> <serial>
+  local url="$1" serial="$2" port="${1##*:}"
+  demo_cli_as demo:agent-a "$url" claim "$serial" >/dev/null 2>&1 || { echo "claim-failed"; return 0; }
+  : > "$TMP/wait.out"
+  ( demo_cli_as demo:agent-b "$url" wait --timeout 20 --serial "$serial" >"$TMP/wait.out" 2>&1 ) &
+  local wpid=$!
+  local seen="" i
+  for i in $(seq 1 60); do
+    seen=$(api_body "$port" "/api/queue")
+    case "$seen" in *'"position":1'*) break;; esac
+    sleep 0.1
+  done
+  local pos sel keys
+  pos=$(printf '%s' "$seen" | grep -o '"position":[0-9]*' | head -1)
+  sel=$(printf '%s' "$seen" | grep -o '"selector":"[^"]*"' | head -1)
+  keys=$(printf '%s' "$seen" | grep -o '"[a-zA-Z]*":' | sort -u | tr -d '\n')
+  demo_cli_as demo:agent-a "$url" free "$serial" >/dev/null 2>&1 || true
+  wait "$wpid" 2>/dev/null || true
+  local served after
+  served=$(tr -d '\r' < "$TMP/wait.out" | head -1)
+  after=$(api_body "$port" "/api/queue" | tr -d ' ')
+  printf 'pos=%s sel=%s keys=%s served=%s empty=%s\n' "$pos" "$sel" "$keys" "$served" "$after"
 }
 
 # Seeded "real home": the files I3 names. Every row that starts a demo runs against this sandbox.
@@ -233,6 +316,63 @@ REAL_DB="$REAL_DIR/corral.db"
 for p in 8798 8799 8841; do
   api_ok "$p" && note "something already answers on $p; no row will disturb it"
 done
+
+# ---------------------------------------------------------------------------------------------
+# D1 (G2) — the whole point of the feature: a cold start on a machine with no adb and no SDK runs
+# the script from the banner to the summary. Timings are measured, not assumed: the first beat must
+# be visible within 3 s and the whole script must finish within 35 s at --speed 1.
+# ---------------------------------------------------------------------------------------------
+d1_cold_start_runs_the_script() {
+  demo_script_run "$TMP/d1.log" --speed 1 --port 8901 || return 1
+  local log="$TMP/d1.log" beats
+  beats=$(grep -c '^-- beat ' "$log" 2>/dev/null || true); beats=${beats:-0}
+  [ "$SCRIPT_RC" = 0 ] || { note "corral demo exited $SCRIPT_RC:"; tail -8 "$log" | sed 's/^/    /'; return 1; }
+  [ "$beats" = 9 ] || { note "the script ran $beats beat(s), expected 9:"; grep '^-- beat ' "$log" | sed 's/^/    /'; return 1; }
+  grep -q '^3 leases · 1 denial · 2 queue handoffs · 0 real devices touched$' "$log" || {
+    note "the summary line is missing or wrong:"; grep 'leases' "$log" | sed 's/^/    /'; return 1; }
+  grep -q 'served to demo:agent-b' "$log" || { note "the claim released by demo:agent-a never served demo:agent-b's ticket"; return 1; }
+  grep -q 'boot flip' "$log" || { note "the emulator never flipped to booted inside the script"; return 1; }
+  grep -q 'served to demo:agent-c' "$log" || { note "the boot flip never served the queued emulator ticket"; return 1; }
+  [ ! -f "$HITS" ] || { note "an external binary ran during the script: $(head -3 "$HITS" | tr '\n' ';')"; return 1; }
+  LC_ALL=C grep -q "$(printf '\033')" "$log" && { note "--plain still emitted ANSI escapes"; return 1; }
+  [ "$SCRIPT_FIRST_MS" -ge 0 ] || { note "the demo never printed its banner:"; tail -8 "$log" | sed 's/^/    /'; return 1; }
+  [ "$SCRIPT_FIRST_MS" -le 3000 ] || { note "the banner took ${SCRIPT_FIRST_MS}ms (G2 allows 3000)"; return 1; }
+  [ "$SCRIPT_BEAT1_MS" -le 8000 ] || { note "the first narrative beat took ${SCRIPT_BEAT1_MS}ms - the demo daemon is too slow to answer"; return 1; }
+  [ "$SCRIPT_TOTAL_MS" -le 35000 ] || { note "the full script took ${SCRIPT_TOTAL_MS}ms (G2 allows 35000)"; return 1; }
+  # G2 is measured from invocation to the first beat: the plan's t=0 row is the banner + devices, and
+  # the banner is what a visitor sees. The narrative's first beat needs the child daemon up, so its
+  # time is reported next to it (a JVM start and a Ktor bind dominate it; on Linux both are ~1 s).
+  note "banner ${SCRIPT_FIRST_MS}ms, first beat ${SCRIPT_BEAT1_MS}ms, full script ${SCRIPT_TOTAL_MS}ms at --speed 1"
+  printf '%s\n' "$SCRIPT_TOTAL_MS" > "$TMP/d1.total_ms"
+  return 0
+}
+check "D1 a cold start with no adb/SDK runs the whole script: exit 0, banner <=3 s, script <=35 s" d1_cold_start_runs_the_script
+
+# ---------------------------------------------------------------------------------------------
+# D1b (S3) — three devices, three different pictures. One placeholder served for every serial would
+# make the console's device list look like a bug; distinct PNGs are the point of the screens map.
+# ---------------------------------------------------------------------------------------------
+d1b_per_device_screens() {
+  demo_start --port 8902 || return 1
+  local url="http://127.0.0.1:$DEMO_PORT" s f magic size sigs="" sizes="" i=0 bad=""
+  for s in DEMO01234567 192.168.1.50:5555 emulator-5554; do
+    i=$((i + 1)); f="$TMP/screen-$i.png"
+    curl -s --max-time 3 -o "$f" "$url/api/devices/$s/screenshot?owner=corral-ui" 2>/dev/null || true
+    if [ ! -s "$f" ]; then bad="$bad $s(no bytes)"; continue; fi
+    magic=$(od -An -tx1 -N4 "$f" | tr -d ' \n')
+    size=$(wc -c < "$f" | tr -d ' ')
+    [ "$magic" = "89504e47" ] || bad="$bad $s(not a PNG: $magic)"
+    [ "$size" -le 61440 ] || bad="$bad $s(${size}B over the 60KB budget)"
+    sigs="$sigs $(hash_of "$f")"; sizes="$sizes $s=${size}B"
+  done
+  demo_stop
+  [ -z "$bad" ] || { note "screens:$bad"; return 1; }
+  local distinct; distinct=$(printf '%s\n' $sigs | sort -u | wc -l | tr -d ' ')
+  [ "$distinct" = 3 ] || { note "the three devices served $distinct distinct screen(s), expected 3"; return 1; }
+  note "screens:$sizes"
+  return 0
+}
+check "D1b each demo device serves its own pre-baked PNG screen (3 distinct, <=60 KB each)" d1b_per_device_screens
 
 # ---------------------------------------------------------------------------------------------
 # D2 (I1) — booby-trapped PATH: no adb/emulator/scrcpy/gradle may ever run, and the demo must
@@ -441,7 +581,7 @@ d8_busy_port_and_concurrent_demos() {
   : > "$TMP/demo2.log"
   PATH="$TRAP:$PATH" HOME="$SBX" \
     "$JAVA_BIN" -Duser.home="$SBXW" -Djava.io.tmpdir="$(npath "$DEMOHOMES")" -cp "$JAR" dev.corral.CorralCli \
-      demo --port 8841 >>"$TMP/demo2.log" 2>&1 &
+      demo --no-script --port 8841 >>"$TMP/demo2.log" 2>&1 &
   local second_pid=$!
   local i; for i in $(seq 1 150); do grep -q '^demo: port ' "$TMP/demo2.log" 2>/dev/null && break; sleep 0.1; done
   local second_port; second_port=$(sed -n 's/^demo: port \([0-9][0-9]*\)$/\1/p' "$TMP/demo2.log" | head -1)
@@ -555,6 +695,180 @@ d11c_keep_and_clean() {
   return 0
 }
 check "D11c --keep retains the home; --clean removes marked homes only and names foreign ones" d11c_keep_and_clean
+
+# ---------------------------------------------------------------------------------------------
+# D12 (G2) — `--speed X` scales beat delays only, never lease semantics: the same three leases, the
+# same denial and the same two handoffs, in materially less wall time. `--no-script` starts the world
+# and idles, which is what an operator poking at the pool needs.
+#
+# The comparison is against D1's measured run, and the ceiling is 75% rather than 50% on purpose:
+# an emulator's boot is a device fact, not a beat delay, so the 6 s boot flip stays in the wall
+# clock at every speed and is the floor under the ratio.
+# ---------------------------------------------------------------------------------------------
+d12_speed_and_no_script() {
+  local bad=0
+  PATH="$TRAP:$PATH" HOME="$SBX" "$JAVA_BIN" -Duser.home="$SBXW" -cp "$JAR" dev.corral.CorralCli \
+    demo --speed 9 --port 8903 >/dev/null 2>&1 || bad=$?
+  [ "$bad" = 2 ] || { note "--speed 9 exited $bad, expected 2 (the plan's range is 0.5-4)"; return 1; }
+
+  demo_script_run "$TMP/d12.log" --speed 2 --port 8903 || return 1
+  [ "$SCRIPT_RC" = 0 ] || { note "the --speed 2 script exited $SCRIPT_RC:"; tail -8 "$TMP/d12.log" | sed 's/^/    /'; return 1; }
+  grep -q '^3 leases · 1 denial · 2 queue handoffs · 0 real devices touched$' "$TMP/d12.log" || {
+    note "--speed 2 changed what happened:"; grep -E 'leases|denied|served' "$TMP/d12.log" | sed 's/^/    /'; return 1; }
+  [ "$SCRIPT_TOTAL_MS" -le 25000 ] || { note "--speed 2 took ${SCRIPT_TOTAL_MS}ms"; return 1; }
+  local d1=""; [ -f "$TMP/d1.total_ms" ] && d1=$(cat "$TMP/d1.total_ms")
+  if [ -n "$d1" ] && [ "$d1" -gt 0 ]; then
+    [ $(( SCRIPT_TOTAL_MS * 100 )) -le $(( d1 * 75 )) ] || {
+      note "--speed 2 took ${SCRIPT_TOTAL_MS}ms against ${d1}ms at --speed 1 (expected <=75%)"; return 1; }
+    note "--speed 1 ${d1}ms, --speed 2 ${SCRIPT_TOTAL_MS}ms"
+  else
+    note "--speed 2 ${SCRIPT_TOTAL_MS}ms (D1's speed-1 baseline is missing, so only the ceiling was checked)"
+  fi
+
+  demo_start --port 8904 || return 1
+  local port="$DEMO_PORT" alive=1 beats
+  sleep 2
+  api_ok "$port" || alive=0
+  beats=$(grep -c '^-- beat ' "$DEMO_LOG" 2>/dev/null || true); beats=${beats:-0}
+  demo_stop
+  local gone=0; wait_api_gone "$port" 30 && gone=1
+  [ "$alive" = 1 ] || { note "--no-script stopped answering within 2 s"; return 1; }
+  [ "$beats" = 0 ] || { note "--no-script ran $beats narrative beat(s)"; return 1; }
+  [ "$gone" = 1 ] || { note "--no-script left its daemon serving on $port"; return 1; }
+  return 0
+}
+check "D12 --speed 2 halves the wall clock with the same beats; --no-script idles cleanly" d12_speed_and_no_script
+
+# ---------------------------------------------------------------------------------------------
+# D14 (S3) — the demo must not have its own vocabulary. Two comparisons against a real daemon:
+#   (a) the denial line, byte for byte (same serial, same holders, the daemon's own 409);
+#   (b) the FIFO handoff, observed identically: the queue entry's shape and position, the serial the
+#       waiter is served, and an empty queue afterwards.
+# A demo that re-worded a denial or faked a queue would pass every other row in this file.
+# ---------------------------------------------------------------------------------------------
+d14_parity_with_a_real_daemon() {
+  demo_script_run "$TMP/d14.log" --speed 4 --port 8905 || return 1
+  local demo_denial
+  demo_denial=$(grep -a -m1 '^corral: no free device matches' "$TMP/d14.log" 2>/dev/null | tr -d '\r' || true)
+  [ "$SCRIPT_RC" = 0 ] || { note "the --speed 4 script exited $SCRIPT_RC:"; tail -8 "$TMP/d14.log" | sed 's/^/    /'; return 1; }
+  [ -n "$demo_denial" ] || { note "the demo never printed a denial line"; tail -8 "$TMP/d14.log" | sed 's/^/    /'; return 1; }
+
+  # a real daemon: same serial, same model shape, same adb fake as the wrapper suite uses
+  local dir="$TMP/d14real"; mkdir -p "$dir"
+  printf 'DEMO01234567 device Pixel_7_(demo) 14\n' > "$dir/devices"
+  printf '#!/bin/sh\necho "d14-adb $*"\n' > "$dir/adb"; chmod +x "$dir/adb"
+  local rport; rport=$(free_port 8911) || { note "no free port in 8911..8931"; return 1; }
+  CORRAL_FAKE_DEVICES="$dir/devices" CORRAL_DB="$dir/corral.db" CORRAL_RULES="$dir/rules" \
+    CORRAL_ENV_FILE="$dir/daemon.env" CORRAL_ADB="$dir/adb" CORRAL_PORT="$rport" CORRAL_UPDATE_CHECK=off \
+    HOME="$SBX" "$JAVA_BIN" -Duser.home="$(npath "$dir")" -jar "$JAR" >>"$TMP/d14real.log" 2>&1 &
+  local rpid=$!
+  wait_api "$rport" || { note "the real daemon never answered on $rport:"; tail -8 "$TMP/d14real.log" | sed 's/^/    /'
+    kill_tree "$rpid"; wait "$rpid" 2>/dev/null; return 1; }
+  local rurl="http://127.0.0.1:$rport"
+  demo_cli_as demo:agent-a "$rurl" claim DEMO01234567 >/dev/null 2>&1
+  demo_cli_as demo:agent-b "$rurl" claim DEMO01234567 >"$TMP/d14real-deny.out" 2>&1
+  local real_denial
+  real_denial=$(to_utf8 "$TMP/d14real-deny.out" | grep -a -m1 '^corral: no free device matches' | tr -d '\r' || true)
+  # the denial half left demo:agent-a holding the device; the queue probe needs a clean start
+  demo_cli_as demo:agent-a "$rurl" free DEMO01234567 >/dev/null 2>&1 || true
+  local real_probe; real_probe=$(queue_probe "$rurl" DEMO01234567)
+  kill_tree "$rpid"; wait "$rpid" 2>/dev/null
+
+  demo_start --port 8906 || return 1
+  local demo_probe; demo_probe=$(queue_probe "http://127.0.0.1:$DEMO_PORT" DEMO01234567)
+  demo_stop
+
+  [ -n "$real_denial" ] || { note "the real daemon printed no denial line: $(head -3 "$TMP/d14real-deny.out")"; return 1; }
+  if [ "$demo_denial" != "$real_denial" ]; then
+    note "the denial text drifted from the real daemon's:"
+    printf '    demo: %s\n    real: %s\n' "$demo_denial" "$real_denial"
+    return 1
+  fi
+  case "$real_probe" in *"served=DEMO01234567"*) ;; *)
+    note "the real daemon's queue probe did not serve the waiter: $real_probe"; return 1;; esac
+  if [ "$demo_probe" != "$real_probe" ]; then
+    note "the FIFO handoff drifted from the real daemon's:"
+    printf '    demo: %s\n    real: %s\n' "$demo_probe" "$real_probe"
+    return 1
+  fi
+  note "queue probe, identical on both: $real_probe"
+  return 0
+}
+check "D14 the denial text and the FIFO handoff are byte-identical to a real daemon's" d14_parity_with_a_real_daemon
+
+# ---------------------------------------------------------------------------------------------
+# D15 (S3) — `--loop` restarts the narrative with a fresh world, which is what a kiosk (or a GIF
+# capture) needs: a second banner must appear, and it must point at a different home.
+# ---------------------------------------------------------------------------------------------
+d15_loop_restarts_with_a_fresh_world() {
+  local log="$TMP/d15.log"; : > "$log"
+  PATH="$TRAP" HOME="$SBX" \
+    "$JAVA_BIN" -Duser.home="$SBXW" -Djava.io.tmpdir="$(npath "$DEMOHOMES")" -cp "$JAR" dev.corral.CorralCli \
+      demo --plain --loop --speed 4 --port 8907 </dev/null >>"$log" 2>&1 &
+  local pid=$!
+  local i seen=0; for i in $(seq 1 450); do
+    seen=$(grep -c '^demo: home ' "$log" 2>/dev/null || true); seen=${seen:-0}
+    [ "$seen" -ge 2 ] && break
+    sleep 0.1
+  done
+  kill_tree "$pid"; wait "$pid" 2>/dev/null
+  local banners homes distinct
+  banners=$(grep -c '^demo: home ' "$log" 2>/dev/null || true); banners=${banners:-0}
+  [ "$banners" -ge 2 ] || { note "--loop ran $banners cycle(s) in 45 s:"; tail -10 "$log" | sed 's/^/    /'; return 1; }
+  homes=$(sed -n 's/^demo: home //p' "$log" | head -2)
+  distinct=$(printf '%s\n' "$homes" | sort -u | wc -l | tr -d ' ')
+  [ "$distinct" = 2 ] || { note "--loop reused the first cycle's home: $homes"; return 1; }
+  return 0
+}
+check "D15 --loop restarts the narrative with a fresh home" d15_loop_restarts_with_a_fresh_world
+
+# ---------------------------------------------------------------------------------------------
+# D16 (I10, review F1) — the home a narrative printed is gone once the narrative exits, and a home
+# that a failed delete stranded is still collectable by `--clean`.
+#
+# Windows only in effect: the child's java.io.tmpdir is <home>/tmp, so sqlite-jdbc's extracted
+# native library is a mapped image the filesystem refuses to unlink the instant the process object
+# exits. The delete must be retried, and a residue that survives it must keep its marker — an
+# un-marked home is one `--clean` can never collect ("not ours to remove"). On POSIX both halves
+# pass trivially; on Windows this row is the regression guard. A narrative run, not `--no-script`:
+# the residue is the *child's* scratch directory, and only a started daemon creates it.
+# ---------------------------------------------------------------------------------------------
+d16_narrative_removes_its_home() {
+  demo_script_run "$TMP/d16.log" --speed 4 --port 8908 || return 1
+  [ "$SCRIPT_RC" = 0 ] || { note "the narrative exited $SCRIPT_RC:"; tail -8 "$TMP/d16.log" | sed 's/^/    /'; return 1; }
+  local home
+  home=$(sed -n 's/^demo: home //p' "$TMP/d16.log" | head -1)
+  [ -n "$home" ] || { note "the narrative printed no home line"; return 1; }
+  home=$(upath "$home")
+  if [ -e "$home" ]; then
+    note "the demo home survived its own run: $home"
+    find "$home" -mindepth 1 2>/dev/null | sed 's/^/    /' | head -6
+    return 1
+  fi
+  note "home removed: $home"
+
+  # A stranded home: exactly what a refusing delete leaves behind (marker + the locked native
+  # library, nobody running). Provenance is the whole reason it stays collectable.
+  local stranded="$DEMOHOMES/corral-demo-stranded"
+  mkdir -p "$stranded/tmp"
+  printf 'sqlite-native-library\n' > "$stranded/tmp/sqlite-3.50.3.0-stranded-sqlitejdbc.dll"
+  printf '# corral demo home - a simulation. Remove it with: corral demo --clean\nmarker=corral-demo\nversion=test\nsupervisor=0\ndaemon=0\nport=8908\ncreated=2026-01-01T00:00:00Z\n' \
+    > "$stranded/.corral-demo"
+  HOME="$SBX" "$JAVA_BIN" -Duser.home="$SBXW" -Djava.io.tmpdir="$(npath "$DEMOHOMES")" -cp "$JAR" \
+    dev.corral.CorralCli demo --clean >"$TMP/d16-clean.out" 2>&1
+  local rc=$?
+  [ "$rc" = 0 ] || { note "--clean exited $rc: $(head -3 "$TMP/d16-clean.out")"; return 1; }
+  [ -e "$stranded" ] && {
+    note "--clean left a marked residue in place: $stranded"
+    sed -n '1,3p' "$TMP/d16-clean.out" | sed 's/^/    /'
+    rm -rf "$stranded"
+    return 1
+  }
+  grep -q "removed.*corral-demo-stranded" "$TMP/d16-clean.out" || {
+    note "--clean did not report collecting the stranded home: $(head -3 "$TMP/d16-clean.out")"; return 1; }
+  return 0
+}
+check "D16 a finished narrative removes its home; --clean collects a stranded marked home" d16_narrative_removes_its_home
 
 # --- summary ----------------------------------------------------------------------------------
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skipped"

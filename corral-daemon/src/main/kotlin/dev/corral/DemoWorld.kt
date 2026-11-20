@@ -22,7 +22,18 @@ internal data class WorldDevice(
 )
 
 /** An AVD the demo can list and boot; [bootSeconds] is the demo's boot-gate delay. */
-@Serializable internal data class WorldAvd(val name: String, val bootSeconds: Long = 6)
+@Serializable internal data class WorldAvd(
+    val name: String,
+    val bootSeconds: Long = 6,
+    /**
+     * The instance this AVD boots as. Only needed when no device entry owns the AVD: an emulator
+     * that has not booted cannot name its AVD in reality (`emu avd name` needs an online device),
+     * so the shipped world declares the pairing here and lets `avd start` create the instance.
+     */
+    val serial: String? = null,
+    val model: String? = null,
+    val osVersion: String? = null,
+)
 
 @Serializable
 internal data class DemoWorldFile(
@@ -99,18 +110,29 @@ internal class DemoWorld(
     override fun list(): List<String>? = file.avds.map { it.name }
 
     override fun start(avd: String): Boolean {
-        // The world's device list is the template for its instance: a stopped AVD can be started
-        // again and gets the same serial back, exactly like a real `avd start`.
+        // Two shapes of template, both from the world file: a device entry that already owns the AVD
+        // (a `stop`bed instance can be started again and gets the same serial back), or the AVD's
+        // own declaration when no device has booted far enough to name it yet.
+        val meta = file.avds.firstOrNull { it.name == avd }
         val template = file.devices.firstOrNull { it.avd == avd }
-            ?: throw EmulatorException("AVD $avd is not in the demo world - edit the demo world file to add it")
+        if (template == null && meta?.serial == null) {
+            throw EmulatorException("AVD $avd is not in the demo world - edit the demo world file to add it")
+        }
         if (isRunning(avd)) return false
         launched += avd
-        val seconds = file.avds.firstOrNull { it.name == avd }?.bootSeconds ?: DEFAULT_BOOT_SECONDS
+        val seconds = meta?.bootSeconds ?: DEFAULT_BOOT_SECONDS
         synchronized(lock) {
             // a start shows the instance unbooted again, exactly like a real cold boot
-            val fresh = deviceOf(template).copy(booted = false)
-            current = if (current.none { it.serial == template.serial }) current + fresh
-            else current.map { if (it.serial == template.serial) fresh else it }
+            val fresh = if (template != null) {
+                deviceOf(template).copy(booted = false)
+            } else {
+                val m = meta!!
+                Device(serial = m.serial!!, state = "device", transport = Device.transportOf(m.serial),
+                    model = m.model, osVersion = m.osVersion, avd = avd, booted = false)
+            }
+            val serial = fresh.serial
+            current = if (current.none { it.serial == serial }) current + fresh
+            else current.map { if (it.serial == serial) fresh else it }
             bootAt[avd] = now() + seconds * 1000
         }
         return true

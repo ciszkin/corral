@@ -35,6 +35,42 @@ class DemoTest {
         assertContains(text, "No phones, no adb, no SDK, no network")
         assertContains(text, "--clean")
         assertContains(text, "--keep")
+        for (flag in listOf("--speed", "--loop", "--no-script", "--plain")) assertContains(text, flag)
+    }
+
+    @Test fun theSpeedFlagAcceptsThePlansRangeAndNothingElse() {
+        assertEquals(0.5, parseDemoSpeed("0.5"))
+        assertEquals(1.0, parseDemoSpeed("1"))
+        assertEquals(4.0, parseDemoSpeed(" 4 "))
+        assertEquals(2.0, parseDemoSpeed("2.0"))
+        assertNull(parseDemoSpeed("0.4"), "below the plan's floor")
+        assertNull(parseDemoSpeed("4.1"), "above the plan's ceiling")
+        assertNull(parseDemoSpeed("fast"))
+        assertNull(parseDemoSpeed(""))
+    }
+
+    @Test fun anOutOfRangeSpeedIsUsageAndNotASilentlyClampedDemo() {
+        for (args in listOf(listOf("--speed", "9"), listOf("--speed", "0"), listOf("--speed", "fast"), listOf("--speed"))) {
+            val err = ByteArrayOutputStream()
+            val saved = System.err
+            System.setErr(PrintStream(err, true))
+            val code = try { runDemo(args, PrintStream(ByteArrayOutputStream())) } finally { System.setErr(saved) }
+            assertEquals(DEMO_EXIT_USAGE, code, "args=$args")
+            assertTrue(err.toString().isNotBlank(), "a refused --speed must say why (args=$args)")
+        }
+    }
+
+    @Test fun loopAndHomeCannotBeCombinedBecauseAKioskNeedsAFreshWorld() {
+        val dir = createTempDirectory("loophome").resolve("demo")
+        val err = ByteArrayOutputStream()
+        val saved = System.err
+        System.setErr(PrintStream(err, true))
+        val code = try { runDemo(listOf("--loop", "--home", dir.toString()), PrintStream(ByteArrayOutputStream())) } finally {
+            System.setErr(saved)
+        }
+        assertEquals(DEMO_EXIT_USAGE, code)
+        assertContains(err.toString(), "--loop")
+        assertFalse(Files.exists(dir), "the refusal must not create the home it refused")
     }
 
     @Test fun anUnmarkedHomeIsRefusedAndLeftAlone() {
@@ -128,6 +164,50 @@ class DemoTest {
         val out = ByteArrayOutputStream()
         assertEquals(0, cleanDemoHomes(PrintStream(out, true), root().resolve("absent")))
         assertContains(out.toString(), "no demo homes under")
+    }
+
+    /**
+     * Review F1, the Windows half: sqlite-jdbc's native library lives in the child's
+     * `java.io.tmpdir` (= `<home>/tmp`) and is a mapped image a delete can refuse. A residue that
+     * cannot be emptied must keep its marker — an un-marked demo tree is one `--clean` can never
+     * collect — and must then be collected by `--clean` once the handle drains.
+     */
+    @Test fun aHomeThatCannotBeEmptiedKeepsItsMarkerSoCleanCanStillCollectIt() {
+        val home = root().resolve("${DEMO_HOME_PREFIX}stranded")
+        Files.createDirectories(home.resolve("tmp"))
+        Files.writeString(home.resolve(DEMO_MARKER),
+            DemoMarker(0, 0, 8799, System.currentTimeMillis()).render("0.1.5"))
+        val dll = home.resolve("tmp").resolve("sqlite-3.50.3.0-stranded-sqlitejdbc.dll")
+        Files.writeString(dll, "the mapped native library")
+
+        val removed = removeTree(home, attempts = 2, pauseMs = 1) { path ->
+            if (path != dll) runCatching { Files.deleteIfExists(path) }
+        }
+        assertFalse(removed, "a home that cannot be emptied is not reported as removed")
+        assertTrue(Files.exists(home.resolve(DEMO_MARKER)), "the marker stays, so the residue is still collectable (I10)")
+        assertTrue(Files.exists(dll), "the file that refused to go is still there")
+
+        val out = ByteArrayOutputStream()
+        assertEquals(0, cleanDemoHomes(PrintStream(out, true), home.parent))
+        assertFalse(Files.exists(home), "--clean collected the residue that kept its marker")
+        assertContains(out.toString(), "demo: removed $home")
+    }
+
+    /** The other half of the fix: one retry is all the drained handle needs — no longer, no endless. */
+    @Test fun aDeleteThatRefusesOnceIsRetriedUntilTheHomeIsGone() {
+        val home = root().resolve("${DEMO_HOME_PREFIX}raced")
+        Files.createDirectories(home.resolve("tmp"))
+        Files.writeString(home.resolve(DEMO_MARKER),
+            DemoMarker(0, 0, 8799, System.currentTimeMillis()).render("0.1.5"))
+        val dll = home.resolve("tmp").resolve("sqlite-3.50.3.0-raced-sqlitejdbc.dll")
+        Files.writeString(dll, "the mapped native library")
+        var refusals = 1
+
+        val removed = removeTree(home, attempts = 3, pauseMs = 1) { path ->
+            if (path == dll && refusals > 0) refusals-- else runCatching { Files.deleteIfExists(path) }
+        }
+        assertTrue(removed, "one retry after the child's handles drain removes the whole home")
+        assertFalse(Files.exists(home), "no residue, and no marker left behind")
     }
 
     @Test fun thePortScanTakesTheFirstFreePortInThePlanWindow() {

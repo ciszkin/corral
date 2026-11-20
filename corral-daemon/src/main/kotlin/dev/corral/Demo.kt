@@ -572,7 +572,14 @@ private fun runCycle(options: DemoOptions, cycleNo: Int, java: Path, jar: Path,
     val plain = options.plain || System.getenv("NO_COLOR") != null || System.console() == null
     val narrative = DemoNarrative(HttpDemoTransport(url), DemoConsole(out, plain), url, options.speed)
     runCatching { narrative.run() }.onFailure {
-        System.err.println("corral: the demo script stopped at ${it.message ?: "an unknown failure"}")
+        // java.net.http rewrites an internal failure as IOException(message = cause.message), so an
+        // internal message-less exception (ClosedChannelException and friends) arrives here as a
+        // bare IOException: CI run 44772818392 therefore read "an unknown failure" with no class at
+        // all. Name the cause — it is the only place the reason lives — and keep the stack.
+        val cause = it.cause
+        val why = it.message ?: cause?.message ?: cause?.javaClass?.name ?: "an unknown failure"
+        System.err.println("corral: the demo script stopped at $why (${it.javaClass.name})")
+        if (it.message == null) it.printStackTrace()
         System.err.println("demo: the daemon's log is ${home.resolve("daemon.log")}")
         logTail(home, 8).lineSequence().forEach { line -> System.err.println("  $line") }
         stopChild(child, home, options.keep)

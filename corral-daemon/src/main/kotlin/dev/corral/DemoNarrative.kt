@@ -3,6 +3,7 @@ package dev.corral
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import java.io.IOException
 import java.io.PrintStream
 import java.net.URI
 import java.net.http.HttpClient
@@ -326,9 +327,32 @@ internal class DemoNarrative(
     }
 
     private fun ok(method: String, path: String): String {
-        val response = client.exchange(method, path, null)
+        val response = read(method, path)
         if (response.code != 200) fail("$method $path", response)
         return response.body
+    }
+
+    /**
+     * A read of the pool, replayed a bounded number of times when the call failed on the wire.
+     *
+     * A loopback connection can die under a demo — the peer goes away, or a request lands on a
+     * socket that is closing. A GET changes nothing in the pool, so repeating it on a fresh
+     * connection is safe and keeps one dropped read from ending the script. A claim is never
+     * replayed: a lost response would take two leases.
+     */
+    private fun read(method: String, path: String): DemoResponse {
+        var attempt = 1
+        while (true) {
+            try {
+                return client.exchange(method, path, null)
+            } catch (e: IOException) {
+                if (attempt >= READ_ATTEMPTS) throw e
+                System.err.println("corral: demo: $method $path failed (${e.javaClass.simpleName}) - " +
+                    "retrying on a fresh connection")
+                sleep(READ_RETRY_MS * attempt)
+                attempt++
+            }
+        }
     }
 
     private fun fail(what: String, response: DemoResponse, expected: Int = 200): Nothing =
@@ -356,5 +380,9 @@ internal class DemoNarrative(
     private companion object {
         /** How long the boot-gate beat waits for the world's boot flip before it gives up. */
         const val BOOT_GATE_BOUND_MS = 20_000L
+
+        /** A read that failed on the wire is replayed at most this many times before it is reported. */
+        const val READ_ATTEMPTS = 3
+        const val READ_RETRY_MS = 150L
     }
 }

@@ -2,6 +2,7 @@ package dev.corral
 
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
+import java.nio.channels.ClosedChannelException
 import kotlin.test.*
 
 /**
@@ -16,10 +17,14 @@ class DemoNarrativeTest {
     private val daemon = FakeDemoDaemon(nowMs = { nowMs }, wall = { wall })
     private val out = ByteArrayOutputStream()
 
-    private fun run(speed: Double = 1.0, script: DemoScript = DemoScript.load()): Pair<DemoSummary, String> {
+    private fun run(speed: Double = 1.0, script: DemoScript = DemoScript.load()): Pair<DemoSummary, String> =
+        runWith(daemon, speed, script)
+
+    private fun runWith(client: DemoTransport, speed: Double = 1.0,
+                        script: DemoScript = DemoScript.load()): Pair<DemoSummary, String> {
         val console = DemoConsole(PrintStream(out, true, Charsets.UTF_8), plain = true)
         val summary = DemoNarrative(
-            client = daemon, console = console, url = "http://127.0.0.1:8799", speed = speed, script = script,
+            client = client, console = console, url = "http://127.0.0.1:8799", speed = speed, script = script,
             now = { nowMs }, wall = { wall }, sleep = { nowMs += it }, pollEveryMs = 250).run()
         return summary to out.toString(Charsets.UTF_8)
     }
@@ -113,6 +118,33 @@ class DemoNarrativeTest {
         }
         assertContains(e.message ?: "", "GET /api/devices")
         assertContains(e.message ?: "", "500")
+    }
+
+    // CI run 44772818392: beat 1 died on a message-less IOException from the first exchange, so the
+    // row failed on a loopback flake. A read is safe to repeat; the claim beside it is not.
+    @Test fun aReadThatFailsWithoutAMessageIsReplayedOnAFreshConnection() {
+        val once = object : DemoTransport {
+            private var failed = false
+            override fun exchange(method: String, path: String, body: String?): DemoResponse {
+                if (!failed) { failed = true; throw ClosedChannelException() }
+                return daemon.exchange(method, path, body)
+            }
+        }
+        val (summary, _) = runWith(once)
+        assertEquals(DemoSummary(leases = 3, denials = 1, handoffs = 2, elapsedMs = summary.elapsedMs), summary,
+            "a spent connection on beat 1 must not end the narrative")
+    }
+
+    @Test fun aClaimIsNeverReplayedEvenWhenTheWireFailed() {
+        var claims = 0
+        val lost = object : DemoTransport {
+            override fun exchange(method: String, path: String, body: String?): DemoResponse {
+                if (method == "POST" && path == "/api/leases") { claims++; throw ClosedChannelException() }
+                return daemon.exchange(method, path, body)
+            }
+        }
+        assertFailsWith<ClosedChannelException> { runWith(lost) }
+        assertEquals(1, claims, "a claim is not idempotent: a replay could take two leases")
     }
 
     @Test fun plainPrintsNoEscapeCodesAndTheColouredConsoleStillHasThem() {

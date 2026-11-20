@@ -9,10 +9,14 @@ import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.ApplicationCallPipeline
 import io.ktor.server.application.call
+import io.ktor.server.application.createApplicationPlugin
+import io.ktor.server.application.hooks.CallFailed
 import io.ktor.server.application.install
 import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.server.request.header
+import io.ktor.server.request.httpMethod
 import io.ktor.server.request.receive
+import io.ktor.server.request.uri
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondText
@@ -261,6 +265,17 @@ fun Application.corralModule(env: AppEnv) {
         json(apiJson)
     }
     install(WebSockets)
+    // The daemon ships no SLF4J provider, so Ktor's own call-failure log is a no-op and a demo
+    // daemon's error leaves an empty log tail (that is what CI run 44772818392 looked like). The
+    // demo home's log IS the diagnosis when a scripted row fails, so name the failure on stderr
+    // there; the real daemon keeps Ktor's (silent) default.
+    if (env.demo) install(createApplicationPlugin("DemoCallFailures") {
+        on(CallFailed) { call, cause ->
+            System.err.println("corral: ${call.request.httpMethod.value} ${call.request.uri} failed: " +
+                "${cause.message ?: cause.javaClass.name}")
+            cause.printStackTrace()
+        }
+    })
     routing {
         webSocket("/ws/events") {
             val ev = env.events

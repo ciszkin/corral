@@ -99,7 +99,8 @@ mirror "$REPO_ROOT/README.md" "README.md"
 mirror "$REPO_ROOT/SECURITY.md" "SECURITY.md"
 
 # The agent skill: the bundle ships it so a coding agent on the target host can read how to USE
-# Corral (the same file the house installs to ~/.agents/skills/corral on agent boxes). Nested —
+# Corral (the same file install.sh puts at ~/.agents/skills/corral on every host, creating that
+# directory when it is absent, and links ~/.claude/skills/corral at it). Nested —
 # the skill convention is one directory per skill, SKILL.md inside, named for the skill.
 [ -f "$REPO_ROOT/skills/corral/SKILL.md" ] || { echo "ERROR: missing $REPO_ROOT/skills/corral/SKILL.md" >&2; exit 1; }
 mkdir -p "$BUNDLE/skills/corral"

@@ -6,27 +6,30 @@ bundles it verbatim (`scripts/make-installer.sh` mirrors it into
 script regenerate the mirror. Do not add a second copy of it for a packaging format — point the
 packaging format at this file (see the plugin entry below) so the two can never drift.
 
-## What the installer does with it — and the one step it leaves to you
+## What the installer does with it
 
-`scripts/install.sh` copies the skill to `~/.agents/skills/corral/SKILL.md` **only when
-`~/.agents/skills` already exists**: that directory is how a host declares an agent harness, and the
-installer never creates `~/.agents` from nothing. On a host without it the installer writes nothing and
-says so — `Agent skill not installed: no ~/.agents/skills; Claude Code reads ~/.claude/skills/corral/` —
-and the one step left is to run one of the two commands below. This block is the same on POSIX and
-Windows (the installer is bash on both; there is no separate Windows skill path).
-
-Claude Code does not read `~/.agents/skills/` anyway: it reads `~/.claude/skills/<name>/`, which the
-installer never creates either, so even on a host where the skill did land one step is left — link it,
-once:
+`scripts/install.sh` copies the skill to `~/.agents/skills/corral/SKILL.md`, creating
+`~/.agents/skills` (and `~/.agents`) when the host has none: a fresh machine — the launch's new
+user — must get the skill from the one command, so the installer no longer waits for a directory it
+was never going to find. It also creates or refreshes `~/.claude/skills/corral` as a link to
+`~/.agents/skills/corral`, because Claude Code reads `~/.claude/skills/<name>/` and not
+`~/.agents/skills/`; one file then serves both layouts and stays current. This block is the same on
+POSIX and Windows (the installer is bash on both; there is no separate Windows skill path), and on
+Windows the link is a directory junction when MSYS cannot make a real symlink — a copy would go
+stale, so the installer does not fall back to one. If neither is possible it says so and prints the
+one command to run:
 
 ```sh
 mkdir -p ~/.claude/skills && ln -s ~/.agents/skills/corral ~/.claude/skills/corral
 ```
 
-Where symlinks are awkward (Windows without developer mode), copy `~/.agents/skills/corral/` there
-instead and re-copy after every update: a copy goes stale, and uninstall never removes it. The plugin
-path below needs neither link nor copy. `corral update --apply` refreshes the `~/.agents/skills/corral/`
-copy while it is unedited; `CUTOVER.md` in the install bundle has the long form.
+The link is never forced over a real directory, a file or a link into somewhere else: that path
+belongs to the operator, and the installer names it instead. The skill file itself is refreshed on
+every install and on `corral update --apply` **while it is unedited**; an edited copy is left alone
+until you delete it or restore the shipped bytes. Uninstall removes the skill and the link it
+installed, and removes `~/.agents/skills` only when that leaves it empty — a directory holding
+another skill stays, and the summary names it under "Left alone". The plugin paths below need
+neither link nor copy.
 
 ## Install it with one command
 
@@ -67,11 +70,10 @@ for a host, not a marketplace checkout.
 
 ## Which one should a user pick?
 
-- Corral already installed on this host **and** the host has `~/.agents/skills`, so the installer
-  placed the skill — a harness that reads `~/.agents/skills/` has nothing to run; Claude Code has one
-  step, the `~/.claude/skills/corral` link above (or path 2, which needs no link).
-- Corral already installed, but the host has no `~/.agents/skills` — the installer wrote nothing, and
-  there is nothing on disk to point a harness at: run path 1 or path 2.
+- Corral already installed through `scripts/install.sh` — the installer placed the skill and linked
+  it where Claude Code reads it, so neither path below is needed for that harness layout. Run path 1
+  or path 2 when you want the skill in a harness that reads neither directory (`npx skills add`
+  reaches more agents; `/plugin` is one command inside Claude Code).
 - Corral installed, agent elsewhere (a laptop driving the phone box over HTTP) — either path works;
   `npx skills add` reaches more agents, `/plugin` is one command inside Claude Code.
 - Neither — install Corral first. The skill teaches the `corral` CLI; without the CLI it explains

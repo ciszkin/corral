@@ -81,6 +81,35 @@ GATE="$TMPHOME/.gradle/init.d/corral-gate.gradle.kts"
 SKILL_SRC="$SRC/skills/corral/SKILL.md"; [ -f "$SKILL_SRC" ] || SKILL_SRC="$ROOT/skills/corral/SKILL.md"
 SKILL_DST="$TMPHOME/.agents/skills/corral/SKILL.md"
 
+# A directory link, the shape install.sh makes for ~/.claude/skills/corral. MSYS `ln -s` copies the
+# directory instead unless winsymlinks is set (a copy goes stale and uninstall never removes it), so a
+# real symlink is tried first and a junction second; false only when this host can make neither, and
+# every row that needs one then skips LOUDLY.
+make_dir_link() { # make_dir_link <target> <link>; false when this host cannot make a symlink
+  rm -rf "$2"
+  ln -s "$1" "$2" 2>/dev/null
+  [ -L "$2" ] && return 0
+  rm -rf "$2"
+  if command -v cmd.exe >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
+    # A directory junction is not a symlink to Windows, but MSYS treats it as one and `rm -f` still
+    # removes the link alone. This host cannot create a real symlink without elevation.
+    cmd.exe //c mklink //J "$(cygpath -w "$2")" "$(cygpath -w "$1")" >/dev/null 2>&1
+    [ -L "$2" ] && return 0
+    rm -rf "$2"
+  fi
+  return 1
+}
+
+# Every synthetic bundle below is a stand-in for a real release bundle, and a real bundle ships the
+# agent skill (make-installer.sh refuses to build one without it). install.sh now installs the skill
+# on every host, so a bundle missing skills/corral/SKILL.md is an INCOMPLETE bundle and the run stops
+# with an ERROR — the same way it already stops for a missing corral-rules or adb-wrapper. This helper
+# keeps the hand-built bundles honest in one place.
+bundle_skill() { # bundle_skill <bundle-dir>
+  mkdir -p "$1/skills/corral"
+  cp "$SKILL_SRC" "$1/skills/corral/SKILL.md"
+}
+
 # ===== first install =====
 install_run >"$TMP/install1.log" 2>&1; rc=$?
 dump_on_fail "$rc" "$TMP/install1.log"
@@ -96,12 +125,29 @@ check "9.2 ~/bin/adb installed + executable" test -x "$TMPHOME/bin/adb"
 check "9.2 ~/bin/corral installed + executable" test -x "$TMPHOME/bin/corral"
 check "9.2 ~/bin/adb is the corral wrapper" grep -q 'corral adb wrapper' "$TMPHOME/bin/adb"
 
-# 44: the skill lands only where an agent host declares itself, by having ~/.agents/skills. A host
-# without it must not grow a ~/.agents tree from nothing.
-check "44 skill: ~/.agents is never created from nothing" test ! -e "$TMPHOME/.agents"
-# 48: a host without ~/.agents/skills gets one honest line instead of silence from the installer.
-check "48 skill: a host without ~/.agents/skills gets one honest summary line" bash -c \
-  "grep -qF 'Agent skill not installed: no ~/.agents/skills' '$TMP/install1.log' && grep -qF '~/.claude/skills/corral/' '$TMP/install1.log'"
+# 90: a fresh host gets the skill. The owner reversed the old "never create ~/.agents from nothing"
+# guard — a clean machine, the launch's new user, was left with no skill after the one-command
+# install. This sandbox has no ~/.agents at all, so every row here is the new-user path: the install
+# creates the tree, lands the file with its recorded hash, and links Claude Code's directory at it.
+check "90 skill: a fresh host (no ~/.agents) gets the skill installed" bash -c \
+  "[ -f '$SKILL_DST' ] && cmp -s '$SKILL_SRC' '$SKILL_DST'"
+check "90 skill: the fresh host's copy carries its recorded hash" bash -c \
+  "[ \"\$(sha256sum '$SKILL_DST' | cut -d' ' -f1)\" = \"\$(cat '$SKILL_DST.sha')\" ]"
+check "90 skill: the install says it installed the skill and names both harness paths" bash -c \
+  "grep -qF 'Installed the corral agent skill' '$TMP/install1.log' && grep -qF '~/.claude/skills/corral/' '$TMP/install1.log'"
+check "90 skill: no 'Agent skill not installed' line survives on a fresh host" bash -c \
+  "! grep -q 'Agent skill not installed' '$TMP/install1.log'"
+if [ -L "$TMPHOME/.claude/skills/corral" ]; then
+  check "90 skill: the install links ~/.claude/skills/corral at the installed skill" bash -c \
+    "[ -L '$TMPHOME/.claude/skills/corral' ] && grep -qF 'name: corral' '$TMPHOME/.claude/skills/corral/SKILL.md'"
+  check "90 skill: and its summary names the link it created" grep -qF \
+    'Linked the corral agent skill for Claude Code (~/.claude/skills/corral -> ~/.agents/skills/corral)' \
+    "$TMP/install1.log"
+else
+  echo "skip 90 skill: this host can create neither a symlink nor a junction; the Claude link has no row here" >&2
+  check "90 skill: with no link possible the install says so and prints the manual command" bash -c \
+    "grep -qF 'could not link ~/.claude/skills/corral' '$TMP/install1.log' && grep -qF 'ln -s ~/.agents/skills/corral ~/.claude/skills/corral' '$TMP/install1.log'"
+fi
 
 # 9.4 SDK shim
 check "9.4 SDK adb is now the corral wrapper" grep -q 'corral adb wrapper' "$SDK/adb"
@@ -134,9 +180,9 @@ replace_sites=$(grep -c 'replace_file "\$JAR"\|replace_file "\$UI_JAR"' "$SRC/in
 check "jars: all three jar install sites go through replace_file" test "$replace_sites" -eq 3
 
 # ===== 9.3 idempotence: second install =====
-# 44: give the sandbox an agent host's marker (~/.agents/skills) before the re-run, so this install
-# has to place the skill; the rows below assert both the bytes and the atomic mechanism.
-mkdir -p "$TMPHOME/.agents/skills"
+# 90: the first run already placed the skill, so this re-run takes the sidecar branch — it must
+# REFRESH a copy of ours that nobody edited, never report it as freshly installed — and the rows
+# below still pin both the bytes and the atomic mechanism.
 jar_inode_before=$(ls -i "$TMPHOME/.corral/corral-daemon-all.jar" | cut -d' ' -f1)
 install_run >"$TMP/install2.log" 2>&1; rc2=$?
 dump_on_fail "$rc2" "$TMP/install2.log"
@@ -150,8 +196,8 @@ check "44 skill: lands at ~/.agents/skills/corral/SKILL.md" test -f "$SKILL_DST"
 check "44 skill: byte-identical to the shipped copy" cmp -s "$SKILL_SRC" "$SKILL_DST"
 check "48 skill: install records the shipped copy's hash beside the skill" bash -c \
   "[ -f '$SKILL_DST.sha' ] && [ \"\$(sha256sum '$SKILL_DST' | cut -d' ' -f1)\" = \"\$(cat '$SKILL_DST.sha')\" ] && [ \"\$(sha256sum '$SKILL_SRC' | cut -d' ' -f1)\" = \"\$(cat '$SKILL_DST.sha')\" ]"
-check "44 skill: install names the skill and both harness paths" bash -c \
-  "grep -qF 'Installed the corral agent skill' '$TMP/install2.log' && grep -qF '~/.claude/skills/corral/' '$TMP/install2.log'"
+check "90 skill: the re-run refreshes our unchanged copy instead of reinstalling it" bash -c \
+  "grep -qF 'Refreshed the corral agent skill' '$TMP/install2.log' && ! grep -qF 'Installed the corral agent skill' '$TMP/install2.log' && grep -qF '~/.claude/skills/corral/' '$TMP/install2.log'"
 check "44 skill: no replacement temp file is left behind" bash -c \
   "[ -f '$SKILL_DST' ] && ! ls '$TMPHOME/.agents/skills/corral' | grep -q '\.new\.'"
 check "44 skill: install goes through replace_file, never cp in place" bash -c \
@@ -190,6 +236,7 @@ check "shims: the probe sandbox installs" test "$rcf" -eq 0
 FL_BUNDLE="$TMP/inflight-bundle"; mkdir -p "$FL_BUNDLE"
 cp "$SRC/install.sh" "$SRC/corral" "$SRC/corral.service" "$SRC/corral-gate.gradle.kts" \
    "$SRC/corral-rules" "$FL_BUNDLE/"
+bundle_skill "$FL_BUNDLE"
 { head -1 "$SRC/adb-wrapper"; for i in $(seq 1 60); do echo "# next release marker $i"; done; \
   tail -n +2 "$SRC/adb-wrapper"; } > "$FL_BUNDLE/adb-wrapper"
 chmod +x "$FL_BUNDLE/adb-wrapper"
@@ -276,9 +323,47 @@ check "9.7 rules removed" test ! -e "$RULES"
 check "9.7 daemon.env removed" test ! -e "$DAEMON_ENV"
 check "44 skill: uninstall removes the installed copy" bash -c \
   "[ '$skill_before' = 1 ] && [ ! -e '$SKILL_DST' ] && [ ! -e '$SKILL_DST.sha' ] && grep -qF 'the corral agent skill' '$TMP/uninstall.log'"
-check "44 skill: uninstall leaves ~/.agents/skills itself alone" test -d "$TMPHOME/.agents/skills"
+# 90: uninstall owes the tree it created the same care as ~/bin. This sandbox's ~/.agents exists only
+# because the install made it, our skill was the only thing in it, so it goes — and the summary names
+# it under Removed rather than leaving an empty ~/.agents/skills behind for every fresh host.
+check "90 skill: uninstall takes the ~/.agents tree it created once it is empty" bash -c \
+  "[ ! -e '$TMPHOME/.agents/skills' ] && [ ! -e '$TMPHOME/.agents' ]"
+check "90 skill: and names ~/.agents/skills under Removed" bash -c \
+  "grep '^Removed:' '$TMP/uninstall.log' | grep -qF '~/.agents/skills'"
+check "90 skill: uninstall removes the Claude Code link it installed" bash -c \
+  "[ ! -e '$TMPHOME/.claude/skills/corral' ] && [ ! -L '$TMPHOME/.claude/skills/corral' ]"
 check "9.8 SDK adb restored from adb.real" grep -q 'fake-sdk-adb' "$SDK/adb"
 check "9.8 adb.real consumed" test ! -e "$SDK/adb.real"
+
+# ===== 90: uninstall must never empty somebody else's ~/.agents/skills =====
+# The installer creates that directory on a fresh host, so uninstall has to be as careful with it as
+# with ~/bin: our skill and our link go, a directory still holding another skill stays exactly as it
+# is, and the summary says so under "Left alone" instead of quietly deleting the host's skills or
+# quietly leaving a half-emptied tree unmentioned.
+TMPHOME_FS="$TMP/home-foreign-skill"; SDK_FS="$TMPHOME_FS/Android/Sdk/platform-tools"
+FS_SKILL="$TMPHOME_FS/.agents/skills/corral/SKILL.md"
+mkdir -p "$SDK_FS" "$TMPHOME_FS/bin"; : > "$TMPHOME_FS/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "fs-sdk-adb $@"' > "$SDK_FS/adb"; chmod +x "$SDK_FS/adb"
+env HOME="$TMPHOME_FS" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$SDK_FS/adb" --jar "$JAR" --no-ui --home "$TMPHOME_FS" >"$TMP/fs-install.log" 2>&1; rcfsi=$?
+dump_on_fail "$rcfsi" "$TMP/fs-install.log"
+check "90 skill: the fresh sandbox starts with our skill installed" bash -c \
+  "[ -f '$FS_SKILL' ] && grep -qF 'Installed the corral agent skill' '$TMP/fs-install.log'"
+mkdir -p "$TMPHOME_FS/.agents/skills/other"
+printf 'another skill\n' > "$TMPHOME_FS/.agents/skills/other/SKILL.md"
+env HOME="$TMPHOME_FS" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_FS" --uninstall \
+  >"$TMP/fs-uninstall.log" 2>&1; rcfsu=$?
+dump_on_fail "$rcfsu" "$TMP/fs-uninstall.log"
+check "90 skill: our skill is removed even when another skill shares the directory" bash -c \
+  "[ ! -e '$FS_SKILL' ] && grep -qF 'another skill' '$TMPHOME_FS/.agents/skills/other/SKILL.md'"
+check "90 skill: the other skill's directory is untouched" bash -c \
+  "[ -d '$TMPHOME_FS/.agents/skills/other' ] && [ ! -L '$TMPHOME_FS/.agents/skills/other' ]"
+check "90 skill: a non-empty ~/.agents/skills survives and is named under Left alone" bash -c \
+  "grep -q '^Left alone (~/.agents/skills is not empty, still holding: other;' '$TMP/fs-uninstall.log' && grep -qF '$TMPHOME_FS/.agents/skills' '$TMP/fs-uninstall.log'"
+check "90 skill: the Removed: line never claims ~/.agents/skills was removed" bash -c \
+  "! grep '^Removed:' '$TMP/fs-uninstall.log' | grep -qF '~/.agents/skills,'"
+check "90 skill: the link into the removed skill does not dangle" bash -c \
+  "[ ! -e '$TMPHOME_FS/.claude/skills/corral' ] && [ ! -L '$TMPHOME_FS/.claude/skills/corral' ]"
 
 # ===== --home differs from the exported HOME: rc line must use the absolute target =====
 # This block proves the --home override wins over $HOME without betting the reviewer's dotfiles:
@@ -413,6 +498,7 @@ mkdir -p "$BUNDLE3" "$SDK4" "$TMPHOME4/bin"
 cp "$SRC/install.sh" "$SRC/adb-wrapper" "$SRC/corral" "$SRC/corral-ui" "$SRC/corral.service" \
    "$SRC/corral-gate.gradle.kts" "$SRC/corral-rules" "$SRC/corral.png" "$BUNDLE3/"
 cp "$JAR" "$BUNDLE3/corral-daemon-all.jar"; cp "$UI_JAR" "$BUNDLE3/corral-ui-all.jar"
+bundle_skill "$BUNDLE3"
 chmod +x "$BUNDLE3/corral-ui" "$BUNDLE3/adb-wrapper" "$BUNDLE3/corral"
 printf '%s\n' '#!/bin/sh' 'echo "fake-sdk-adb4 $@"' > "$FAKE_ADB4"
 chmod +x "$FAKE_ADB4"
@@ -858,6 +944,7 @@ check "bat freeze: the summary does NOT claim it installed a twin it did not wri
 BAT_BUNDLE="$TMP/bat-bundle"; mkdir -p "$BAT_BUNDLE"
 cp "$SRC/install.sh" "$SRC/corral.bat" "$SRC/adb-wrapper.bat" "$SRC/corral-gate.gradle.kts" \
    "$SRC/corral-rules" "$SRC/corral" "$SRC/adb-wrapper" "$SRC/corral.service" "$BAT_BUNDLE/"
+bundle_skill "$BAT_BUNDLE"
 printf 'rem next release marker: a changed twin\r\n' >> "$BAT_BUNDLE/corral.bat"
 check "bat changed: the next-release corral.bat really differs from the installed one" bash -c \
   "! cmp -s '$BAT_BUNDLE/corral.bat' '$TMPHOME_W/bin/corral.bat'"
@@ -1079,6 +1166,7 @@ else
     mkdir -p "$TMP/posix-$label-bundle"
     cp "$SRC/adb-wrapper" "$SRC/corral" "$SRC/corral.service" "$SRC/corral-gate.gradle.kts" \
        "$SRC/corral-rules" "$TMP/posix-$label-bundle/"
+    bundle_skill "$TMP/posix-$label-bundle"
   done
   git -C "$ROOT" show ee9cc77:scripts/install.sh > "$TMP/posix-pre-bundle/install.sh"
   cp "$SRC/install.sh" "$TMP/posix-new-bundle/install.sh"
@@ -1094,7 +1182,10 @@ else
       --adb "$CMP_HOME/Android/Sdk/platform-tools/adb" --jar "$JAR" --no-ui --home "$CMP_HOME" \
       > "$TMP/$2.log" 2>&1
     echo "$?" > "$TMP/$2.rc"
-    ( cd "$CMP_HOME" && find . -type f | sort | xargs sha256sum ) > "$TMP/$2.files"
+    # ~/.agents and ~/.claude are this change's deliberate POSIX delta — a fresh host now gets the
+    # skill and the Claude Code link — and are pinned by the row-90 rows above, so they are the one
+    # thing this guard does not compare. Everything else must still match byte for byte.
+    ( cd "$CMP_HOME" && find . -type f | sort | grep -vE '^\./(\.agents|\.claude)/' | xargs sha256sum ) > "$TMP/$2.files"
   }
   posix_snapshot "$TMP/posix-pre-bundle" posix-pre
   posix_snapshot "$TMP/posix-new-bundle" posix-new
@@ -1103,9 +1194,10 @@ else
   # guide no longer has). Everything else stays byte-pinned, including the whole install summary
   # around it. BOTH hint pairs — the pre-change pair and the new pair — are deleted from BOTH sides,
   # so the hint is pinned by its own assertion in the docs block below; nothing about it may be left
-  # unpinned. The same for the row-48 honesty line a host without ~/.agents/skills now gets; that
-  # line is pinned by its own assertion above.
-  drop_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\|Agent skill not installed: no ~\)'
+  # unpinned. The same for the agent-skill block: row 90 deliberately flipped it on POSIX (a fresh
+  # host now gets the skill and the ~/.claude link instead of the old honesty line), so those lines
+  # are deleted from both sides and pinned by the row-90 rows above; every other line must match.
+  drop_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\|Agent skill not installed: no ~\|Installed the corral agent skill (\|Linked the corral agent skill for Claude Code (\|Left alone (not a symlink into ~\)'
   sed -e "/$drop_re/d" "$TMP/posix-pre.log" > "$TMP/posix-pre.log.cmp"
   sed -e "/$drop_re/d" "$TMP/posix-new.log" > "$TMP/posix-new.log.cmp"
   check "POSIX: every message matches the pre-change installer (byte-for-byte, minus the rewritten guide hint)" \
@@ -1132,6 +1224,7 @@ else
     mkdir -p "$TMP/appdata-$label-bundle"
     cp "$SRC/adb-wrapper" "$SRC/corral" "$SRC/corral.service" "$SRC/corral-gate.gradle.kts" \
        "$SRC/corral-rules" "$TMP/appdata-$label-bundle/"
+    bundle_skill "$TMP/appdata-$label-bundle"
   done
   git -C "$ROOT" show f4f2270:scripts/install.sh > "$TMP/appdata-adpre-bundle/install.sh"
   cp "$SRC/install.sh" "$TMP/appdata-adnew-bundle/install.sh"
@@ -1352,23 +1445,11 @@ for legacy in pass47 pass48; do
 done
 
 # ===== 56: uninstall removes the Claude Code symlink only when it points at our skill =====
-# The skill recommends ~/.claude/skills/corral -> ../../.agents/skills/corral. If uninstall removes
-# the target and leaves the link, Claude Code is left with a dangling skill (review 49 §5b). A real
-# directory or a link into somewhere else is NOT ours: it survives and the summary names it.
-make_dir_link() { # make_dir_link <target> <link>; false when this host cannot make a symlink
-  rm -rf "$2"
-  ln -s "$1" "$2" 2>/dev/null
-  [ -L "$2" ] && return 0
-  rm -rf "$2"
-  if command -v cmd.exe >/dev/null 2>&1 && command -v cygpath >/dev/null 2>&1; then
-    # A directory junction is not a symlink to Windows, but MSYS treats it as one and `rm -f` still
-    # removes the link alone. This host cannot create a real symlink without elevation.
-    cmd.exe //c mklink //J "$(cygpath -w "$2")" "$(cygpath -w "$1")" >/dev/null 2>&1
-    [ -L "$2" ] && return 0
-    rm -rf "$2"
-  fi
-  return 1
-}
+# The skill recommends ~/.claude/skills/corral -> ../../.agents/skills/corral (install.sh makes that
+# link itself, row 90). If uninstall removes the target and leaves the link, Claude Code is left with
+# a dangling skill (review 49 §5b). A real directory or a link into somewhere else is NOT ours: it
+# survives and the summary names it. `make_dir_link` lives near the top of this file, so the
+# fresh-host row can use it too.
 skill_link_home() { # skill_link_home <home>: install with a skill and make ~/.claude/skills
   local home="$1" sdks="$1/Android/Sdk/platform-tools"
   mkdir -p "$sdks" "$1/bin" "$1/.agents/skills" "$1/.claude/skills"; : > "$1/.bashrc"
@@ -1410,9 +1491,11 @@ if make_dir_link "$TMPHOME_CLK/.agents/skills/corral" "$CLK_LINK"; then
 else
   echo "skip 56 skill: this host cannot create a symlink or junction; the kept-skill link branch was not exercised" >&2
 fi
-# A real directory at that path belongs to the user: never removed, and named.
+# A real directory at that path belongs to the user: never removed, and named. install.sh made a link
+# there (row 90), so this row removes it first to plant the case it is about.
 TMPHOME_CLD="$TMP/home-claude-real-dir"
 skill_link_home "$TMPHOME_CLD"
+rm -f "$TMPHOME_CLD/.claude/skills/corral"
 mkdir -p "$TMPHOME_CLD/.claude/skills/corral"; printf 'keep\n' > "$TMPHOME_CLD/.claude/skills/corral/README"
 env HOME="$TMPHOME_CLD" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME_CLD" --uninstall \
   >"$TMP/link-real-uninstall.log" 2>&1; rcclr=$?
@@ -3036,8 +3119,8 @@ check "48 docs: the skill says the CLI renews the lease while the command runs" 
   'renews the lease while the command runs' "$SKILL_SRC"
 check "48 docs: CUTOVER says the CLI renews the lease while the command runs" grep -qF \
   'The CLI renews the lease while the command runs' "$DOCDIR/CUTOVER.md"
-check "50 docs: the skill prefers a symlink over a copy for Claude Code" grep -qF \
-  'prefer a **symlink**' "$SKILL_SRC"
+check "90 docs: the skill says install creates the Claude Code link for you" grep -qF \
+  'install creates that link for you' "$SKILL_SRC"
 # 55: the knob every claim/wait/lease/renew reads must be documented where the TTL is, with the default
 # and the replacements it makes (and refuses) so a short test hold cannot silently lose a lease.
 check "55 docs: CUTOVER names CORRAL_LEASE_TTL_SECONDS, its default and its readers" bash -c \

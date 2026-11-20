@@ -64,9 +64,10 @@ claude mcp add --transport http corral http://127.0.0.1:8798/mcp
 
 Eight tools (`list_devices`, `queue`, `claim`, `free`, `renew`, `screenshot`,
 `start_emulator`, `stop_emulator`), one identity per MCP session. The installer also drops
-the agent skill at `~/.agents/skills/corral/SKILL.md` when `~/.agents/skills` exists;
-Claude Code reads `~/.claude/skills/` instead, so symlink it there as [CUTOVER.md](CUTOVER.md)
-says. Any harness can drive the CLI verbs directly.
+the agent skill at `~/.agents/skills/corral/SKILL.md` — creating `~/.agents/skills` when the host
+has none, so a fresh machine gets it from the one command — and links `~/.claude/skills/corral` at
+it for Claude Code, which reads `~/.claude/skills/` instead. Any harness can drive the CLI verbs
+directly.
 
 ## Why not just `ANDROID_SERIAL`?
 

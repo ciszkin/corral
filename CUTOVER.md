@@ -97,11 +97,12 @@ re-run. It:
   (`--no-sdk-shim` to skip);
 - installs a Gradle `init.d` gate that pre-flights device-touching tasks;
 - installs the `corral` agent skill (how an agent should lease devices and read the gate) to
-  `~/.agents/skills/corral/SKILL.md` when `~/.agents/skills` already exists — the house harness
-  discovers it from there, while Claude Code reads `~/.claude/skills/<name>/` instead. The
-  installer does not create that link: add `~/.claude/skills/corral` as a symlink to
-  `~/.agents/skills/corral` yourself (uninstall removes the link only while it resolves into that
-  skill);
+  `~/.agents/skills/corral/SKILL.md`, creating `~/.agents/skills` when the host has none so a
+  fresh machine gets it from this one command, and links `~/.claude/skills/corral` at that
+  directory because Claude Code reads `~/.claude/skills/<name>/` instead. The link is only
+  created where it is absent: a real directory, a file or a link into somewhere else belongs to
+  you and is named, not replaced. On Windows the link is a directory junction where a real
+  symlink is not available; if neither can be made the installer prints the one command to run;
 - optionally installs the desktop console with `--ui` (the default when a
   `corral-ui-all.jar` is present) or `--no-ui`.
 
@@ -512,9 +513,10 @@ is still the one it installed, and removes the agent skill when it still matches
 what it installed (an edited skill keeps both its file and the link at
 `~/.claude/skills/corral` that points at it; kept shims, the skill and its
 symlink are named under "Left alone", while a user-replaced icon is simply left
-in place). Your Android SDK and your `PATH` edits in the shell rc files are
-left alone, and so is `~/.agents/skills` itself — it is what declared this host
-an agent host.
+in place). `~/.agents/skills` goes too, but only when that leaves it empty: the
+installer creates it on a fresh host, so a directory still holding another
+skill survives and is named under "Left alone" with what is left in it. Your
+Android SDK and your `PATH` edits in the shell rc files are left alone.
 
 ## Known limits
 

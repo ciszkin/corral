@@ -234,13 +234,16 @@ the repo/build shape; `README.md` in the repo is the front door — what it is, 
 the status table, and links into the guide; `SECURITY.md` holds the threat model
 and the bypass list. The default gate rules file is `corral-rules` beside the installer in the
 bundle (`scripts/corral-rules` in a source checkout), installed as `~/.config/corral/rules`. This
-skill lives at `~/.agents/skills/corral/SKILL.md` on the house install, and `corral update --apply`
+skill lives at `~/.agents/skills/corral/SKILL.md` on the house install (the installer creates that
+directory on a fresh host, so this file is there after the one command), and `corral update --apply`
 refreshes that file only while it is unedited. A local edit (adding a note, say) opts this copy out:
 updates leave it alone, unless you restore bytes that exactly match the current bundle's copy —
 install adopts those and the copy rejoins updates, while anything else stays left alone. To take
 updates again reliably, delete the file and re-run `install.sh` (or `corral update --apply`). Claude
 Code reads
-`~/.claude/skills/<name>/` instead — prefer a **symlink** where your harness supports one
+`~/.claude/skills/<name>/` instead, and install creates that link for you
 (`~/.claude/skills/corral` → `~/.agents/skills/corral`, the layout the `skills` CLI uses), so one
-file stays current. If you must copy it there, refresh the copy after every `corral update --apply`:
-a copy goes stale, and uninstall never removes it.
+file stays current; it leaves that path alone if a real directory, a file or a foreign link is
+already there, and on Windows it uses a directory junction where a real symlink is unavailable. Link
+or copy it there yourself only when the install said it could not: a copy goes stale, and uninstall
+never removes one.

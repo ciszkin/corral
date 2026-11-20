@@ -7,3 +7,4 @@ build/
 __pycache__/
 /corral-installer/
 /dist/
+node_modules/

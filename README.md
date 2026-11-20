@@ -10,8 +10,7 @@ each one to exactly one agent session. The second agent doesn't trample the firs
 test run: it queues, or it is turned away with a message that names the holder and the
 two forms that work.
 
-<!-- Demo GIF slot: docs/demo.gif — two agents, one device: grant, denial with the
-     teaching message, then the queue. Nothing is drawn here until that file exists. -->
+![Two agents, one device: lease, denial, queue](https://raw.githubusercontent.com/ciszkin/corral/main/docs/demo.gif)
 
 [Adopting Corral](CUTOVER.md) · [Security policy and threat model](SECURITY.md) ·
 [Agent skill](skills/corral/SKILL.md) · Apache-2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE))

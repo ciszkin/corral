@@ -126,6 +126,93 @@ On Windows the CLI is `corral.bat`, so from another `.bat`/`.cmd` invoke it as
 the caller's remaining lines never run. Interactive cmd.exe and PowerShell are
 unaffected.
 
+## Demo
+
+`corral demo` starts a second, isolated daemon whose device side is simulated in process: the pool,
+the screenshots and the emulator host are values, not a device. It needs the installed `corral` (or
+`CORRAL_JAR` pointing at a daemon jar), and it prints the URL so the CLI and console can point at
+it:
+
+```sh
+corral demo
+CORRAL_URL=http://127.0.0.1:8799 corral devices
+corral-ui --url http://127.0.0.1:8799
+```
+
+The demo pool is claimable and leasable through the same CLI, HTTP, MCP and console paths as a real
+one. **What it is not:** a real device, a test target, or a security boundary. The default world
+serves three fabricated devices (two ready, one AVD reporting unbooted until it is started) and a
+placeholder screen; running a real build, `adb` call or `connected*AndroidTest` against a demo
+serial proves nothing and is not supported. It installs no `adb` wrapper, SDK shim, Gradle gate,
+systemd unit or Scheduled Task, and it starts no adb, emulator or scrcpy process, makes no update
+check and reads or writes neither `~/.corral` nor `~/.config/corral`.
+
+Every surface is labelled DEMO. The inspection verbs (`devices`, `status`, `queue`, `check`,
+`screenshot`, `events`, `avd` and `doctor`) print
+`corral: DEMO - this daemon serves a simulated pool: no real device, no adb, no network, no gates`
+on **stderr**, so stdout stays the daemon's JSON. `GET /api/devices` labels every item, and
+`/api/status` and `/api/config` carry the same field, as `"demo":true`; the key is omitted when
+false, except the `/ws/events` hello frame, which always carries it. The console shows a persistent
+banner above its content and a `DEMO` pill in the status bar; the banner reads:
+
+`DEMO — this console is watching a simulated pool. No real device, no adb, no gates; nothing shown here can touch a phone.`
+
+It clears when the socket drops. In a demo the console's update row reads `disabled in demo` with no
+Check/Install buttons, and the scrcpy live view is not offered, replaced by `live view is disabled
+in demo mode — it would spawn a real scrcpy binary`.
+
+The supervisor spawns the same jar with `-Duser.home` and `-Djava.io.tmpdir` inside the demo home
+and starts the child with `CORRAL_DEMO=1` — environment-only: it is not a `daemon.env` key and
+`PUT /api/config` cannot set it. The child's environment also carries `CORRAL_DEMO_SUPERVISOR` (the
+supervisor's pid), `CORRAL_PORT`, `CORRAL_DB`, `CORRAL_RULES`, `CORRAL_ENV_FILE`,
+`CORRAL_UPDATE_CHECK=off`, `CORRAL_SCREENSHOT_OBSERVERS=corral-ui` and
+`CORRAL_EMULATOR_LAUNCHER=direct`, and the inherited `CORRAL_ADB`, `CORRAL_EMULATOR`, `CORRAL_REPO`,
+`CORRAL_FAKE_DEVICES`, `CORRAL_DEMO_WORLD`, `ANDROID_SERIAL`, `ANDROID_HOME`, `ANDROID_SDK_ROOT` and
+`INVOCATION_ID` are removed before it starts. Config writes that would walk it back onto the host —
+`CORRAL_ADB`, `CORRAL_EMULATOR`, `CORRAL_RULES`, `CORRAL_ENV_FILE`, `CORRAL_DB` and
+`CORRAL_UPDATE_CHECK=on` — are refused by `PUT /api/config` with a `400` naming demo mode, and a
+refused body writes nothing; the update check is already off, so writing `off` stays a no-op.
+`shell_skip` and `init_floor` stay file-only: a rules `PUT` with either is a `400` telling you to
+edit the rules file, in demo and on a real daemon alike.
+
+`corral doctor` in a demo prints the daemon's own layers: `demo: ok - fake pool, no gates installed`,
+`sdk-shim: skipped - demo mode` and `rules: skipped - demo mode` — never FAIL — then
+`demo mode: updates are not applicable`. `corral update` prints that sentence and exits 0;
+`corral update --apply` prints it and exits 1, installing nothing.
+
+Flags:
+
+- `--port P` — the first port to try; the default is 8799 and a busy port moves it to the next free
+  loopback port within 20.
+- `--speed X` — scale the beat delays by 1/X. The default is 1 and the accepted range is 0.5–4; a
+  value outside it is a usage error, not clamped. Only the script's pacing changes: a lease TTL, an
+  emulator's boot and the FIFO queue are the daemon's.
+- `--loop` — run the script again, each cycle with a fresh home and therefore a fresh world; intended
+  for a kiosk or a screen capture. It cannot be combined with `--home`, which fixes one directory.
+- `--no-script` — start the world, print the pool and the CLI and console commands, and wait; no
+  narrative.
+- `--keep` — leave the home in place when the demo stops.
+- `--home DIR` — use DIR as the demo home. Refused when it is the real home or lies under
+  `~/.corral` / `~/.config/corral`, when it exists without a demo marker, or when it belongs to a
+  running demo.
+- `--plain` — no ANSI colour or cursor movement, for a clean recording; colour is also off when
+  `NO_COLOR` is set or stdout is not a terminal.
+- `--clean` — remove demo homes that carry a marker and whose processes are gone; anything else it
+  sees is named and left.
+- `--help` / `-h`.
+
+Exit codes: 2 for usage, 3 when there is no free port or the home cannot be created, 4 when a path
+or home is refused as unsafe, and 1 when the demo daemon exits on its own (the log is named).
+
+**Cleanup and provenance.** A demo home is `<system temp>/corral-demo-<8 hex>` by default and
+carries a `.corral-demo` marker: a comment, `marker=corral-demo`, the version, the supervisor and
+daemon pids, the port and the creation time. A graceful stop removes the home unless `--keep`; a
+killed supervisor takes the daemon down by pid, so a crashed demo does not leave a JVM serving a
+loopback port. The marker is what makes `--clean` safe: it removes only marked, stopped homes under
+the temp root whose name starts `corral-demo-`, and names every marked home it leaves under that
+prefix (unmarked directories are not ours and are left alone). A `--home` you chose outside that
+naming is yours to remove.
+
 ## The core loop
 
 Claim a device, use it, release it. There are two styles.

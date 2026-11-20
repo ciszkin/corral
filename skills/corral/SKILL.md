@@ -29,6 +29,31 @@ What that buys you:
 - a released, crashed or expired lease goes to the longest-waiting agent in arrival order, so
   waiting is fair rather than a race.
 
+## Demo devices are fake
+
+`corral demo` serves a simulated pool from a second daemon. Its devices are values, not hardware:
+claiming one, screenshotting it or watching a boot flip exercises the lease plumbing, nothing on
+the host. **Never run a real build, test, install or `adb` command against a demo device.** A
+`connectedAndroidTest` pinned to `DEMO01234567` is not a smoke test; it is a wasted run against a
+serial the host's adb does not have, and a failure there says nothing about the app. If the only
+device you hold is a demo serial and the request is real work, stop and say so: that work needs a
+real device.
+
+How to tell: `GET /api/config` returns `"demo":true` when the daemon serves a simulated pool, and
+that `demo` field is the signal. The same flag is on `/api/status` and on every `/api/devices` item
+(the key is omitted when false, except the WS hello frame, which always carries it). You also see it
+from what `corral demo` printed — a `demo:` / `DEMO pool` banner and URL — and from the pool: every
+model in the shipped demo world ends in `(demo)` (`Pixel 7 (demo)`, `sdk_gphone64 (demo)`). A device
+labelled that way is simulated. The daemon reads `CORRAL_DEMO=1` at startup; that variable is
+environment-only (not a `daemon.env` key and not writable through `PUT /api/config`). A demo daemon
+also refuses `PUT /api/config` writes for `CORRAL_ADB`, `CORRAL_EMULATOR`, `CORRAL_RULES`,
+`CORRAL_ENV_FILE`, `CORRAL_DB` and `CORRAL_UPDATE_CHECK=on` with `… is refused in demo mode …`; that
+refusal confirms the demo, and is not a reason to retry with a real path.
+
+A demo lease is a real lease object in the demo daemon's own database: it frees on the same TTL and
+is invisible to the real daemon. Do not carry a demo serial to a real `corral lease`,
+`ANDROID_SERIAL`, Gradle build or MCP server.
+
 ## The core loop
 
 **Prefer the form that queues *and* holds** — it waits in the FIFO queue, then runs your command

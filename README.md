@@ -16,20 +16,37 @@ two forms that work.
 [Adopting Corral](CUTOVER.md) · [Security policy and threat model](SECURITY.md) ·
 [Agent skill](skills/corral/SKILL.md) · Apache-2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE))
 
+## Try it without a phone
+
+Once installed, `corral demo` starts a second, isolated daemon whose pool is simulated in process —
+no adb, no SDK, no real device or home, no gates, nothing installed. It prints the URL, and the same
+CLI and console point at it:
+
+```sh
+corral demo                              # 8799 unless taken; it prints the actual URL
+CORRAL_URL=http://127.0.0.1:8799 corral devices
+corral-ui --url http://127.0.0.1:8799
+```
+
+The console itself shows a persistent DEMO banner at the top of its window.
+
+Ctrl-C stops it and removes the demo home it made; [CUTOVER.md § Demo](CUTOVER.md#demo) has the
+flags and the cleanup rules.
+
 ## Install (Linux, JDK 17+; Windows uses the same installer)
 
 No clone and no Gradle: the release bundle carries both jars and the installer. Check it
 against the published checksum, and
-[read the installer first](https://github.com/ciszkin/corral/blob/v0.1.3/scripts/install.sh)
+[read the installer first](https://github.com/ciszkin/corral/blob/v0.1.4/scripts/install.sh)
 — it is the same `scripts/install.sh` the source tree uses. You need JDK 17+ and an
 Android SDK with `platform-tools/adb` on `PATH`: the installer stops without usable Java,
 and the tour below lists nothing without adb.
 
 ```sh
-curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.3/corral-0.1.3.zip
-curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.3/corral-0.1.3.zip.sha256
-sha256sum -c corral-0.1.3.zip.sha256
-unzip corral-0.1.3.zip -d corral-0.1.3 && cd corral-0.1.3 && ./install.sh --ui
+curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.4/corral-0.1.4.zip
+curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.4/corral-0.1.4.zip.sha256
+sha256sum -c corral-0.1.4.zip.sha256
+unzip corral-0.1.4.zip -d corral-0.1.4 && cd corral-0.1.4 && ./install.sh --ui
 ```
 
 From a source checkout instead:
@@ -100,7 +117,7 @@ inspect; the Gradle gate is the one it cannot see.
 | License | Apache-2.0 |
 
 **Versions.** The tag is the only source: a release jar reports the tag it was built from
-(`0.1.3`), a source build reports `git describe --tags --match v*` — that tag, or
+(`0.1.4`), a source build reports `git describe --tags --match v*` — that tag, or
 `<tag>-<n>-g<sha>` past it — and only a tree with neither a reachable `v*` tag nor
 `CORRAL_VERSION` (a jar built outside git, or a tagless clone) reports `0.0.0-dev`, which
 the console shows as-is.

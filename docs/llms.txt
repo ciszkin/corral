@@ -25,6 +25,7 @@ corral free <serial> | --all
 corral status                         # devices and their current holders
 corral queue                          # waiting tickets with position and remaining wait
 corral doctor                         # per-layer host health; exits non-zero on a real problem
+corral demo                           # a simulated pool on a free loopback port: no adb, SDK, device or gate, nothing installed
 ```
 
 - Selector: `--serial S --model M --os V(min) --type usb|wifi|emulator --avd A`.
@@ -54,4 +55,7 @@ claude mcp add --transport http corral http://127.0.0.1:8798/mcp
 - **Windows has two layers, not three** — the `.bat` wrapper and the Gradle gate; the SDK's `adb.exe`
   is not shimmed there.
 - **No macOS installer.** The daemon and CLI are portable, but nothing is packaged or verified on macOS.
+- **The demo is a simulation.** `corral demo` serves fake devices on a second, isolated loopback daemon;
+  its `/api/config` response carries `demo: true`, its inspection verbs print a DEMO line, and its
+  console shows a DEMO banner — never run a real build, test or adb command against them.
 - **Not a device farm, not a test sharder.** One host, the devices attached to it.

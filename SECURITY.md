@@ -54,6 +54,29 @@ None of these layers — including the ones above — is a security boundary aga
 a hostile local process; they are guardrails for cooperating agents and humans,
 and a client that goes around adb entirely is outside all of them.
 
+## The demo is a simulation
+
+`corral demo` runs a second, local daemon whose pool, screenshots and emulator host are simulated
+in process (`DemoWorld`). It is not a security boundary and not a sandbox for untrusted code: it is
+a way to look at the product without a device. It installs nothing — no `adb` wrapper, SDK shim,
+Gradle gate, service unit or Scheduled Task — and it starts no adb, emulator or scrcpy process,
+makes no network call, and reads or writes neither `~/.corral` nor `~/.config/corral`. Its device
+records are fabricated (the shipped ones are labelled `(demo)`), so a claim or a read taken against
+a demo daemon says nothing about a real device.
+
+Every surface says DEMO: the CLI's inspection verbs print a demo line on stderr, the devices, status
+and config responses carry `demo:true`, and so does the WS hello frame. The console shows a DEMO
+banner above its content and a DEMO pill in the status bar. In a demo the console disables its update
+row — no Check/Install buttons — and does not render the scrcpy live view, naming the reason.
+
+Its configuration route refuses the writes that would point it back at the host: `CORRAL_ADB`,
+`CORRAL_EMULATOR`, `CORRAL_RULES`, `CORRAL_ENV_FILE`, `CORRAL_DB` and `CORRAL_UPDATE_CHECK=on` are
+rejected by `PUT /api/config` with a `400` that names demo mode, and a refused body writes nothing;
+`CORRAL_UPDATE_CHECK=off` is already the demo's state, so it remains a no-op. The supervisor also
+strips inherited `CORRAL_ADB`, `CORRAL_EMULATOR`, `CORRAL_REPO` and the Android SDK selectors before
+spawning the child. Those refusals keep a demo from wandering onto real paths; they are guardrails,
+not a containment guarantee against a hostile local process.
+
 ## The update channel's outbound surface
 
 The daemon makes one outbound call a day on its own, plus one run per explicit

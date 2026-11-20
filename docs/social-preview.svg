@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="t d">
+  <title id="t">Corral — two coding agents, one phone, no collisions</title>
+  <desc id="d">The Corral mark and wordmark on a dark background, with the line "Two agents. One phone. No collisions." and the proof line "Exclusive leases for USB, WiFi and emulator devices — one agent session each."</desc>
+  <defs>
+    <radialGradient id="glow" gradientUnits="userSpaceOnUse" cx="250" cy="40" r="620">
+      <stop offset="0" stop-color="#d97706" stop-opacity="0.18"/>
+      <stop offset="0.55" stop-color="#d97706" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#d97706" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rule" x1="72" y1="0" x2="1128" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#d97706" stop-opacity="0.9"/>
+      <stop offset="0.35" stop-color="#3a4568" stop-opacity="0.7"/>
+      <stop offset="1" stop-color="#3a4568" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#0b1020"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+
+  <!-- Corral mark, traced from the shipped corral.png (the exact brand orange is #d97706) -->
+  <g transform="translate(72 56) scale(0.2657) translate(-42 -31)">
+    <path d="M241 31.5L217 34.5L196 39.5L171 48.5L149 59.5L129 72.5L113 85.5L96.5 102L80.5 122L67.5 143L58.5 162L51.5 181L45.5 205L42.5 226L42.5 263L47.5 294L59.5 330L69.5 350L79.5 366L93.5 384L116 406.5L143 426.5L172 441.5L194 449.5L210 453.5L226 456.5L250 457.5L251 458.5L282 456.5L291 464.5L310 475.5L329 481.5L344 483.5L371 481.5L395 474.5L401.5 468L404.5 461L403.5 448L401.5 444L396 438.5L390 435.5L381 434.5L364 439.5L342 440.5L323 434.5L314 428.5L302 416.5L294 412.5L284 412.5L267 415.5L244 415.5L227 413.5L197 405.5L173 394.5L157 384.5L143 373.5L121.5 351L109.5 334L99.5 315L93.5 300L88.5 282L85.5 264L84.5 237L87.5 212L91.5 196L97.5 179L110.5 154L123.5 136L138 120.5L155 106.5L172 95.5L193 85.5L211 79.5L238 74.5L272 74.5L296 78.5L325 88.5L339 95.5L360 109.5L374 121.5L386.5 135L404.5 161L416.5 187L422.5 208L425.5 226L426.5 250L425.5 251L424.5 271L420.5 290L410.5 317L392.5 347L391.5 359L393.5 365L400 372.5L406 375.5L415 376.5L424 373.5L430.5 367L438.5 355L453.5 325L463.5 294L468.5 262L468.5 227L465.5 205L459.5 181L448.5 153L437.5 133L419.5 108L399 86.5L382 72.5L351 53.5L330 44.5L299 35.5L270 31.5ZM226 132.5L210 135.5L192 145.5L182.5 155L176.5 164L170.5 182L170.5 307L172.5 316L180.5 332L191 343.5L206 352.5L220 356.5L291 356.5L303 353.5L316 346.5L326.5 337L336.5 321L340.5 307L340.5 183L337.5 171L331.5 159L319 145.5L312 140.5L301 135.5L285 132.5ZM225 175.5L219 178.5L215.5 182L212.5 190L212.5 300L214.5 306L221 312.5L227 314.5L284 314.5L290 312.5L296.5 306L298.5 300L298.5 190L295.5 182L292 178.5L286 175.5ZM243 260.5L238 261.5L231 265.5L226.5 271L223.5 278L223.5 286L227.5 295L235 301.5L241 303.5L270 303.5L276 301.5L283.5 295L287.5 286L286.5 275L282.5 268L277 263.5L268 260.5Z" fill="#d97706" fill-rule="evenodd"/>
+  </g>
+
+  <text x="228" y="136" font-family="'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="56" font-weight="600" letter-spacing="-0.8" fill="#f2f5fc">Corral</text>
+
+  <rect x="72" y="216" width="1056" height="2" fill="url(#rule)"/>
+
+  <text font-family="'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="84" font-weight="700" letter-spacing="-2.2" fill="#f2f5fc">
+    <tspan x="72" y="342">Two agents. One phone.</tspan>
+    <!-- accent lifted a touch from the mark's #d97706 for contrast on the dark field -->
+    <tspan x="72" y="438" fill="#e8890c">No collisions.</tspan>
+  </text>
+
+  <text x="72" y="516" font-family="'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="28" font-weight="400" letter-spacing="0.2" fill="#96a3c2">Exclusive leases for USB, WiFi and emulator devices — one agent session each.</text>
+
+  <text x="72" y="574" font-family="'Segoe UI', Inter, 'Helvetica Neue', Arial, sans-serif" font-size="22" font-weight="500" letter-spacing="0.5" fill="#606c94">github.com/ciszkin/corral · loopback-only daemon · Apache-2.0</text>
+</svg>

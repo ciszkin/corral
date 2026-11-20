@@ -1,0 +1,57 @@
+# Corral
+
+> Corral pools the Android devices attached to one host — USB, WiFi and emulators — and leases each
+> one exclusively to a single agent session, so two coding agents cannot drive the same device at
+> once: the second one queues, or gets a refusal that names the way through. It is a local-only
+> Kotlin/Ktor daemon on `127.0.0.1` with a CLI, a Compose Desktop console, an MCP endpoint, and
+> exec-time gates that turn away adb calls made without a lease.
+
+## Start here
+
+- [README.md](https://github.com/ciszkin/corral/blob/main/README.md) — what it does, how it is shaped, build and test commands.
+- [CUTOVER.md](https://github.com/ciszkin/corral/blob/main/CUTOVER.md) — adoption: requirements, install, core loop, selectors, Gradle, emulators, config, doctor, updates, uninstall, known limits.
+- [SECURITY.md](https://github.com/ciszkin/corral/blob/main/SECURITY.md) — threat model, the named bypasses, and what the update checksum does not prove.
+- [skills/corral/SKILL.md](https://github.com/ciszkin/corral/blob/main/skills/corral/SKILL.md) — the agent skill: lease before touching a device, and how to read a refusal.
+- Install on Linux with `scripts/install.sh` (JDK 17+); Windows goes through the installer's Windows branch. Details in CUTOVER.md.
+
+## Commands an agent needs
+
+```sh
+corral devices                        # the pool as JSON
+corral claim [selector]               # one serial on stdout; a TTL-bounded hold you free later
+corral lease --timeout 120 -- <cmd>   # wait in the FIFO queue, then run <cmd> with the device held until it exits
+corral wait --timeout 60              # poll-then-decide; hands the lease back when the process exits
+corral free <serial> | --all
+corral status                         # devices and their current holders
+corral queue                          # waiting tickets with position and remaining wait
+corral doctor                         # per-layer host health; exits non-zero on a real problem
+```
+
+- Selector: `--serial S --model M --os V(min) --type usb|wifi|emulator --avd A`.
+- Beyond the loop: `corral avd list|start A|stop A`, `screenshot <serial> [--out F]`, `events`,
+  `gate -- <adb args>`, `update [--apply]` — all in [README.md](https://github.com/ciszkin/corral/blob/main/README.md).
+- A queue wait is capped at 600 s; a larger `--timeout` is clamped with a warning, a negative one is a usage error.
+- `<cmd>` runs with `ANDROID_SERIAL` set to the served serial. `CORRAL_OWNER` is your identity — set it
+  if your harness starts a new process per call, or your own lease will read as someone else's.
+
+## MCP
+
+The same lease API is exposed at `POST http://127.0.0.1:8798/mcp` (streamable HTTP, one identity per
+MCP session) as eight tools: `list_devices`, `queue`, `claim`, `free`, `renew`, `screenshot`,
+`start_emulator`, `stop_emulator`.
+
+```sh
+claude mcp add --transport http corral http://127.0.0.1:8798/mcp
+```
+
+## Limits — stated, not implied away
+
+- **Loopback only.** The daemon binds `127.0.0.1` and answers `403` to any non-local `Host`, `/mcp` included.
+- **The gates are guardrails between cooperating agents, not a security boundary.** Identity is
+  self-declared and the daemon believes it. A ddmlib client talking to the adb server on `:5037`
+  (Android Studio's Run, Logcat, Device Explorer), `platform-tools/adb.real`, or any adb reached by
+  absolute path outside the SDK shim sits outside the layers.
+- **Windows has two layers, not three** — the `.bat` wrapper and the Gradle gate; the SDK's `adb.exe`
+  is not shimmed there.
+- **No macOS installer.** The daemon and CLI are portable, but nothing is packaged or verified on macOS.
+- **Not a device farm, not a test sharder.** One host, the devices attached to it.

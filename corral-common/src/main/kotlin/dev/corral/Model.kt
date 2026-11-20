@@ -13,7 +13,13 @@ data class Device(val serial: String, val state: String,
                   /** This emulator's AVD is alive but has never registered with adb past the boot
                    *  deadline. Visibility only — [usable] still refuses it. */
                   val wedged: Boolean = false,
-                  val wedgeReason: String? = null) {
+                  val wedgeReason: String? = null,
+                  /**
+                   * A simulated device (`corral demo`). Additive and defaulted, so a client built
+                   * before the field reads a new daemon safely; the demo label is what makes a fake
+                   * pool unmistakable in every surface (plan §9, I7).
+                   */
+                  val demo: Boolean = false) {
     companion object {
         fun transportOf(serial: String) = when {
             serial.startsWith("emulator-") -> "emulator"
@@ -33,8 +39,13 @@ data class Lease(val serial: String, val owner: String, val pid: Long = 0,
 
 @Serializable data class DeviceStatus(val serial: String, val lease: Lease?, val booted: Boolean = true)
 
+/**
+ * `/api/status`. [demo] is additive and defaulted: a daemon built before it decodes as a real one
+ * on a new client, and a JSON body with it decodes on a client that ignores unknown keys (I7).
+ */
 @Serializable data class StatusResponse(val devices: List<DeviceStatus>, val adb: String,
-                                         val version: String = "")
+                                         val version: String = "",
+                                         val demo: Boolean = false)
 
 /** The four outcomes of a check, carried explicitly so a consumer cannot infer one from another field. */
 @Serializable
@@ -94,5 +105,10 @@ data class UpdateInfo(
 @Serializable data class QueueEntry(val position: Int, val owner: String, val selector: String,
     val waitedSeconds: Long, val deadlineIn: Long)
 
+/**
+ * One WS frame. [demo] rides the `hello` frame — the first thing any client reads — so a console
+ * knows the pool is a simulation before it draws a device. Additive and defaulted (I7).
+ */
 @Serializable
-data class EventFrame(val type: String, val resources: List<String> = emptyList(), val seq: Long = 0)
+data class EventFrame(val type: String, val resources: List<String> = emptyList(), val seq: Long = 0,
+                      val demo: Boolean = false)

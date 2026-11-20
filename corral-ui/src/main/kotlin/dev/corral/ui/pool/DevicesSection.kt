@@ -21,6 +21,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollbarAdapter
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.MaterialTheme
+import androidx.compose.material.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -40,6 +41,7 @@ import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.carousel_next
 import dev.corral.ui.resources.carousel_prev
+import dev.corral.ui.resources.demo_live_disabled
 import dev.corral.ui.resources.devices_booting
 import dev.corral.ui.resources.devices_free
 import dev.corral.ui.resources.devices_held
@@ -81,6 +83,14 @@ fun DevicesSection(
             )
         }
         if (!expanded) return
+        if (state.demo) {
+            Text(
+                stringResource(Res.string.demo_live_disabled),
+                style = MaterialTheme.typography.caption,
+                color = LocalExtendedColors.current.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = Dimens.space8),
+            )
+        }
         if (state.devices.isEmpty()) {
             DevicesEmptyState()
         } else {
@@ -102,6 +112,7 @@ fun DevicesSection(
                             denied = state.denied,
                             now = state.now,
                             canForceFree = state.capabilities.canForceFree,
+                            canLive = !state.demo,
                             scrcpyReason = scrcpyFailure?.takeIf { it.first == view.d.serial }?.second,
                             onLive = { onScrcpy(view.d.serial) },
                             onForceFree = { onIntent(PoolIntent.AskForceFree(view.d.serial)) },

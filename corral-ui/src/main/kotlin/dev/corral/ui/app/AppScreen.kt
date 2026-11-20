@@ -68,6 +68,8 @@ import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.banner_screenshots_denied
 import dev.corral.ui.resources.cancel
 import dev.corral.ui.resources.confirm
+import dev.corral.ui.resources.demo_banner
+import dev.corral.ui.resources.demo_status_pill
 import dev.corral.ui.resources.emulator_action_failed
 import dev.corral.ui.resources.force_free_body
 import dev.corral.ui.resources.force_free_failed
@@ -247,7 +249,18 @@ fun AppScreen(
                 ) { confirmQuit = true }
             }
             Column(Modifier.weight(1f)) {
-                StatusBar(state, configState.update) { mode -> app.onIntent(AppIntent.SetTheme(mode)) }
+                StatusBar(state, configState.update, state.demo) { mode -> app.onIntent(AppIntent.SetTheme(mode)) }
+                // The persistent DEMO banner: top of the content area, above every other banner, so
+                // no screen of a simulated pool can be read as a real one (I7).
+                if (state.demo) {
+                    val colors = LocalExtendedColors.current
+                    Banner(
+                        icon = Icons.AlertTriangle,
+                        text = stringResource(Res.string.demo_banner),
+                        container = colors.warningContainer,
+                        content = colors.onWarningContainer,
+                    )
+                }
                 if (poolState.denied) {
                     val colors = LocalExtendedColors.current
                     Banner(
@@ -501,7 +514,7 @@ private fun RailItem(
 }
 
 @Composable
-private fun StatusBar(state: AppState, update: UpdateInfo?, onTheme: (ThemeMode) -> Unit) {
+private fun StatusBar(state: AppState, update: UpdateInfo?, demo: Boolean, onTheme: (ThemeMode) -> Unit) {
     val colors = LocalExtendedColors.current
     val status = when (val connection = state.connection) {
         is Connection.Connected -> stringResource(Res.string.status_connected, connection.seq)
@@ -519,6 +532,17 @@ private fun StatusBar(state: AppState, update: UpdateInfo?, onTheme: (ThemeMode)
             style = MaterialTheme.typography.caption,
             modifier = Modifier.weight(1f),
         )
+        // The status-bar half of the DEMO marking: visible on every section, at every scroll
+        // position, including when the top banner has been scrolled past (I7).
+        if (demo) {
+            CorralPill(
+                text = stringResource(Res.string.demo_status_pill),
+                container = colors.warningContainer,
+                content = colors.onWarningContainer,
+                icon = Icons.AlertTriangle,
+                modifier = Modifier.padding(end = Dimens.space8),
+            )
+        }
         UpdatePill(update)
         Row(
             Modifier.clip(RoundedCornerShape(Dimens.radiusPill))

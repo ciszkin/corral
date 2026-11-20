@@ -28,9 +28,11 @@ import io.ktor.server.websocket.WebSockets as ServerWebSockets
 import io.ktor.server.websocket.webSocket
 import io.ktor.websocket.Frame
 import kotlinx.coroutines.flow.first
+import kotlinx.serialization.decodeFromString
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -197,8 +199,22 @@ class CorralClientTest {
         assertEquals("/fake/env", c.envPath)
     }
 
-    @Test fun putConfigSuccessCarriesWarnings() = testApplication {
-        val res = client().putConfig(mapOf("CORRAL_ADB" to "adb"), null)
+    /**
+     * D9's compatibility half — the console mirror is additive and defaulted, so a console built
+     * before `demo` reads a new daemon (and a new console reads an old one) without a crash and
+     * without inventing a DEMO label for a real pool. This is the same pattern `updateRepo` uses.
+     */
+    @Test fun configDecodesTheDemoFlagFromANewDaemonAndDefaultsItForAnOldOne() {
+        val rules = """"rules":{"readonly":[],"valueflags":[]}"""
+        val old = corralJson.decodeFromString<dev.corral.ui.data.ConfigResponse>(
+            """{"settings":[],$rules,"rulesPath":"/r","envPath":"/e"}""")
+        assertFalse(old.demo, "a daemon that predates the field is serving a real pool")
+        val demo = corralJson.decodeFromString<dev.corral.ui.data.ConfigResponse>(
+            """{"settings":[],$rules,"rulesPath":"/r","envPath":"/e","demo":true}""")
+        assertTrue(demo.demo)
+    }
+
+    @Test fun putConfigSuccessCarriesWarnings() = testApplication {        val res = client().putConfig(mapOf("CORRAL_ADB" to "adb"), null)
         assertEquals(listOf("CORRAL_ADB not on PATH"), res.getOrThrow().warnings)
     }
 

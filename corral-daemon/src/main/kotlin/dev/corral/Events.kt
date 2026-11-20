@@ -24,6 +24,8 @@ class Events(
     private val queueView: suspend () -> List<QueueEntry>,
     private val scope: CoroutineScope,
     private val tickMs: Long = 500,
+    /** The server-side demo flag: the hello frame is where a console learns it first (I7). */
+    private val demo: Boolean = false,
 ) {
     private val json = Json { encodeDefaults = true }
     private val _flow = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 64,
@@ -32,7 +34,7 @@ class Events(
     private val counter = AtomicLong(0)
     val seq: Long get() = counter.get()
 
-    fun helloFrame(): String = json.encodeToString(EventFrame("hello", listOf("devices", "queue"), seq))
+    fun helloFrame(): String = json.encodeToString(EventFrame("hello", listOf("devices", "queue"), seq, demo))
 
     fun start() {
         scope.launch {

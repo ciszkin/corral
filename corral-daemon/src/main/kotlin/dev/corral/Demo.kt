@@ -161,11 +161,17 @@ internal val DEMO_UNSET = listOf(
  * must not be walked into I1 (a real adb/emulator path), I3 (a DB outside the demo home) or I5 (an
  * update check) by its own config route. Turning the update check *off* stays allowed: it is already
  * off, so the write is a no-op rather than a hole.
+ *
+ * `CORRAL_RULES` and `CORRAL_ENV_FILE` are not registered keys, so a real daemon refuses them as
+ * "unknown setting". In demo mode that answer would be a half-truth — the demo *does* read both,
+ * from its own home — so they are refused here, naming demo mode (plan §11).
  */
 internal fun demoSettingRefusal(key: String, raw: String): String? = when (key) {
     "CORRAL_ADB" -> "CORRAL_ADB is refused in demo mode: the demo pool is in-JVM and never runs adb"
     "CORRAL_EMULATOR" -> "CORRAL_EMULATOR is refused in demo mode: the demo never starts an emulator binary"
     "CORRAL_DB" -> "CORRAL_DB is refused in demo mode: the demo keeps its own database in the demo home"
+    "CORRAL_RULES" -> "CORRAL_RULES is refused in demo mode: the demo reads the rules copy in its own demo home"
+    "CORRAL_ENV_FILE" -> "CORRAL_ENV_FILE is refused in demo mode: the demo's environment belongs to its supervisor"
     "CORRAL_UPDATE_CHECK" ->
         if (raw.trim().lowercase() == "on") "CORRAL_UPDATE_CHECK=on is refused in demo mode: a demo makes no network call"
         else null

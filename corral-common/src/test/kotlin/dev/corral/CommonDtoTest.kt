@@ -56,6 +56,33 @@ class CommonDtoTest {
         assertEquals(u, corralJson.decodeFromString(UpdateInfo.serializer(), corralJson.encodeToString(UpdateInfo.serializer(), u)))
     }
 
+    /**
+     * D9 — the demo label is additive and defaulted in **both** directions: a payload from a daemon
+     * that predates the field decodes as a real one (never a crash, never a false DEMO), a payload
+     * that carries it decodes as a demo one, and the label is only on the wire when it is true — so
+     * a real daemon's JSON stays byte-identical to the pre-demo shape.
+     */
+    @Test fun demoLabelsDecodeFromLegacyPayloadsAndAreOnlyEmittedWhenSet() {
+        val oldDevice = corralJson.decodeFromString(Device.serializer(), """{"serial":"d1","state":"device"}""")
+        assertFalse(oldDevice.demo, "a payload with no demo field is a real device")
+        val demoDevice = corralJson.decodeFromString(Device.serializer(),
+            """{"serial":"d1","state":"device","demo":true}""")
+        assertTrue(demoDevice.demo)
+        assertTrue(corralJson.encodeToString(Device.serializer(), demoDevice).contains("\"demo\":true"))
+        assertFalse(corralJson.encodeToString(Device.serializer(), oldDevice).contains("\"demo\""),
+            "a real device must not gain a demo key on the wire")
+
+        val oldStatus = corralJson.decodeFromString(StatusResponse.serializer(), """{"devices":[],"adb":"adb"}""")
+        assertFalse(oldStatus.demo)
+        assertTrue(corralJson.decodeFromString(StatusResponse.serializer(),
+            """{"devices":[],"adb":"adb","demo":true}""").demo)
+
+        val oldHello = corralJson.decodeFromString(EventFrame.serializer(), """{"type":"hello","seq":0}""")
+        assertFalse(oldHello.demo, "an old daemon's hello frame is a real pool")
+        assertTrue(corralJson.decodeFromString(EventFrame.serializer(),
+            """{"type":"hello","resources":["devices"],"seq":0,"demo":true}""").demo)
+    }
+
     @Test fun jsonIgnoresUnknownKeys() {
         val d = corralJson.decodeFromString(Device.serializer(), """{"serial":"d1","state":"device","futureField":1}""")
         assertEquals("d1", d.serial)

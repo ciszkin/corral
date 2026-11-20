@@ -183,11 +183,18 @@
     <string name="doctor_status_skipped">SKIPPED</string>
     <string name="doctor_status_warn">WARN</string>
     <string name="doctor_status_info">info</string>
+    <string name="doctor_layer_demo">Demo</string>
 
     <string name="status_stale_watermark">STALE</string>
     <string name="force_free_nobody">nobody</string>
     <string name="force_free_failed">Force free failed — the daemon refused the request.</string>
     <string name="retry">Retry</string>
+
+    <!-- Demo mode (S4): a simulated pool must be unmistakable on every screen (I7) -->
+    <string name="demo_banner">DEMO — this console is watching a simulated pool. No real device, no adb, no gates; nothing shown here can touch a phone.</string>
+    <string name="demo_status_pill">DEMO</string>
+    <string name="demo_update_disabled">disabled in demo</string>
+    <string name="demo_live_disabled">live view is disabled in demo mode — it would spawn a real scrcpy binary</string>
 
     <string name="update_section">Update</string>
     <string name="update_source">Update source</string>

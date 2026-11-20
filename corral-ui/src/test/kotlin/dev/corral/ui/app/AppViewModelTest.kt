@@ -208,30 +208,48 @@ class AppViewModelTest {
         )
     }
 
+    @Test fun theDemoLabelArrivesOnTheHelloFrameAndLeavesWithTheSocket() = runTest {
+        val vm = newVm()
+        assertFalse(vm.state.value.demo, "a console starts assuming a real pool")
+        vm.onIntent(AppIntent.Frame(hello.copy(demo = true)))
+        assertTrue(vm.state.value.demo, "the hello frame is the first thing the console reads (D9)")
+        vm.onIntent(AppIntent.SocketClosed)
+        assertFalse(vm.state.value.demo, "a stale DEMO banner would be a worse lie than none")
+    }
+
+    @Test fun theStatusPollAlsoCarriesTheDemoFlagForAClientThatOnlyPolls() = runTest {
+        val vm = newVm()
+        vm.onDaemonStatus("1.2.3", demo = true)
+        assertEquals("1.2.3", vm.state.value.daemonVersion)
+        assertTrue(vm.state.value.demo)
+        vm.onDaemonStatus("1.2.3", demo = false)
+        assertFalse(vm.state.value.demo)
+    }
+
     @Test fun daemonVersionStartsEmptyAndIsSetFromTheStatusPoll() = runTest {
         val vm = newVm()
         assertEquals("", vm.state.value.daemonVersion)
-        vm.onDaemonVersion("1.2.3")
+        vm.onDaemonStatus("1.2.3", demo = false)
         assertEquals("1.2.3", vm.state.value.daemonVersion)
     }
 
     @Test fun daemonVersionIsClearedWhenTheSocketDrops() = runTest {
         val vm = newVm()
-        vm.onDaemonVersion("1.2.3")
+        vm.onDaemonStatus("1.2.3", demo = false)
         vm.onIntent(AppIntent.SocketClosed)
         assertEquals("", vm.state.value.daemonVersion)
     }
 
     @Test fun reconnectingClearsTheDaemonVersion() = runTest {
         val vm = newVm()
-        vm.onDaemonVersion("1.2.3")
+        vm.onDaemonStatus("1.2.3", demo = false)
         vm.onIntent(AppIntent.Connect("http://new", "owner2"))
         assertEquals("", vm.state.value.daemonVersion)
     }
 
     @Test fun openingTheSocketClearsTheDaemonVersion() = runTest {
         val vm = newVm()
-        vm.onDaemonVersion("1.2.3")
+        vm.onDaemonStatus("1.2.3", demo = false)
         vm.onIntent(AppIntent.SocketOpened)
         assertEquals("", vm.state.value.daemonVersion)
     }

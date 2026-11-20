@@ -14,6 +14,9 @@
 #   D7  I6/I8 a real daemon on 8798 keeps serving while the demo runs on 8799; DBs and leases stay apart
 #           (skipped, with the reason named, when either port is already taken by someone else's daemon)
 #   D8  I6  a busy port moves the demo to the next free one; two demos run side by side
+#   D9  I7  every surface is labelled: /api/devices per item, /api/status, /api/config, the hello
+#           frame, the CLI's inspection verbs, doctor's demo layer and `corral update`
+#   D10 I9  a PUT of a path-bearing knob is a 400 naming demo mode, and the file is unchanged
 #   D11 I10 SIGINT stops it (POSIX only: Git Bash cannot signal a native JVM), a killed supervisor
 #           leaves no daemon JVM, and cleanup removes marked homes only
 #   D12 G2  --speed 2 halves the wall clock without changing what happened; --no-script idles cleanly
@@ -600,6 +603,111 @@ d8_busy_port_and_concurrent_demos() {
   return 0
 }
 check "D8 a busy port moves the demo to the next free one; two demos run side by side" d8_busy_port_and_concurrent_demos
+
+# ---------------------------------------------------------------------------------------------
+# D9 (I7) — every surface a visitor can read says DEMO: the REST payloads (/api/devices per item,
+# /api/status, /api/config), the console's hello frame, the CLI's own inspection lines, doctor's
+# layer and the update verb. A label that only exists in the docs is not a label.
+# ---------------------------------------------------------------------------------------------
+d9_every_surface_is_labelled() {
+  demo_start --port 8909 || return 1
+  local url="http://127.0.0.1:$DEMO_PORT"
+  local devices status config
+  devices=$(api_body "$DEMO_PORT" "/api/devices")
+  status=$(api_body "$DEMO_PORT" "/api/status")
+  config=$(api_body "$DEMO_PORT" "/api/config")
+  # the console's first frame: `corral events` prints it verbatim, then keeps streaming
+  : > "$TMP/d9-hello.out"
+  demo_cli "$url" events >"$TMP/d9-hello.out" 2>&1 &
+  local ep=$!
+  local i; for i in $(seq 1 100); do grep -q '"type":"hello"' "$TMP/d9-hello.out" 2>/dev/null && break; sleep 0.1; done
+  kill_tree "$ep"; wait "$ep" 2>/dev/null
+  # the CLI's inspection verbs label on stderr, so their stdout stays the daemon's own JSON
+  : > "$TMP/d9-cli.out"
+  demo_cli "$url" devices >>"$TMP/d9-cli.out" 2>&1
+  demo_cli "$url" status  >>"$TMP/d9-cli.out" 2>&1
+  demo_cli "$url" queue   >>"$TMP/d9-cli.out" 2>&1
+  demo_cli "$url" check   >>"$TMP/d9-cli.out" 2>&1
+  demo_cli "$url" doctor   >"$TMP/d9-doctor.out" 2>&1
+  demo_cli "$url" update   >"$TMP/d9-update.out" 2>&1
+  local applied=0
+  demo_cli "$url" update --apply >"$TMP/d9-update-apply.out" 2>&1 || applied=1
+  demo_stop
+
+  local labelled; labelled=$(printf '%s' "$devices" | grep -o '"demo":true' | wc -l | tr -d ' ')
+  [ "$labelled" = 3 ] || { note "/api/devices labelled $labelled of 3 devices: $devices"; return 1; }
+  case "$status" in *'"demo":true'*) ;; *) note "/api/status is not labelled: $status"; return 1;; esac
+  case "$config" in *'"demo":true'*) ;; *) note "/api/config is not labelled: $config"; return 1;; esac
+  grep -q '"type":"hello"' "$TMP/d9-hello.out" || {
+    note "no hello frame from /ws/events: $(head -3 "$TMP/d9-hello.out")"; return 1; }
+  grep -q '"demo":true' "$TMP/d9-hello.out" || {
+    note "the hello frame is not labelled: $(head -3 "$TMP/d9-hello.out")"; return 1; }
+
+  local cli_marks; cli_marks=$(grep -c 'corral: DEMO' "$TMP/d9-cli.out" || true); cli_marks=${cli_marks:-0}
+  [ "$cli_marks" -ge 4 ] || {
+    note "only $cli_marks of 4 CLI inspection verbs said DEMO:"; sed -n '1,8p' "$TMP/d9-cli.out" | sed 's/^/    /'; return 1; }
+
+  grep -q 'demo: ok - fake pool, no gates installed' "$TMP/d9-doctor.out" || {
+    note "doctor has no demo layer:"; sed -n '1,8p' "$TMP/d9-doctor.out" | sed 's/^/    /'; return 1; }
+  grep -q 'sdk-shim: skipped - demo mode' "$TMP/d9-doctor.out" || {
+    note "doctor did not skip the SDK shim by name:"; sed -n '1,8p' "$TMP/d9-doctor.out" | sed 's/^/    /'; return 1; }
+  grep -q 'rules: skipped - demo mode' "$TMP/d9-doctor.out" || {
+    note "doctor did not skip the rules file by name:"; sed -n '1,8p' "$TMP/d9-doctor.out" | sed 's/^/    /'; return 1; }
+  if grep -q 'FAIL' "$TMP/d9-doctor.out"; then
+    note "doctor FAILed inside a demo:"; sed -n '1,8p' "$TMP/d9-doctor.out" | sed 's/^/    /'; return 1
+  fi
+
+  grep -q 'demo mode: updates are not applicable' "$TMP/d9-update.out" || {
+    note "corral update did not say demo mode:"; sed -n '1,4p' "$TMP/d9-update.out" | sed 's/^/    /'; return 1; }
+  [ "$applied" = 1 ] || { note "corral update --apply exited 0 inside a demo"; return 1; }
+  grep -q 'demo mode: updates are not applicable' "$TMP/d9-update-apply.out" || {
+    note "update --apply did not name demo mode: $(head -2 "$TMP/d9-update-apply.out")"; return 1; }
+  return 0
+}
+check "D9 every surface is labelled DEMO: devices/status/config/hello, the CLI, doctor and update" d9_every_surface_is_labelled
+
+# ---------------------------------------------------------------------------------------------
+# D10 (I9) — the write barrier at the URL level: a PUT that points a path-bearing knob at a real
+# binary answers 400 naming demo mode and writes nothing, and the demo's own daemon.env is
+# byte-identical afterwards. shell_skip/init_floor stay file-only, as they do on a real daemon.
+# ---------------------------------------------------------------------------------------------
+d10_config_write_is_refused() {
+  demo_start --port 8910 || return 1
+  local url="http://127.0.0.1:$DEMO_PORT"
+  local envf="$DEMO_HOME/daemon.env"
+  local before after code kv key val
+  before=$(file_sig "$envf")
+  for kv in CORRAL_ADB=/usr/bin/adb CORRAL_EMULATOR=/usr/bin/emulator \
+            CORRAL_RULES=/usr/bin/rules CORRAL_ENV_FILE=/usr/bin/daemon.env \
+            CORRAL_DB=/tmp/demo-refused.db CORRAL_UPDATE_CHECK=on; do
+    key=${kv%%=*}; val=${kv#*=}
+    code=$(curl -s -o "$TMP/d10-put.out" -w '%{http_code}' --max-time 2 -X PUT \
+      -H 'Content-Type: application/json' \
+      -d "{\"settings\":{\"$key\":\"$val\"}}" "$url/api/config" 2>/dev/null)
+    [ "$code" = "400" ] || { demo_stop; note "PUT $key answered $code: $(head -c 200 "$TMP/d10-put.out")"; return 1; }
+    grep -q 'demo mode' "$TMP/d10-put.out" || {
+      demo_stop; note "PUT $key did not name demo mode: $(head -c 200 "$TMP/d10-put.out")"; return 1; }
+    grep -q "$key" "$TMP/d10-put.out" || {
+      demo_stop; note "PUT $key did not name the key: $(head -c 200 "$TMP/d10-put.out")"; return 1; }
+    after=$(file_sig "$envf")
+    [ "$after" = "$before" ] || { demo_stop; note "PUT $key rewrote $envf ($before -> $after)"; return 1; }
+  done
+
+  # the identity lists are file-only in a demo too: the same refusal a real daemon gives
+  code=$(curl -s -o "$TMP/d10-rules.out" -w '%{http_code}' --max-time 2 -X PUT \
+    -H 'Content-Type: application/json' -d '{"rules":{"shell_skip":["bash"]}}' "$url/api/config" 2>/dev/null)
+  local rules_code="$code"
+  local adb_effective
+  adb_effective=$(api_body "$DEMO_PORT" "/api/config" | grep -o '"key":"CORRAL_ADB","value":"[^"]*"')
+  demo_stop
+  [ "$rules_code" = "400" ] || { note "a rules PUT answered $rules_code"; return 1; }
+  grep -q 'file-only' "$TMP/d10-rules.out" || {
+    note "the rules refusal did not say file-only: $(head -c 200 "$TMP/d10-rules.out")"; return 1; }
+  case "$adb_effective" in *'"value":"adb"') ;; *)
+    note "CORRAL_ADB is no longer the demo default: $adb_effective"; return 1;; esac
+  return 0
+}
+check "D10 PUT /api/config of a path-bearing knob is a 400 naming demo mode; nothing is written" d10_config_write_is_refused
 
 # ---------------------------------------------------------------------------------------------
 # D11a (I10, POSIX only) — SIGINT: exit within 4 s, no daemon JVM left, home removed.

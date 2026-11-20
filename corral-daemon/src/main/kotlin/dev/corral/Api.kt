@@ -85,7 +85,9 @@ import kotlinx.serialization.json.decodeFromJsonElement
 
 @Serializable data class ConfigResponse(val settings: List<ConfigSetting>, val rules: ConfigRules,
                                         val rulesPath: String, val envPath: String,
-                                        val updateRepo: String = "")
+                                        val updateRepo: String = "",
+                                        /** Additive and defaulted: a real pool omits it (I7). */
+                                        val demo: Boolean = false)
 
 @Serializable data class PutConfigRequest(val settings: Map<String, String> = emptyMap(), val rules: ConfigRules? = null)
 
@@ -176,6 +178,14 @@ private fun flagWedged(devices: List<Device>, wedged: Map<String, WedgeReason>):
     val bySerial = wedged.values.flatMap { w -> w.serials.map { it to w.reason } }.toMap()
     return devices.map { d -> bySerial[d.serial]?.let { d.copy(wedged = true, wedgeReason = it) } ?: d }
 }
+
+/**
+ * I7's server-side guarantee: on a demo daemon every device this route serves is labelled, whatever
+ * device source produced the pool. The label is decided from [AppEnv.demo] — read once at startup —
+ * so a demo cannot be served unlabelled by a source that forgot to set it.
+ */
+private fun demoLabelled(devices: List<Device>, demo: Boolean): List<Device> =
+    if (!demo) devices else devices.map { if (it.demo) it else it.copy(demo = true) }
 
 /** systemd reads `EnvironmentFile` with `\`-continuations and quote handling; the daemon reads it verbatim. */
 private fun String.envUnsafe(): Boolean =
@@ -274,16 +284,34 @@ fun Application.corralModule(env: AppEnv) {
             try { for (frame in incoming) { /* client frames are ignored; tolerance is part of the contract */ } }
             finally { pump.cancel() }
         }
-        get("/api/devices") { call.respond(flagWedged(env.devices(), wedgedAvds(env.devices(), env.emulators))) }
+        get("/api/devices") {
+            val devices = demoLabelled(flagWedged(env.devices(), wedgedAvds(env.devices(), env.emulators)), env.demo)
+            call.respond(devices)
+        }
         get("/api/status") {
             call.respond(StatusResponse(
                 devices = env.devices().map { d -> DeviceStatus(d.serial, env.leases.snapshot[d.serial], d.booted) },
                 adb = env.adbPath ?: "",
-                version = VersionSource.version
+                version = VersionSource.version,
+                demo = env.demo
             ))
         }
         get("/api/doctor") {
             val adbPath = env.adbPath ?: "adb"
+            val devices = env.devices()
+            val daemonLayer = DoctorLayer("daemon", "ok",
+                "serving ${devices.size} device(s)" + if (devices.isEmpty()) " - $EMPTY_POOL_HINT" else "")
+            // A demo has no gates to inspect and no network to reach: the two host layers are
+            // reported as SKIPPED with the reason, never as FAIL — a demo is not a broken install
+            // (I2, I4). Nothing here reads a real path: the demo's rules live in its own home.
+            if (env.demo) {
+                call.respond(DoctorResponse(adbPath, listOf(
+                    DoctorLayer("demo", "ok", "fake pool, no gates installed"),
+                    daemonLayer,
+                    DoctorLayer("sdk-shim", "skipped", "demo mode"),
+                    DoctorLayer("rules", "skipped", "demo mode"))))
+                return@get
+            }
             val rulesPath = RulesFile.defaultPath()
             val rules = RulesFile.load()
             val (shimStatus, shimDetail) = SdkShim.probe(Path.of(adbPath))
@@ -300,11 +328,9 @@ fun Application.corralModule(env: AppEnv) {
                 reasons.isNotEmpty() -> DoctorLayer("rules", "warn", "$rulesPath ${reasons.joinToString("; ")}")
                 else -> DoctorLayer("rules", "ok", "$rulesPath (${rules.readonly.size} readonly)")
             }
-            val devices = env.devices()
             val wedged = wedgedAvds(devices, env.emulators)
             call.respond(DoctorResponse(adbPath, listOfNotNull(
-                DoctorLayer("daemon", "ok",
-                    "serving ${devices.size} device(s)" + if (devices.isEmpty()) " - $EMPTY_POOL_HINT" else ""),
+                daemonLayer,
                 DoctorLayer("sdk-shim", shimStatus, shimDetail),
                 rulesLayer,
                 wedged.takeIf { it.isNotEmpty() }?.let { w ->
@@ -375,7 +401,8 @@ fun Application.corralModule(env: AppEnv) {
             call.respond(ConfigResponse(
                 cfg.settings(),
                 ConfigRules(r.readonly.sorted(), r.valueFlags.sorted(), r.shellSkip.sorted(), r.initFloor.sorted()),
-                RulesFile.defaultPath().toString(), DaemonConfig.defaultPath().toString(), updateRepo()))
+                RulesFile.defaultPath().toString(), DaemonConfig.defaultPath().toString(), updateRepo(),
+                demo = env.demo))
         }
         put("/api/config") {
             if (call.rejectsForeignOrigin()) return@put

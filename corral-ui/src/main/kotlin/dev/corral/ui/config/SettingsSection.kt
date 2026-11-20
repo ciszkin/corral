@@ -45,6 +45,7 @@ import dev.corral.ui.icons.AppIcon
 import dev.corral.ui.icons.Icons
 import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.config_loading
+import dev.corral.ui.resources.demo_update_disabled
 import dev.corral.ui.resources.rail_settings
 import dev.corral.ui.resources.rules_discard
 import dev.corral.ui.resources.rules_dirty
@@ -128,6 +129,13 @@ internal fun versionMismatchHint(consoleVersion: String, daemonVersion: String):
 internal fun updateRepoText(loaded: ConfigResponse, unknown: String): String =
     loaded.updateRepo.ifBlank { unknown }
 
+/**
+ * Whether the update row may offer its two controls at all. A demo never can: it has no feed to read
+ * and nothing to install (I5), so the row explains itself instead of showing a button that must
+ * refuse. A real daemon keeps both controls, disabled while an action runs.
+ */
+internal fun updateControlsAvailable(demo: Boolean): Boolean = !demo
+
 @Composable
 fun SettingsSection(
     state: ConfigState,
@@ -162,7 +170,7 @@ fun SettingsSection(
                 }
             }
             Spacer(Modifier.size(Dimens.space12))
-            UpdateGroup(state, onConfigIntent)
+            UpdateGroup(state, app.demo, onConfigIntent)
             Spacer(Modifier.size(Dimens.space12))
         }
         SettingsFooter(
@@ -304,12 +312,12 @@ private fun DaemonGroup(
 @Composable
 private fun UpdateGroup(
     state: ConfigState,
+    demo: Boolean,
     onConfigIntent: (ConfigIntent) -> Unit,
 ) {
     val colors = LocalExtendedColors.current
     val info = state.update
     val available = info?.state == UpdateState.UPDATE_AVAILABLE
-    val busy = state.updateChecking || state.installing
     SectionGroup(stringResource(Res.string.update_section), Icons.RefreshCw) {
         Row(horizontalArrangement = Arrangement.spacedBy(Dimens.space16)) {
             FieldBlock(stringResource(Res.string.update_current)) {
@@ -327,23 +335,26 @@ private fun UpdateGroup(
             }
         }
         Text(
-            updateStateText(info),
+            if (demo) stringResource(Res.string.demo_update_disabled) else updateStateText(info),
             style = MaterialTheme.typography.body2,
-            color = if (available) colors.positive else colors.onSurfaceVariant,
+            color = if (available && !demo) colors.positive else colors.onSurfaceVariant,
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(Dimens.space8)) {
-            TextButton(onClick = { onConfigIntent(ConfigIntent.CheckUpdate) }, enabled = !busy) {
-                Text(stringResource(Res.string.update_check_now))
+        if (updateControlsAvailable(demo)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(Dimens.space8)) {
+                val idle = !state.updateChecking && !state.installing
+                TextButton(onClick = { onConfigIntent(ConfigIntent.CheckUpdate) }, enabled = idle) {
+                    Text(stringResource(Res.string.update_check_now))
+                }
+                // The one destructive action here: error colours, never wired into ordinary Save.
+                Button(
+                    onClick = { onConfigIntent(ConfigIntent.AskInstall) },
+                    enabled = available && idle,
+                    colors = ButtonDefaults.buttonColors(
+                        backgroundColor = MaterialTheme.colors.error,
+                        contentColor = MaterialTheme.colors.onError,
+                    ),
+                ) { Text(stringResource(Res.string.update_install)) }
             }
-            // The one destructive action here: error colours, never wired into ordinary Save.
-            Button(
-                onClick = { onConfigIntent(ConfigIntent.AskInstall) },
-                enabled = available && !busy,
-                colors = ButtonDefaults.buttonColors(
-                    backgroundColor = MaterialTheme.colors.error,
-                    contentColor = MaterialTheme.colors.onError,
-                ),
-            ) { Text(stringResource(Res.string.update_install)) }
         }
         when {
             state.installing -> Text(

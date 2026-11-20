@@ -65,7 +65,7 @@ class AppViewModel(
             is AppIntent.Connect -> {
                 val p = persist { it.copy(url = intent.url, owner = intent.owner) }
                 lastSeq = -1
-                reduceState { copy(prefs = p, url = intent.url, daemonVersion = "") }
+                reduceState { copy(prefs = p, url = intent.url, daemonVersion = "", demo = false) }
                 launchLoop(intent.url, intent.owner)
             }
             is AppIntent.SetTheme -> {
@@ -73,17 +73,22 @@ class AppViewModel(
                 reduceState { copy(prefs = p, useDark = resolveUseDark(intent.mode)) }
             }
             is AppIntent.SetScrcpy -> persist { it.copy(scrcpyPath = intent.path) }
-            AppIntent.SocketOpened -> reduceState { copy(connection = Connection.Connecting, daemonVersion = "") }
+            AppIntent.SocketOpened -> reduceState {
+                copy(connection = Connection.Connecting, daemonVersion = "", demo = false)
+            }
             is AppIntent.Frame -> onFrame(intent.frame)
             AppIntent.SocketClosed -> reduceState {
-                copy(connection = Connection.Disconnected(clock()), daemonVersion = "")
+                copy(connection = Connection.Disconnected(clock()), daemonVersion = "", demo = false)
             }
         }
     }
 
-    /** The daemon's own version from `/api/status`, reported by the status poll that already runs. */
-    fun onDaemonVersion(version: String) {
-        reduceState { copy(daemonVersion = version) }
+    /**
+     * The daemon's own version and demo flag from `/api/status`, reported by the status poll that
+     * already runs — the path a client that never sees a hello frame still gets the label through.
+     */
+    fun onDaemonStatus(version: String, demo: Boolean) {
+        reduceState { copy(daemonVersion = version, demo = demo) }
     }
 
     private fun launchLoop(url: String, owner: String) {
@@ -124,7 +129,9 @@ class AppViewModel(
         when (f.type) {
             "hello" -> {
                 lastSeq = f.seq
-                reduceState { copy(connection = Connection.Connected(f.seq), seq = f.seq, lastUpdatedMs = clock()) }
+                reduceState {
+                    copy(connection = Connection.Connected(f.seq), seq = f.seq, lastUpdatedMs = clock(), demo = f.demo)
+                }
             }
             "state.changed" -> {
                 if (gap(f.seq)) _frames.tryEmit(EventFrame("state.changed", emptyList(), f.seq))

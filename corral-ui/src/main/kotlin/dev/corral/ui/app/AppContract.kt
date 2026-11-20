@@ -17,6 +17,12 @@ data class AppState(
     val seq: Long = -1,
     val url: String = "",
     val daemonVersion: String = "",
+    /**
+     * The daemon serves a simulated pool (`corral demo`). Set from the hello frame and from the
+     * `/api/status` poll, and cleared whenever the socket drops — a stale DEMO banner would be a
+     * worse lie than none (I7).
+     */
+    val demo: Boolean = false,
     val useDark: Boolean = true,
     val prefs: Prefs = Prefs(),
     val lastUpdatedMs: Long = 0,

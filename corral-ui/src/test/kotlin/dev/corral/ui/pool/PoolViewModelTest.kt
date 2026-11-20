@@ -544,6 +544,23 @@ class PoolViewModelTest {
         assertTrue(pool.state.value.doctor?.layers?.any { it.status == "fail" } == true)
     }
 
+    @Test fun theStatusPollCarriesTheDemoFlagIntoBothViewModels() = runTest {
+        val api = FakeApi(statusResponse = StatusResponse(emptyList(), "/adb", demo = true))
+        val (pool, app) = newPool(api)
+        runCurrent()
+        app.onIntent(AppIntent.Frame(hello)); runCurrent()
+        assertTrue(app.state.value.demo, "the DEMO banner and the status-bar pill read this")
+        assertTrue(pool.state.value.demo, "the pool suppresses live view from the same flag")
+    }
+
+    @Test fun aRealDaemonLeavesTheDemoFlagOff() = runTest {
+        val (pool, app) = newPool(FakeApi())
+        runCurrent()
+        app.onIntent(AppIntent.Frame(hello)); runCurrent()
+        assertFalse(app.state.value.demo)
+        assertFalse(pool.state.value.demo)
+    }
+
     @Test fun selectorPartsParseTheDaemonShape() {
         assertEquals(listOf(SelectorPart.Any), selectorParts("[any]"))
         assertEquals(listOf(SelectorPart.Field("serial", "dev1")), selectorParts("[serial=dev1]"))

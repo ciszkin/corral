@@ -200,11 +200,18 @@
     <string name="doctor_status_skipped">ПРАПУШЧАНА</string>
     <string name="doctor_status_warn">УВАГА</string>
     <string name="doctor_status_info">інфа</string>
+    <string name="doctor_layer_demo">Дэма</string>
 
     <string name="status_stale_watermark">СТАРОЕ</string>
     <string name="force_free_nobody">ніхто</string>
     <string name="force_free_failed">Не ўдалося вызваліць — дэман адхіліў запыт.</string>
     <string name="retry">Паўтарыць</string>
+
+    <!-- Draft additions pending OWNER REVIEW — demo mode (S4). The interface is English only. -->
+    <string name="demo_banner">ДЭМА — гэтая кансоль паказвае сімуляваную пуліцу. Ніякіх сапраўдных прылад, adb ці шлюзаў; нішто тут не можа закрануць тэлефон.</string>
+    <string name="demo_status_pill">ДЭМА</string>
+    <string name="demo_update_disabled">адключана ў рэжыме дэма</string>
+    <string name="demo_live_disabled">жывы прагляд адключаны ў рэжыме дэма — ён запусціў бы сапраўдны бінарнік scrcpy</string>
 
     <!-- Draft additions pending OWNER REVIEW — update surface -->
     <string name="update_section">Абнаўленне</string>

@@ -108,6 +108,16 @@ internal fun daemonDownHint(windows: Boolean = isWindows): String =
     if (windows) "is the CorralDaemon Scheduled Task running? schtasks /query /tn CorralDaemon"
     else "is it running? systemctl --user status corral"
 
+/**
+ * The one CLI line that says the pool is a simulation (I7). Printed on stderr for an inspection
+ * verb, so the verb's stdout stays the daemon's own machine-readable JSON.
+ */
+internal fun demoCliLine(): String =
+    "corral: DEMO - this daemon serves a simulated pool: no real device, no adb, no network, no gates"
+
+/** `corral update` inside a demo: there is nothing to check and nothing to install (I5). */
+internal fun demoUpdateRefusal(): String = "demo mode: updates are not applicable"
+
 /** The doctor's one update line. Switches on the explicit state — never says "current" when unknown. */
 internal fun updateLine(info: UpdateInfo?): String = when (info?.state) {
     null -> "update: unknown (could not read /api/update)"
@@ -578,6 +588,29 @@ object CorralCli {
 
     private val http = HttpClient.newHttpClient()
 
+    /**
+     * Whether this daemon serves a simulated pool (I7), read once per invocation from
+     * `/api/status`. False when it cannot be read — an unreachable daemon reports that itself —
+     * and false for a daemon that predates the field, which is a real one.
+     */
+    private val demoDaemon: Boolean by lazy {
+        runCatching {
+            val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/status"))
+                .timeout(Duration.ofSeconds(DAEMON_CALL_TIMEOUT_SECONDS)).GET().build(),
+                HttpResponse.BodyHandlers.ofString())
+            if (r.statusCode() == 200) corralJson.decodeFromString<StatusResponse>(r.body()).demo else false
+        }.getOrDefault(false)
+    }
+
+    /**
+     * The DEMO line for an inspection verb. On stderr on purpose: `corral devices`/`status`/`queue`
+     * print the daemon's own JSON on stdout, and a label must not break a pipe. The JSON carries the
+     * machine-readable `demo` field; this is the human one.
+     */
+    private fun labelIfDemo() {
+        if (demoDaemon) System.err.println(demoCliLine())
+    }
+
     private fun get(path: String) = http.send(
         HttpRequest.newBuilder(URI.create("$url$path")).timeout(Duration.ofSeconds(DAEMON_CALL_TIMEOUT_SECONDS)).GET().build(),
         HttpResponse.BodyHandlers.ofString()).let(::ok).body()
@@ -792,10 +825,11 @@ object CorralCli {
             // Version is answered from the jar's own resource, with no daemon and no device.
             "--version", "-V" -> { println(VersionSource.version); exitProcess(0) }
             "demo" -> exitProcess(runDemo(args.drop(1), demoOutput()))
-            "devices" -> println(get("/api/devices"))
-            "status" -> println(get("/api/status"))
+            "devices" -> { labelIfDemo(); println(get("/api/devices")) }
+            "status" -> { labelIfDemo(); println(get("/api/status")) }
             "owner" -> println(owner)
             "screenshot" -> {
+                labelIfDemo()
                 var serial = ""
                 var out = ""
                 val rest = args.drop(1)
@@ -813,6 +847,7 @@ object CorralCli {
                 screenshot(serial, out.ifEmpty { "$serial.png" })
             }
             "events" -> {
+                labelIfDemo()
                 val target = URI.create(url.replaceFirst("http", "ws") + "/ws/events")
                 var backoff = 1000L
                 while (true) {
@@ -836,6 +871,7 @@ object CorralCli {
             }
             "doctor" -> {
                 var problems = 0
+                labelIfDemo()
                 val pool: List<Device>? = try {
                     val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/devices"))
                         .timeout(Duration.ofSeconds(DAEMON_CALL_TIMEOUT_SECONDS)).GET().build(),
@@ -852,6 +888,17 @@ object CorralCli {
                 val doctor = runCatching { decodeDoctorResponse(get("/api/doctor")) }.getOrNull()
                 emulatorProblems(doctor).forEach {
                     println("emulators: FAIL - $it"); problems++
+                }
+                // A demo has no gate to probe and no network to reach: its own doctor already
+                // reports the demo layer and both host layers as SKIPPED, so print that rather than
+                // re-deriving local verdicts from a home a demo never uses (I2, I4, I7).
+                if (demoDaemon) {
+                    doctor?.layers?.filter { it.layer != "daemon" }?.forEach {
+                        println("${it.layer}: ${it.status} - ${it.detail}")
+                    }
+                    println(demoUpdateRefusal())
+                    if (problems > 0) exitProcess(1)
+                    return
                 }
 
                 // prefer the daemon's own configured adb (its unit env may differ from this shell's);
@@ -903,6 +950,12 @@ object CorralCli {
                     System.err.println("corral: --repo must be owner/name")
                     exitProcess(2)
                 }
+                // I5: a demo has no feed to read and nothing to install. Say so, and let --apply
+                // fail: refusing loudly is the one honest answer to "install this".
+                if (demoDaemon) {
+                    println(demoUpdateRefusal())
+                    exitProcess(if (apply) 1 else 0)
+                }
                 val info = fetchUpdate()
                 println(updateSummary(info))
                 // Without --apply this downloads nothing and runs nothing — the explicit-apply rule.
@@ -925,6 +978,7 @@ object CorralCli {
                 }
             }
             "check" -> {
+                labelIfDemo()
                 val checkOwner: String
                 val serials: List<String>
                 if (args.getOrNull(1) == "--owner") {
@@ -1094,8 +1148,9 @@ object CorralCli {
                 }
                 execRealAdb(rest)
             }
-            "queue" -> println(get("/api/queue"))
+            "queue" -> { labelIfDemo(); println(get("/api/queue")) }
             "avd" -> {
+                labelIfDemo()
                 when (args.getOrNull(1) ?: "list") {
                     "list" -> {
                         val avds = Json.parseToJsonElement(get("/api/emulators")).jsonArray

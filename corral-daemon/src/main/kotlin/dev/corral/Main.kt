@@ -151,7 +151,7 @@ fun main() {
     val events = Events(
         { pool().map { DeviceStatus(it.serial, leases.snapshot[it.serial], it.booted) } },
         { leases.queueSnapshot() },
-        scope)
+        scope, demo = demo)
     val env = AppEnv(pool, leases, adb, world ?: Screenshotter(pool, adb), screenshotPolicy(config), events,
         config, emulators, updateCheck, demo)
     events.start()

@@ -4,6 +4,7 @@ import dev.corral.ui.data.ConfigResponse
 import dev.corral.ui.data.ConfigRules
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -38,5 +39,11 @@ class SettingsSectionTest {
         assertNull(versionMismatchHint("0.1.0", " "))
         assertNull(versionMismatchHint("0.0.0-dev", "0.1.1"))
         assertNull(versionMismatchHint("0.1.0", "0.0.0-dev"))
+    }
+
+    /** D9's update row: in demo mode there is no Check and no Install — the row says why instead. */
+    @Test fun aDemoNeverOffersCheckOrInstall() {
+        assertTrue(updateControlsAvailable(demo = false), "a real daemon keeps both controls")
+        assertFalse(updateControlsAvailable(demo = true), "a demo makes no network call (I5)")
     }
 }

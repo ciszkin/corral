@@ -28,6 +28,7 @@ import dev.corral.ui.resources.Res
 import dev.corral.ui.resources.doctor_daemon_adb
 import dev.corral.ui.resources.doctor_events
 import dev.corral.ui.resources.doctor_layer_daemon
+import dev.corral.ui.resources.doctor_layer_demo
 import dev.corral.ui.resources.doctor_layer_rules
 import dev.corral.ui.resources.doctor_layer_sdk_shim
 import dev.corral.ui.resources.doctor_recheck
@@ -107,6 +108,7 @@ private fun LayerRow(layer: DoctorLayer) {
         else -> Triple(Icons.Info, colors.tertiary, layer.status.uppercase())
     }
     val name = when (layer.layer) {
+        "demo" -> stringResource(Res.string.doctor_layer_demo)
         "daemon" -> stringResource(Res.string.doctor_layer_daemon)
         "sdk-shim" -> stringResource(Res.string.doctor_layer_sdk_shim)
         "rules" -> stringResource(Res.string.doctor_layer_rules)

@@ -63,8 +63,26 @@ class ComposeResourcesTest {
         }
     }
 
-    @Test fun pluralQuantitiesMatchTheLanguage() {
-        val en = pluralQuantities(enStrings)
+    /**
+     * I7 in the console (S4's D9): the DEMO banner, the status-bar pill, the disabled update row and
+     * the disabled live view all read from the resource bundles, so the label exists in **both**
+     * languages — BE is still a draft pending owner review, and a missing key would fail the
+     * "every English key" row below anyway. This row pins the English words a docs pass will quote.
+     */
+    @Test fun demoLabelsExistInBothLanguagesAndSayWhatTheyAre() {
+        listOf("demo_banner", "demo_status_pill", "demo_update_disabled", "demo_live_disabled", "doctor_layer_demo")
+            .forEach { name ->
+                assertTrue(stringValue(enStrings, name).isNotBlank(), "en missing or blank: $name")
+                assertTrue(stringValue(beStrings, name).isNotBlank(), "be missing or blank: $name")
+            }
+        assertEquals("DEMO", stringValue(enStrings, "demo_status_pill"))
+        assertTrue(stringValue(enStrings, "demo_banner").contains("simulated"), stringValue(enStrings, "demo_banner"))
+        assertEquals("disabled in demo", stringValue(enStrings, "demo_update_disabled"))
+        assertTrue(stringValue(enStrings, "demo_live_disabled").contains("scrcpy"),
+            stringValue(enStrings, "demo_live_disabled"))
+    }
+
+    @Test fun pluralQuantitiesMatchTheLanguage() {        val en = pluralQuantities(enStrings)
         val be = pluralQuantities(beStrings)
         assertTrue(en.isNotEmpty(), "expected plurals in the English table")
         assertEquals(en.keys, be.keys, "plural names must match across languages")

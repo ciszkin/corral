@@ -126,13 +126,14 @@ class PoolViewModel(
     private suspend fun refetchDevices() {
         val client = api() ?: return
         val status = client.status()
-        app.onDaemonVersion(status.version)
+        app.onDaemonStatus(status.version, status.demo)
         val leases = status.devices.associate { it.serial to it.lease }
         val devices = client.devices()
         reduceState {
             copy(
                 devices = devices.map { DeviceView(it, leases[it.serial]) },
                 capabilities = client.capabilities(),
+                demo = status.demo,
             )
         }
         devices.forEach { ensureThumbnail(it.serial) }

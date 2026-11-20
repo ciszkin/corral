@@ -73,6 +73,8 @@ fun DeviceCard(
     denied: Boolean,
     now: Long,
     canForceFree: Boolean,
+    /** False on a demo daemon: a live view would spawn a real scrcpy (I1). */
+    canLive: Boolean,
     scrcpyReason: String?,
     onLive: () -> Unit,
     onForceFree: () -> Unit,
@@ -146,7 +148,7 @@ fun DeviceCard(
         }
         Spacer(Modifier.weight(1f))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            if (view.usable) {
+            if (view.usable && canLive) {
                 IconButton(onLive) {
                     AppIcon(Icons.Airplay, contentDescription = stringResource(Res.string.action_live_view))
                 }

@@ -128,7 +128,7 @@ internal class DemoWorld(
             } else {
                 val m = meta!!
                 Device(serial = m.serial!!, state = "device", transport = Device.transportOf(m.serial),
-                    model = m.model, osVersion = m.osVersion, avd = avd, booted = false)
+                    model = m.model, osVersion = m.osVersion, avd = avd, booted = false, demo = true)
             }
             val serial = fresh.serial
             current = if (current.none { it.serial == serial }) current + fresh
@@ -179,7 +179,8 @@ internal class DemoWorld(
     private fun deviceOf(w: WorldDevice) = Device(
         serial = w.serial, state = w.state, transport = Device.transportOf(w.serial),
         model = w.model, osVersion = w.osVersion, avd = w.avd,
-        booted = w.booted ?: (Device.transportOf(w.serial) != "emulator"))
+        booted = w.booted ?: (Device.transportOf(w.serial) != "emulator"),
+        demo = true)
 
     companion object {
         /** The placeholder screen shipped in the jar; S3 adds one per device through `screens`. */

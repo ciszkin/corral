@@ -26,6 +26,8 @@ data class PoolState(
     val deniedReason: String? = null,
     val confirmFree: String? = null,
     val capabilities: Capabilities = Capabilities(false),
+    /** The daemon serves a simulated pool: live view is disabled and the pool is labelled (I7). */
+    val demo: Boolean = false,
     val now: Long = 0,
 ) : MviState
 

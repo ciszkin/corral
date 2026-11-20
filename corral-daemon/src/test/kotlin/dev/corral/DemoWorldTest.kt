@@ -118,8 +118,19 @@ class DemoWorldTest {
         assertFailsWith<EmulatorException> { w.stop("DEMO01234567") }
     }
 
-    @Test fun theDemoPoolNeverSuppressesASerialItKilledAndNeverReportsAWedge() {
+    /**
+     * I7 — the machine-readable label is a property of the world's own devices, so it reaches every
+     * consumer of the DTO (REST, MCP, the console's pool) without each surface remembering to add it.
+     */
+    @Test fun everyWorldDeviceCarriesTheDemoLabelIncludingAStartedAvdInstance() {
         val w = world(threeDevices)
+        assertTrue(w.devices.all { it.demo }, "every demo device must say so: ${w.devices.map { it.serial to it.demo }}")
+        assertTrue(w.start("DemoAVD"))
+        assertTrue(w.devices.all { it.demo }, "an instance an `avd start` created is a demo device too")
+        assertTrue(w.devices.first { it.serial == "emulator-5554" }.demo)
+    }
+
+    @Test fun theDemoPoolNeverSuppressesASerialItKilledAndNeverReportsAWedge() {        val w = world(threeDevices)
         val before = w.devices
         assertEquals(before, w.liveDevices(before))
         assertEquals(emptyMap(), w.launchedPastBootDeadline(), "no wedge beat: wedgeReason stays off every device")

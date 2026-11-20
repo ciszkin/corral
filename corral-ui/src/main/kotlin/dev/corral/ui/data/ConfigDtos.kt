@@ -20,6 +20,8 @@ data class ConfigResponse(
     val rulesPath: String,
     val envPath: String,
     val updateRepo: String = "",
+    /** Additive and defaulted: an old daemon omits it, and this console then shows a real pool. */
+    val demo: Boolean = false,
 )
 
 @Serializable

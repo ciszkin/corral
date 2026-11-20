@@ -1,0 +1,15 @@
+{
+  "name": "corral",
+  "description": "Agent wiring for Corral: the skill that teaches a coding agent to lease one Android device exclusively through the corral CLI.",
+  "owner": {
+    "name": "ciszkin",
+    "url": "https://github.com/ciszkin"
+  },
+  "plugins": [
+    {
+      "name": "corral",
+      "source": "./",
+      "description": "Lease an Android device to one agent session at a time: the corral lease/claim loop, the gate that refuses unpinned adb calls, and the way through a refusal."
+    }
+  ]
+}

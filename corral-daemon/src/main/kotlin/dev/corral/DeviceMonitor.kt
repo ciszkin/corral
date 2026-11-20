@@ -28,30 +28,42 @@ object TrackParser {
 }
 
 /**
+ * The inventory seam. `DeviceMonitor` is the real one (adb, or the fake file); `DemoWorld` is the
+ * in-JVM demo pool. Consumers never see this type — `main()` hands them a `() -> List<Device>`.
+ */
+interface DeviceSource {
+    val devices: List<Device>
+    /** Fires (best-effort) after every inventory change — Main wires it to queue dispatch. */
+    var onChange: (suspend () -> Unit)?
+    fun start()
+}
+
+/**
  * Keeps a volatile inventory from `adb track-devices` (or a fake file — test seam).
  * Restarts the subprocess with 2s backoff on death. Enriches new serials via getprop.
  * ponytail: getprop is best-effort; missing model is cosmetic, not fatal.
  */
 class DeviceMonitor(private val adbPath: String,
                     private val fakeDevicesFile: String? = null,
-                    private val scope: CoroutineScope) {
-    @Volatile var devices: List<Device> = emptyList(); private set
+                    private val scope: CoroutineScope) : DeviceSource {
+    @Volatile override var devices: List<Device> = emptyList(); private set
 
-    /** Fires (best-effort) after every inventory change — Main wires it to queue dispatch. */
-    var onChange: (suspend () -> Unit)? = null
+    override var onChange: (suspend () -> Unit)? = null
 
-    fun start() = scope.launch {
-        var proc: Process? = null
-        coroutineContext[Job]?.invokeOnCompletion { proc?.destroy() }
-        while (true) {
-            try {
-                val stream: InputStream = if (fakeDevicesFile != null) fakeStream() else {
-                    proc = ProcessBuilder(adbPath, "track-devices").start()
-                    proc!!.inputStream
-                }
-                stream.use { readLoop(it) }
-            } catch (_: Exception) { /* subprocess died or file replaced; loop */ }
-            delay(2000)
+    override fun start() {
+        scope.launch {
+            var proc: Process? = null
+            coroutineContext[Job]?.invokeOnCompletion { proc?.destroy() }
+            while (true) {
+                try {
+                    val stream: InputStream = if (fakeDevicesFile != null) fakeStream() else {
+                        proc = ProcessBuilder(adbPath, "track-devices").start()
+                        proc!!.inputStream
+                    }
+                    stream.use { readLoop(it) }
+                } catch (_: Exception) { /* subprocess died or file replaced; loop */ }
+                delay(2000)
+            }
         }
     }
 

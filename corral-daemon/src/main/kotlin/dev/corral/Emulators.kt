@@ -313,6 +313,35 @@ private const val SYSTEMD_EARLY_EXIT_MS = 1000L
 private const val TERMINATED_TTL_MS = 120_000L
 
 /**
+ * The emulator seam the API and `main()` use: `Emulators` shells out to `emulator`/`adb`/`systemctl`,
+ * `DemoWorld` answers from its own inventory. Nothing here changes the real implementations.
+ */
+interface EmulatorHost {
+    /** AVD names from `emulator -list-avds`; null when the binary is absent or the command failed. */
+    fun list(): List<String>?
+    /** Spawns [avd]; false when an instance is already live. */
+    fun start(avd: String): Boolean
+    /** True while a spawn for [avd] is live, even before it appears in the adb pool. */
+    fun isRunning(avd: String): Boolean
+    /** Ends the instance with [serial] (`adb -s S emu kill`). */
+    fun stop(serial: String)
+    /** Ends the spawn/unit for [avd] directly, for one adb has not listed (no serial to kill). */
+    fun stopAvd(avd: String): String?
+    /** Serial(s) the AVD's start log recorded, independent of adb. */
+    fun logSerials(avd: String): List<String>
+    /** AVDs this daemon launched that are still alive and past the boot deadline, mapped to seconds. */
+    fun launchedPastBootDeadline(): Map<String, Long>
+    /** The last failure [avd] ended with, or null while running, after a clean exit, or with no status. */
+    fun lastError(avd: String): String?
+    /** [devices] minus serials this daemon just killed. */
+    fun liveDevices(devices: List<Device>): List<Device>
+    /** Clears failed spawns/units so a headless box leaves `systemctl --user` not degraded. */
+    fun reapFailed()
+    /** Ends every tracked spawn for a graceful stop; systemd units are left to run. */
+    fun shutdown()
+}
+
+/**
  * Talks to the SDK emulator binary to list and boot AVDs; [stop] hands the kill to adb because an
  * already-running AVD is only addressable by its `emulator-<port>` serial.
  */
@@ -321,7 +350,7 @@ class Emulators(
     private val emulatorPath: () -> String?,
     private val launcher: EmulatorLauncher = launcherFor(),
     private val now: () -> Long = { System.currentTimeMillis() },
-) {
+) : EmulatorHost {
     private val locks = ConcurrentHashMap<String, Any>()
     /** AVD -> when this daemon spawned it; only a daemon-launched AVD can be reported wedged. */
     private val launchedAt = ConcurrentHashMap<String, Long>()
@@ -333,7 +362,7 @@ class Emulators(
      * failed to run, exited non-zero, or timed out; a non-null list (possibly empty) means it
      * ran successfully and reported those AVDs.
      */
-    fun list(): List<String>? = runCatching {
+    override fun list(): List<String>? = runCatching {
         val bin = emulatorPath() ?: return@runCatching null
         val p = ProcessBuilder(bin, "-list-avds").redirectErrorStream(true).start()
         if (!p.waitFor(2, TimeUnit.SECONDS)) { p.destroy(); return@runCatching null }
@@ -343,7 +372,7 @@ class Emulators(
     }.getOrNull()
 
     /** Spawns [avd]; false when an instance is already live (or won the race under systemd). */
-    fun start(avd: String): Boolean {
+    override fun start(avd: String): Boolean {
         val bin = emulatorPath() ?: throw EmulatorException("emulator binary not found — set CORRAL_EMULATOR")
         val log = emulatorLogPath(avd)
         log.parent?.let { Files.createDirectories(it) }
@@ -364,7 +393,7 @@ class Emulators(
     }
 
     /** True while a spawn for [avd] is live, even before it appears in the adb pool. */
-    fun isRunning(avd: String): Boolean = launcher.isRunning(avd)
+    override fun isRunning(avd: String): Boolean = launcher.isRunning(avd)
 
     /**
      * [devices] minus serials this daemon just killed, so a stop is reflected before adb catches up.
@@ -372,7 +401,7 @@ class Emulators(
      * the corpse — and an entry past [TERMINATED_TTL_MS] is dropped so a serial adb never stops
      * listing cannot stay hidden forever.
      */
-    fun liveDevices(devices: List<Device>): List<Device> {
+    override fun liveDevices(devices: List<Device>): List<Device> {
         val present = devices.mapTo(mutableSetOf()) { it.serial }
         val cutoff = now() - TERMINATED_TTL_MS
         terminatedAt.entries.removeIf { (serial, at) -> serial !in present || at < cutoff }
@@ -380,7 +409,7 @@ class Emulators(
     }
 
     /** Ends the spawn/unit for [avd] directly, for one adb has not listed (no serial to kill). */
-    fun stopAvd(avd: String): String? {
+    override fun stopAvd(avd: String): String? {
         launchedAt.remove(avd)
         val terminated = launcher.stop(avd)
         val log = emulatorLogPath(avd)
@@ -402,7 +431,7 @@ class Emulators(
      * entry never gains an avd; this launcher-side mapping is what lets an orphaned instance be
      * reconciled by serial. Empty when the log is absent or printed no serial.
      */
-    fun logSerials(avd: String): List<String> =
+    override fun logSerials(avd: String): List<String> =
         runCatching { Files.readAllLines(emulatorLogPath(avd)) }.getOrDefault(emptyList())
             .flatMap { line -> emulatorSerialRegex.findAll(line).map { it.value } }
             .distinct()
@@ -413,7 +442,7 @@ class Emulators(
      * mapped to seconds alive. Whether the wedge is *confirmed* (the serial never reached
      * `device`+`booted`) is the pool's call; see `wedgedAvds` in Api.kt.
      */
-    fun launchedPastBootDeadline(): Map<String, Long> {
+    override fun launchedPastBootDeadline(): Map<String, Long> {
         launchedAt.keys.removeIf { avd -> !isRunning(avd) }
         return launchedAt
             .filterValues { at -> now() - at >= MAX_WAIT_S * 1000 }
@@ -421,16 +450,16 @@ class Emulators(
     }
 
     /** The last failure [avd] ended with, or null while running, after a clean exit, or with no status. */
-    fun lastError(avd: String): String? =
+    override fun lastError(avd: String): String? =
         if (isRunning(avd)) null else launcher.lastExit(avd)?.takeIf { it != 0 }?.let { logTail(avd) }
 
     /** Clears failed spawns/units so a headless box leaves `systemctl --user` not degraded. */
-    fun reapFailed() = launcher.reapFailed()
+    override fun reapFailed() = launcher.reapFailed()
 
     /** Ends every tracked spawn for a graceful stop; systemd units are left to run. */
-    fun shutdown() = launcher.destroyAll()
+    override fun shutdown() = launcher.destroyAll()
 
-    fun stop(serial: String) {
+    override fun stop(serial: String) {
         val p = try {
             ProcessBuilder(adbPath, "-s", serial, "emu", "kill").start()
         } catch (e: IOException) {

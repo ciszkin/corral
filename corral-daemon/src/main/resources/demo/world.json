@@ -1,0 +1,14 @@
+{
+  "_comment": "corral demo world — S2. Field names are the real corral-common DTO names (osVersion, not os), because this binds straight to Device. Every human-readable name carries (demo): a demo device must never be mistakable for a real one.",
+  "devices": [
+    {"serial": "DEMO01234567", "state": "device", "model": "Pixel 7 (demo)", "osVersion": "14"},
+    {"serial": "192.168.1.50:5555", "state": "device", "model": "Galaxy A54 (demo)", "osVersion": "13"},
+    {"serial": "emulator-5554", "state": "device", "model": "sdk_gphone64 (demo)", "osVersion": "14",
+     "avd": "DemoAVD", "booted": false}
+  ],
+  "avds": [
+    {"name": "DemoAVD", "bootSeconds": 6},
+    {"name": "DemoTabletAVD", "bootSeconds": 9}
+  ],
+  "screens": {}
+}

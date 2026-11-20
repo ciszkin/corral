@@ -118,12 +118,17 @@ class AppEnv(
     val devices: () -> List<Device>,
     val leases: LeaseManager,
     val adbPath: String? = null,
-    val screenshotter: Screenshotter? = null,
+    val screenshotter: ScreenshotSource? = null,
     val policy: ScreenshotPolicy? = null,
     val events: Events? = null,
     val config: DaemonConfig? = null,
-    val emulators: Emulators? = null,
+    val emulators: EmulatorHost? = null,
     val updateCheck: UpdateCheck? = null,
+    /**
+     * Server-side demo flag: the daemon serves a simulated pool. Read from `CORRAL_DEMO` once in
+     * `main()`; every refusal below is decided from this value, never from the environment again.
+     */
+    val demo: Boolean = false,
 )
 
 /** Any control char (C0 + DEL) smuggled into a value could inject lines or corrupt env/rules files. */
@@ -136,7 +141,7 @@ private fun String.hasControlChars() = any { it < ' ' || it == '\u007F' }
  * serial(s) it spawned (no adb needed); keep the ones the pool actually lists — offline included —
  * so an unenriched instance is reconciled without trusting a stale log for a departed AVD.
  */
-private fun trackedEmulatorSerials(devices: List<Device>, emulators: Emulators, avd: String): List<String> {
+private fun trackedEmulatorSerials(devices: List<Device>, emulators: EmulatorHost, avd: String): List<String> {
     val pool = devices.filter { it.transport == "emulator" }
     val poolSerials = pool.mapTo(mutableSetOf()) { it.serial }
     return (pool.filter { it.avd == avd }.map { it.serial } +
@@ -152,7 +157,7 @@ private class WedgeReason(val serials: List<String>, val reason: String)
  * forever, qemu burning CPU, adb never listing it online). Alive + past the deadline is the whole
  * signal: no CPU time is measured. An emulator that recovers (now `device`+`booted`) drops out.
  */
-private fun wedgedAvds(devices: List<Device>, emulators: Emulators?): Map<String, WedgeReason> {
+private fun wedgedAvds(devices: List<Device>, emulators: EmulatorHost?): Map<String, WedgeReason> {
     val e = emulators ?: return emptyMap()
     return e.launchedPastBootDeadline().mapNotNull { (avd, aliveSeconds) ->
         val serials = trackedEmulatorSerials(devices, e, avd)
@@ -407,7 +412,9 @@ fun Application.corralModule(env: AppEnv) {
             val clean = mutableMapOf<String, String>()
             var rulesToWrite: Pair<Set<String>?, Set<String>?>? = null
             req.settings.forEach { (k, raw) ->
-                when (k) {
+                val demoRefusal = if (env.demo) demoSettingRefusal(k, raw) else null
+                if (demoRefusal != null) errors += demoRefusal
+                else when (k) {
                     "CORRAL_PORT" -> parsePort(raw.trim())?.let { clean[k] = it.toString() }
                         ?: run { errors += "CORRAL_PORT must be 1024–65535" }
                     "CORRAL_SCREENSHOTS" -> raw.trim().lowercase().takeIf { it == "strict" || it == "open" }

@@ -18,6 +18,11 @@ sealed class CaptureException(message: String) : Exception(message) {
     class AdbFailure(reason: String) : CaptureException(reason)
 }
 
+/** The screenshot seam: `Screenshotter` runs adb, `DemoWorld` serves pre-baked bytes. */
+interface ScreenshotSource {
+    suspend fun capture(serial: String): ByteArray
+}
+
 /**
  * Runs `adb -s <serial> exec-out screencap -p` on demand. Single-flight per serial (concurrent
  * callers share one process) plus a [SCREENSHOT_WINDOW_MS] coalescing window — staleness stays
@@ -28,14 +33,14 @@ class Screenshotter(
     private val devices: () -> List<Device>,
     private val adbPath: String?,
     private val now: () -> Long = { System.currentTimeMillis() },
-) {
+) : ScreenshotSource {
     private val state = Mutex()
     private val inFlight = ConcurrentHashMap<String, CompletableDeferred<ByteArray>>()
     private var cachedSerial: String? = null
     private var cachedAt = 0L
     private var cachedPng: ByteArray? = null
 
-    suspend fun capture(serial: String): ByteArray {
+    override suspend fun capture(serial: String): ByteArray {
         val d = devices().firstOrNull { it.serial == serial } ?: throw CaptureException.UnknownDevice(serial)
         if (d.state != "device") throw CaptureException.UnusableDevice(serial, d.state)
 

@@ -1,12 +1,12 @@
 [versions]
 kotlin = "2.2.21"
 compose = "1.9.0"
-ktor = "3.2.3"
+ktor = "3.5.2"
 coroutines = "1.10.2"
 serialization = "1.9.0"
 sqlite = "3.50.3.0"
 shadow = "8.3.6"
-mcp = "0.10.0"
+mcp = "0.16.0"
 koin = "4.2.2"
 # Exact Skiko version Compose 1.9.0 pulls (verified via :corral-ui:dependencies); the
 # non-host runtime natives must be declared explicitly or the shadowJar only bundles the

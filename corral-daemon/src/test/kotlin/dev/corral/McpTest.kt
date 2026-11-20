@@ -32,6 +32,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.nio.file.Files
 import java.nio.file.Path
@@ -650,5 +651,22 @@ class McpTest {
 
         withTimeout(5_000) { while (leases.queueSnapshot().isNotEmpty()) delay(10) }
         claim.cancelAndJoin()
+    }
+
+    @Test
+    fun initializeAnswersWithAProtocolVersionForEveryRequestedVersion() = testApplication {
+        // The app codec drops fields equal to their Kotlin default, and the answer to the newest
+        // version IS the default — opencode 2.2.5 sends 2025-11-25 and rejects a reply without it.
+        testDaemon(devices)
+        suspend fun initialize(version: String) = Json.parseToJsonElement(client.post("/mcp") {
+            header(HttpHeaders.Host, "127.0.0.1:8798")
+            header(HttpHeaders.ContentType, ContentType.Application.Json)
+            header(HttpHeaders.Accept, "application/json, text/event-stream")
+            setBody("""{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"$version","capabilities":{},"clientInfo":{"name":"handshake","version":"1"}}}""")
+        }.bodyAsText()).jsonObject["result"]!!.jsonObject
+
+        assertEquals("2025-11-25", initialize("2025-11-25")["protocolVersion"]?.jsonPrimitive?.content)
+        assertEquals("2025-11-25", initialize("2026-07-28")["protocolVersion"]?.jsonPrimitive?.content)
+        assertEquals("2025-06-18", initialize("2025-06-18")["protocolVersion"]?.jsonPrimitive?.content)
     }
 }

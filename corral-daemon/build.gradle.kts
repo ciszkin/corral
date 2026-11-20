@@ -6,6 +6,13 @@ plugins {
 
 kotlin { jvmToolchain(17) }
 
+// kotlin-sdk 0.16.0 (and the ktor 3.5.2 it pulls) drag kotlin-stdlib 2.4.21 in, whose metadata the
+// project's Kotlin 2.2 compiler cannot read. 2.3.21 is the newest it can, and matches ktor's own
+// kotlin-reflect — pinning any lower breaks kotlin-logging's reflection.
+configurations.configureEach {
+    resolutionStrategy.force("org.jetbrains.kotlin:kotlin-stdlib:2.3.21")
+}
+
 dependencies {
     implementation(project(":corral-common"))
     implementation(project(":corral-update"))

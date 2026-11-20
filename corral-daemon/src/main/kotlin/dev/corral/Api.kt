@@ -256,7 +256,10 @@ private fun keyPreview(keys: Collection<String>, limit: Int = 5, width: Int = 40
 }
 
 fun Application.corralModule(env: AppEnv) {
-    install(ContentNegotiation) { json(apiJson) }
+    install(ContentNegotiation) {
+        register(ContentType.Application.Json, McpJsonConverter) {}   // MCP first: see McpJsonConverter
+        json(apiJson)
+    }
     install(WebSockets)
     routing {
         webSocket("/ws/events") {

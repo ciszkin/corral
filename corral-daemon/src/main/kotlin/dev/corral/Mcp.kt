@@ -1,6 +1,11 @@
 package dev.corral
 
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.OutgoingContent
+import io.ktor.http.content.TextContent as KtorTextContent
+import io.ktor.http.withCharset
+import io.ktor.serialization.ContentConverter
 import io.ktor.server.application.Application
 import io.ktor.server.request.header
 import io.ktor.server.response.respondText
@@ -9,6 +14,8 @@ import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
+import io.ktor.util.reflect.TypeInfo
+import io.ktor.utils.io.ByteReadChannel
 import io.modelcontextprotocol.kotlin.sdk.server.ClientConnection
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
@@ -17,12 +24,15 @@ import io.modelcontextprotocol.kotlin.sdk.server.StreamableHttpServerTransport
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
 import io.modelcontextprotocol.kotlin.sdk.types.Implementation
+import io.modelcontextprotocol.kotlin.sdk.types.JSONRPCMessage
+import io.modelcontextprotocol.kotlin.sdk.types.McpJson
 import io.modelcontextprotocol.kotlin.sdk.types.ServerCapabilities
 import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolAnnotations
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.buildJsonObject
@@ -30,6 +40,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import java.nio.charset.Charset
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 
@@ -38,6 +49,31 @@ private const val SESSION_HEADER = "mcp-session-id"
 
 /** MCP agents act on a model turn; ask them to poll far less often than the CLI's 1 s. */
 private const val MCP_RETRY_AFTER_MS = 5000L
+
+/**
+ * MCP messages are written by the SDK's own codec, not the app's: the app codec drops properties
+ * that equal their Kotlin default, and `InitializeResult.protocolVersion` defaults to the version
+ * an up-to-date client asks for — dropped, the client rejects the handshake ("protocolVersion
+ * expected string, received undefined"). Registered before the app's JSON converter.
+ */
+internal object McpJsonConverter : ContentConverter {
+    override suspend fun serialize(contentType: ContentType, charset: Charset,
+                                   typeInfo: TypeInfo, value: Any?): OutgoingContent? {
+        val json = when (value) {
+            is JSONRPCMessage -> McpJson.encodeToString(JSONRPCMessage.serializer(), value)
+            is List<*> -> {
+                val messages = value.filterIsInstance<JSONRPCMessage>()
+                if (messages.size != value.size) return null
+                McpJson.encodeToString(ListSerializer(JSONRPCMessage.serializer()), messages)
+            }
+            else -> return null
+        }
+        return KtorTextContent(json, contentType.withCharset(charset))
+    }
+
+    override suspend fun deserialize(charset: Charset, typeInfo: TypeInfo,
+                                     content: ByteReadChannel): Any? = null
+}
 
 private const val EMULATOR_START_NOTE = "a started emulator appears in the pool within seconds and is " +
     "claimable once booted; claim with waitSeconds > 0 and transport=emulator to queue for boot"

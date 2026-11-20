@@ -609,12 +609,25 @@ private fun awaitDevices(url: String, child: Process): List<Device>? {
     val deadline = System.currentTimeMillis() + 15_000
     while (System.currentTimeMillis() < deadline) {
         if (!child.isAlive) return null
-        val body = runCatching {
-            client.send(HttpRequest.newBuilder(URI.create("$url/api/devices"))
+        // Only the child this supervisor spawned may answer. A port that was free when probed can be
+        // taken by a demo daemon that was still booting — CI run 44772818392: a killed `--loop`
+        // cycle's daemon on 8908 answered this probe and then exited, and beat 1 died on the socket.
+        // The pid in /api/status is what tells the two apart; anything else keeps waiting.
+        val status = runCatching {
+            client.send(HttpRequest.newBuilder(URI.create("$url/api/status"))
                 .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
         }.getOrNull()
-        if (body != null && body.statusCode() == 200) {
-            runCatching { corralJson.decodeFromString<List<Device>>(body.body()) }.getOrNull()?.let { return it }
+        val ours = status?.takeIf { it.statusCode() == 200 }?.let { response ->
+            runCatching { corralJson.decodeFromString<StatusResponse>(response.body()) }.getOrNull()
+        }?.pid == child.pid()
+        if (ours) {
+            val body = runCatching {
+                client.send(HttpRequest.newBuilder(URI.create("$url/api/devices"))
+                    .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
+            }.getOrNull()
+            if (body != null && body.statusCode() == 200) {
+                runCatching { corralJson.decodeFromString<List<Device>>(body.body()) }.getOrNull()?.let { return it }
+            }
         }
         Thread.sleep(150)
     }

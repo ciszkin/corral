@@ -279,7 +279,8 @@ fun Application.corralModule(env: AppEnv) {
             call.respond(StatusResponse(
                 devices = env.devices().map { d -> DeviceStatus(d.serial, env.leases.snapshot[d.serial], d.booted) },
                 adb = env.adbPath ?: "",
-                version = VersionSource.version
+                version = VersionSource.version,
+                pid = ProcessHandle.current().pid()
             ))
         }
         get("/api/doctor") {

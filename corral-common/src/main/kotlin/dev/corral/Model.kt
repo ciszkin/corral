@@ -45,7 +45,9 @@ data class Lease(val serial: String, val owner: String, val pid: Long = 0,
  */
 @Serializable data class StatusResponse(val devices: List<DeviceStatus>, val adb: String,
                                          val version: String = "",
-                                         val demo: Boolean = false)
+                                         val demo: Boolean = false,
+                                         /** The JVM serving this port: a demo supervisor uses it to prove the answer is its own child. */
+                                         val pid: Long = 0)
 
 /** The four outcomes of a check, carried explicitly so a consumer cannot infer one from another field. */
 @Serializable

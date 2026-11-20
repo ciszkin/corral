@@ -578,7 +578,14 @@ private fun runCycle(options: DemoOptions, cycleNo: Int, java: Path, jar: Path,
     val plain = options.plain || System.getenv("NO_COLOR") != null || System.console() == null
     val narrative = DemoNarrative(HttpDemoTransport(url), DemoConsole(out, plain), url, options.speed)
     runCatching { narrative.run() }.onFailure {
-        System.err.println("corral: the demo script stopped at ${it.message ?: "an unknown failure"}")
+        // java.net.http rewrites an internal failure as IOException(message = cause.message), so an
+        // internal message-less exception (ClosedChannelException and friends) arrives here as a
+        // bare IOException: CI run 44772818392 therefore read "an unknown failure" with no class at
+        // all. Name the cause — it is the only place the reason lives — and keep the stack.
+        val cause = it.cause
+        val why = it.message ?: cause?.message ?: cause?.javaClass?.name ?: "an unknown failure"
+        System.err.println("corral: the demo script stopped at $why (${it.javaClass.name})")
+        if (it.message == null) it.printStackTrace()
         System.err.println("demo: the daemon's log is ${home.resolve("daemon.log")}")
         logTail(home, 8).lineSequence().forEach { line -> System.err.println("  $line") }
         stopChild(child, home, options.keep)
@@ -615,12 +622,25 @@ private fun awaitDevices(url: String, child: Process): List<Device>? {
     val deadline = System.currentTimeMillis() + 15_000
     while (System.currentTimeMillis() < deadline) {
         if (!child.isAlive) return null
-        val body = runCatching {
-            client.send(HttpRequest.newBuilder(URI.create("$url/api/devices"))
+        // Only the child this supervisor spawned may answer. A port that was free when probed can be
+        // taken by a demo daemon that was still booting — CI run 44772818392: a killed `--loop`
+        // cycle's daemon on 8908 answered this probe and then exited, and beat 1 died on the socket.
+        // The pid in /api/status is what tells the two apart; anything else keeps waiting.
+        val status = runCatching {
+            client.send(HttpRequest.newBuilder(URI.create("$url/api/status"))
                 .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
         }.getOrNull()
-        if (body != null && body.statusCode() == 200) {
-            runCatching { corralJson.decodeFromString<List<Device>>(body.body()) }.getOrNull()?.let { return it }
+        val ours = status?.takeIf { it.statusCode() == 200 }?.let { response ->
+            runCatching { corralJson.decodeFromString<StatusResponse>(response.body()) }.getOrNull()
+        }?.pid == child.pid()
+        if (ours) {
+            val body = runCatching {
+                client.send(HttpRequest.newBuilder(URI.create("$url/api/devices"))
+                    .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
+            }.getOrNull()
+            if (body != null && body.statusCode() == 200) {
+                runCatching { corralJson.decodeFromString<List<Device>>(body.body()) }.getOrNull()?.let { return it }
+            }
         }
         Thread.sleep(150)
     }

@@ -27,7 +27,9 @@ CORRAL_URL=http://127.0.0.1:8799 corral devices
 corral-ui --url http://127.0.0.1:8799
 ```
 
-The console itself shows a persistent DEMO banner at the top of its window.
+The console itself shows a persistent DEMO banner at the top of its window:
+
+![The Corral console watching the demo pool](https://raw.githubusercontent.com/ciszkin/corral/main/docs/console.png)
 
 Ctrl-C stops it and removes the demo home it made; [CUTOVER.md § Demo](CUTOVER.md#demo) has the
 flags and the cleanup rules.

@@ -25,6 +25,71 @@ class SdkShimTest {
 
     private fun writeShim(content: String) { Files.writeString(shim, content) }
 
+    /** Where [SdkShim] parks an `adb.real` it is about to replace. */
+    private val stash get() = dir.resolve("platform-tools/adb.real.corral-backup")
+
+    /** The planted foreign bytes, searched for under every name the repair might have moved them to. */
+    private fun assertPreserved(planted: String, vararg candidates: Path) {
+        val survivors = candidates.filter { Files.exists(it) }.map { it.readText() }
+        assertTrue(planted in survivors, "planted adb.real bytes were destroyed; found instead: $survivors")
+    }
+
+    @Test
+    fun `foreign adb real is stashed, not destroyed, when repairing via the shim path`() {
+        val planted = "FOREIGN REAL BINARY - these bytes are the user's"
+        writeShim("FOREIGN ADB BINARY")          // not our wrapper, no marker
+        Files.writeString(realAdb, planted)
+        val status = SdkShim.ensure(shim, wrapperSource)
+        assertPreserved(planted, stash, realAdb)
+        assertTrue(status!!.contains("repaired"), "status was: $status")
+        assertTrue(status.contains(stash.toString()), "the summary must name the stash: $status")
+        assertTrue(shim.readText().contains(MARKER_CONTENT))
+        assertEquals("FOREIGN ADB BINARY", realAdb.readText())   // the newer binary is the one adopted
+    }
+
+    @Test
+    fun `foreign adb real is stashed, not destroyed, when repairing via the real path`() {
+        val planted = "FOREIGN REAL BINARY - these bytes are the user's"
+        writeShim("FOREIGN ADB BINARY")
+        Files.writeString(realAdb, planted)
+        val status = SdkShim.ensure(realAdb, wrapperSource)
+        assertPreserved(planted, stash, realAdb)
+        assertTrue(status!!.contains("repaired"), "status was: $status")
+        assertEquals("FOREIGN ADB BINARY", realAdb.readText())
+    }
+
+    @Test
+    fun `a repair never overwrites an earlier stash`() {
+        val planted = "FOREIGN REAL BINARY v2"
+        writeShim("FOREIGN ADB BINARY")
+        Files.writeString(realAdb, planted)
+        Files.writeString(stash, "EARLIER STASH - must survive too")
+        SdkShim.ensure(shim, wrapperSource)
+        assertEquals("EARLIER STASH - must survive too", stash.readText())
+        assertPreserved(planted, dir.resolve("platform-tools/adb.real.corral-backup.1"), realAdb)
+    }
+
+    @Test
+    fun `a corral shim pair is left untouched and creates no stash`() {
+        writeShim(wrapper)
+        Files.writeString(realAdb, "REAL ADB v1")
+        assertEquals(null, SdkShim.ensure(shim, wrapperSource))
+        assertEquals(null, SdkShim.ensure(realAdb, wrapperSource))
+        assertEquals(wrapper, shim.readText())
+        assertEquals("REAL ADB v1", realAdb.readText())
+        assertTrue(!Files.exists(stash), "a healthy pair must not be stashed")
+    }
+
+    @Test
+    fun `repairing by the real path with no shim installs the wrapper and keeps the real binary`() {
+        Files.writeString(realAdb, "REAL ADB v1")   // .real spelling, adb absent
+        val status = SdkShim.ensure(realAdb, wrapperSource)
+        assertTrue(status!!.contains("repaired"), "status was: $status")
+        assertEquals("REAL ADB v1", realAdb.readText())
+        assertTrue(shim.readText().contains(MARKER_CONTENT))
+        assertTrue(!Files.exists(stash), "nothing was replaced, so nothing should be stashed")
+    }
+
     @Test
     fun `first install stashes the real binary and installs the wrapper`() {
         writeShim("REAL ADB v1")
@@ -52,6 +117,7 @@ class SdkShimTest {
         assertTrue(status!!.contains("repaired"))
         assertEquals("REAL ADB v2", realAdb.readText())
         assertTrue(shim.readText().contains(MARKER_CONTENT))
+        assertPreserved("REAL ADB v1", stash)   // the superseded real binary is stashed, not destroyed
     }
 
     @Test

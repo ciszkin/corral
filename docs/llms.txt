@@ -8,8 +8,8 @@
 
 ## Start here
 
-- [README.md](https://github.com/ciszkin/corral/blob/main/README.md) — what it does, how it is shaped, build and test commands.
-- [CUTOVER.md](https://github.com/ciszkin/corral/blob/main/CUTOVER.md) — adoption: requirements, install, core loop, selectors, Gradle, emulators, config, doctor, updates, uninstall, known limits.
+- [README.md](https://github.com/ciszkin/corral/blob/main/README.md) — what it does, how it is shaped, and the first commands to run.
+- [CUTOVER.md](https://github.com/ciszkin/corral/blob/main/CUTOVER.md) — adoption: requirements, install, core loop, selectors, Gradle, emulators, config, doctor, updates, uninstall, known limits, build and test commands.
 - [SECURITY.md](https://github.com/ciszkin/corral/blob/main/SECURITY.md) — threat model, the named bypasses, and what the update checksum does not prove.
 - [skills/corral/SKILL.md](https://github.com/ciszkin/corral/blob/main/skills/corral/SKILL.md) — the agent skill: lease before touching a device, and how to read a refusal.
 - Install on Linux with `scripts/install.sh` (JDK 17+); Windows goes through the installer's Windows branch. Details in CUTOVER.md.
@@ -30,7 +30,7 @@ corral demo                           # a simulated pool on a free loopback port
 
 - Selector: `--serial S --model M --os V(min) --type usb|wifi|emulator --avd A`.
 - Beyond the loop: `corral avd list|start A|stop A`, `screenshot <serial> [--out F]`, `events`,
-  `gate -- <adb args>`, `update [--apply]` — all in [README.md](https://github.com/ciszkin/corral/blob/main/README.md).
+  `gate -- <adb args>`, `update [--apply]` — all in [CUTOVER.md](https://github.com/ciszkin/corral/blob/main/CUTOVER.md).
 - A queue wait is capped at 600 s; a larger `--timeout` is clamped with a warning, a negative one is a usage error.
 - `<cmd>` runs with `ANDROID_SERIAL` set to the served serial. `CORRAL_OWNER` is your identity — set it
   if your harness starts a new process per call, or your own lease will read as someone else's.

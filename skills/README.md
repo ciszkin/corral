@@ -39,7 +39,7 @@ Two distribution paths exist. Both resolve the same single `corral/SKILL.md`.
 
 ```sh
 npx skills add ciszkin/corral          # resolves skills/corral/SKILL.md from the default branch
-npx skills add ciszkin/corral@main -a claude-code -y
+npx skills add ciszkin/corral#main -s corral -a claude-code -y
 ```
 
 The CLI searches a fixed list of container directories, `skills/` among them, walking each up to

@@ -38,7 +38,7 @@ flags and the cleanup rules.
 
 No clone and no Gradle: the release bundle carries both jars and the installer. Check it
 against the published checksum, and
-[read the installer first](https://github.com/ciszkin/corral/blob/v0.1.4/scripts/install.sh)
+[read the installer first](https://github.com/ciszkin/corral/blob/v0.1.5/scripts/install.sh)
 — it is the same `scripts/install.sh` the source tree uses. You need JDK 17+ and an
 Android SDK with `platform-tools/adb`. The installer stops without usable Java, and it refuses
 an `adb` that is not the SDK's — one that only resolves from `PATH`, such as the distro's
@@ -47,10 +47,10 @@ the lease-gating wrapper. With no adb at all it installs with a warning and the 
 devices; `corral demo` needs no adb, SDK or phone.
 
 ```sh
-curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.4/corral-0.1.4.zip
-curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.4/corral-0.1.4.zip.sha256
-sha256sum -c corral-0.1.4.zip.sha256
-unzip corral-0.1.4.zip -d corral-0.1.4 && cd corral-0.1.4 && ./install.sh --ui
+curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.5/corral-0.1.5.zip
+curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.5/corral-0.1.5.zip.sha256
+sha256sum -c corral-0.1.5.zip.sha256
+unzip corral-0.1.5.zip -d corral-0.1.5 && cd corral-0.1.5 && ./install.sh --ui
 ```
 
 From a source checkout instead:
@@ -131,7 +131,7 @@ inspect; the Gradle gate is the one it cannot see.
 | License | Apache-2.0 |
 
 **Versions.** The tag is the only source: a release jar reports the tag it was built from
-(`0.1.4`), a source build reports `git describe --tags --match v*` — that tag, or
+(`0.1.5`), a source build reports `git describe --tags --match v*` — that tag, or
 `<tag>-<n>-g<sha>` past it — and only a tree with neither a reachable `v*` tag nor
 `CORRAL_VERSION` (a jar built outside git, or a tagless clone) reports `0.0.0-dev`, which
 the console shows as-is.
@@ -145,7 +145,7 @@ the console shows as-is.
 - [Behaviour reference](CUTOVER.md#behaviour-reference) — the gates and their rules, the
   pool, the HTTP/WS/MCP surface, the config API and self-healing.
 - [Repository shape and build](CUTOVER.md#repository-shape-and-build) — the four modules,
-  the build, the four test suites.
+  the build, the five test suites.
 - [Updates](CUTOVER.md#updates) — the daily check, the kill switch, and what an apply does
   to a running daemon or console.
 - [SECURITY.md](SECURITY.md) — the trust boundary, including what the release checksum

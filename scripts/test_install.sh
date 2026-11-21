@@ -683,7 +683,45 @@ dump_on_fail "$rc15" "$TMP/claim-nodelete.log"
 check "failed shim install keeps an existing wrapper with no adb.real byte-for-byte intact" bash -c \
   "[ '$rc15' -ne 0 ] && [ -f '$SDK15/adb' ] && [ \"\$(sha256sum '$SDK15/adb' | cut -d' ' -f1)\" = '$before_sha' ] && grep -q 'corral adb wrapper' '$SDK15/adb' && [ ! -e '$SDK15/adb.real' ] && ! grep -qi 'shim is active' '$TMP/claim-nodelete.log'"
 
-# 7: the TRACKED .gitignore (not .git/info/exclude) must ignore both generated trees for every clone.
+# 7: row 81 follow-up — the installer's half of the same data-loss bug. install_sdk_shim used to
+# `mv "$adb_path" "$adb_path.real"` unconditionally, so an adb.real already beside the adb (an
+# explicit --adb into a directory that is not Corral's, or an SDK whose .real belongs to the
+# operator) was silently destroyed. The daemon half (SdkShim.kt) parks it as
+# adb.real.corral-backup(.N); the installer must use the same name, never overwrite an earlier
+# stash, and uninstall must keep and name the bytes it cannot put back. Red on base: the planted
+# bytes are gone and adb.real holds only the new binary.
+TMPHOME16="$TMP/home16"; SDK81="$TMPHOME16/Android/Sdk/platform-tools"
+mkdir -p "$SDK81" "$TMPHOME16/bin"; : > "$TMPHOME16/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "foreign-adb-real81 $@"' > "$SDK81/adb.real"
+printf '%s\n' '#!/bin/sh' 'echo "sdk-adb81 $@"' > "$SDK81/adb"
+chmod +x "$SDK81/adb.real" "$SDK81/adb"
+foreign81_sha=$(sha256sum "$SDK81/adb.real" | cut -d' ' -f1)
+shim_sandbox "$TMPHOME16" --adb "$SDK81/adb" >"$TMP/adbreal81.log" 2>&1; rc81=$?
+dump_on_fail "$rc81" "$TMP/adbreal81.log"
+check "a foreign adb.real is kept as adb.real.corral-backup (bytes intact) and the shim still installs" bash -c \
+  "[ '$rc81' -eq 0 ] && [ -f '$SDK81/adb.real.corral-backup' ] && [ \"\$(sha256sum '$SDK81/adb.real.corral-backup' | cut -d' ' -f1)\" = '$foreign81_sha' ] && grep -q 'sdk-adb81' '$SDK81/adb.real' && grep -q 'corral adb wrapper' '$SDK81/adb' && grep -qF '$SDK81/adb.real.corral-backup' '$TMP/adbreal81.log'"
+check "the install summary names the kept adb.real and its backup path" bash -c \
+  "grep -qF 'Stashed real adb as $SDK81/adb.real' '$TMP/adbreal81.log' && grep -qF 'an adb.real already there was NOT overwritten; kept as $SDK81/adb.real.corral-backup' '$TMP/adbreal81.log' && grep -qF 'An adb.real already at $SDK81/adb.real was not overwritten; it is kept as $SDK81/adb.real.corral-backup' '$TMP/adbreal81.log'"
+# A later install (an SDK update puts a new real adb back at adb, and a new .real beside it) must not
+# overwrite the stash just made: the next name is .corral-backup.1, the same numbering SdkShim uses.
+printf '%s\n' '#!/bin/sh' 'echo "sdk-adb81b $@"' > "$SDK81/adb"
+printf '%s\n' '#!/bin/sh' 'echo "foreign-adb-real81b $@"' > "$SDK81/adb.real"
+chmod +x "$SDK81/adb" "$SDK81/adb.real"
+foreign81b_sha=$(sha256sum "$SDK81/adb.real" | cut -d' ' -f1)
+shim_sandbox "$TMPHOME16" --adb "$SDK81/adb" >"$TMP/adbreal81b.log" 2>&1; rc81b=$?
+dump_on_fail "$rc81b" "$TMP/adbreal81b.log"
+check "a second install numbers the next stash (.1) and never overwrites the earlier one" bash -c \
+  "[ '$rc81b' -eq 0 ] && [ \"\$(sha256sum '$SDK81/adb.real.corral-backup' | cut -d' ' -f1)\" = '$foreign81_sha' ] && [ \"\$(sha256sum '$SDK81/adb.real.corral-backup.1' | cut -d' ' -f1)\" = '$foreign81b_sha' ] && grep -q 'sdk-adb81b' '$SDK81/adb.real' && grep -qF '$SDK81/adb.real.corral-backup.1' '$TMP/adbreal81b.log'"
+# Uninstall puts the real adb back and must NOT delete the stashes: they are the operator's bytes,
+# not ours. It names them, because a file nobody knows about is the same loss one step later.
+env HOME="$TMPHOME" PATH="$STUB:$PATH" bash "$SRC/install.sh" --home "$TMPHOME16" --uninstall >"$TMP/adbreal81-uninstall.log" 2>&1; rc81u=$?
+dump_on_fail "$rc81u" "$TMP/adbreal81-uninstall.log"
+check "uninstall restores adb.real but keeps both foreign stashes byte-for-byte" bash -c \
+  "[ '$rc81u' -eq 0 ] && grep -q 'sdk-adb81b' '$SDK81/adb' && [ ! -e '$SDK81/adb.real' ] && [ \"\$(sha256sum '$SDK81/adb.real.corral-backup' | cut -d' ' -f1)\" = '$foreign81_sha' ] && [ \"\$(sha256sum '$SDK81/adb.real.corral-backup.1' | cut -d' ' -f1)\" = '$foreign81b_sha' ]"
+check "uninstall names where the kept adb.real stashes are" bash -c \
+  "grep -qF '$SDK81/adb.real.corral-backup' '$TMP/adbreal81-uninstall.log' && grep -qF '$SDK81/adb.real.corral-backup.1' '$TMP/adbreal81-uninstall.log'"
+
+# 8: the TRACKED .gitignore (not .git/info/exclude) must ignore both generated trees for every clone.
 # `git check-ignore -q` only takes one path per call, so assert each — this fails if either entry is gone.
 if [ "$BUILD" = 1 ]; then
   check "tracked .gitignore ignores corral-installer/ and dist/" bash -c \
@@ -1390,10 +1428,13 @@ else
   # are deleted from both sides and pinned by the row-90 rows above; every other line must match.
   # A8 F1/F2 add the "what landed + the PATH line" block and the port-bearing smoke header; they are
   # deleted from both sides here and pinned by the F1/F2 rows above, which read the same emitter.
+  # Row 81's installer half rewrites the stash account ("or replaced a stale one" was the falsehood):
+  # the new wording and the backup-file lines are pinned by the row-81 rows further up, so they are
+  # dropped from both sides here like every other deliberate delta.
   # No alternative may contain the sed address delimiter `/`: a `/` ends the address early, sed then
   # fails on BOTH sides and two empty files compare equal — the guard would pass vacuously (the
   # non-empty check below is what makes that loud instead).
-  drop_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\|Agent skill not installed: no ~\|Installed the corral agent skill (\|Linked the corral agent skill for Claude Code (\|Left alone (not a symlink into ~\|==> Installed to \|  CLI + adb wrapper: \|  console: \|  daemon jar: \|PATH: put \|  export PATH=\|  (appended to \|  ([^ ]* already contain it\|  (there is no \|==> Installed. Smoke-test\)'
+  drop_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\|Agent skill not installed: no ~\|Installed the corral agent skill (\|Linked the corral agent skill for Claude Code (\|Left alone (not a symlink into ~\|==> Installed to \|  CLI + adb wrapper: \|  console: \|  daemon jar: \|PATH: put \|  export PATH=\|  (appended to \|  ([^ ]* already contain it\|  (there is no \|==> Installed. Smoke-test\|Stashed real adb as \|  an adb.real already there was NOT overwritten\|  An adb.real already at \)'
   sed -e "/$drop_re/d" "$TMP/posix-pre.log" > "$TMP/posix-pre.log.cmp"
   sed -e "/$drop_re/d" "$TMP/posix-new.log" > "$TMP/posix-new.log.cmp"
   check "POSIX: the filtered logs both have content (a broken filter cannot pass the next row vacuously)" \

@@ -16,6 +16,7 @@ HOME_ARG=""
 UNINSTALL=0
 SHIM=1
 SHIM_ACTIVE=0
+SHIM_STASH=""
 INSTALL_UI=auto
 
 usage() {
@@ -311,6 +312,7 @@ MARKER_DAEMON_BAT='rem corral daemon launcher'
 # hard-coded list there is exactly the lie row 15 set out to remove).
 REMOVED=""
 KEPT_SHIMS=""
+KEPT_ADB_BACKUPS=""
 KEPT_SKILL=""
 KEPT_CLAUDE_LINK=""
 KEPT_CLAUDE_LINK_WITH_SKILL=""
@@ -671,6 +673,12 @@ EOF
       mv "$d/adb.real" "$d/adb"
       echo "Restored SDK adb at $d/adb"
     fi
+    # An adb.real the installer found already in place is parked as adb.real.corral-backup(.N)
+    # rather than destroyed. It is the operator's binary, not ours, so it is never deleted or
+    # restored over adb: it is left here and named below, so its bytes are not quietly lost.
+    for b in "$d"/adb.real.corral-backup*; do
+      if [[ -f "$b" ]]; then KEPT_ADB_BACKUPS="${KEPT_ADB_BACKUPS:+$KEPT_ADB_BACKUPS }$b"; fi
+    done
   done
 
   if [[ -n "$REMOVED" ]]; then
@@ -683,6 +691,9 @@ EOF
   fi
   if [[ -n "$KEPT_SHIMS" ]]; then
     echo "Left alone (not installed by corral; unrecognised shim content):$KEPT_SHIMS"
+  fi
+  if [[ -n "$KEPT_ADB_BACKUPS" ]]; then
+    echo "Left alone (an adb.real an install had replaced, kept as a backup — your bytes, not Corral's to delete): $KEPT_ADB_BACKUPS"
   fi
   if [[ -n "$KEPT_SKILL" ]]; then
     echo "Left alone (edited since install, or its shipped copy is unavailable — not byte-identical): $KEPT_SKILL"
@@ -868,6 +879,17 @@ bat_list() { # bat_list <space-separated names> -> "a.bat, b.bat"
 # Gate EVERY adb call, including absolute-path ones from gradle/AGP/IDE, by replacing the
 # SDK's platform-tools/adb with the wrapper (real binary kept as adb.real next to it).
 # Updates $ADB to the real binary so the daemon and the ~/bin wrapper use it directly.
+
+# Where a file that must not be overwritten is parked: <path>.corral-backup, then .1, .2, ... when
+# that name is taken. SdkShim.kt parks a replaced adb.real under the same names for the same reason,
+# and neither half may overwrite an earlier stash: the .real being replaced can be the operator's
+# own binary (--adb naming a directory that is not Corral's).
+stash_path_for() { # stash_path_for <path> -> an unused <path>.corral-backup[.N]
+  local base="$1.corral-backup" n=1
+  while [ -e "$base" ] || [ -L "$base" ]; do base="$1.corral-backup.$n"; n=$((n+1)); done
+  printf '%s' "$base"
+}
+
 install_sdk_shim() {
   [[ -n "$ADB" ]] || return 0
   local adb_dir adb_path
@@ -875,15 +897,31 @@ install_sdk_shim() {
   adb_path="$adb_dir/adb"
   [[ -f "$adb_path" ]] || return 0
   # Only question that matters: is what sits at adb_path our wrapper? If it's a real binary
-  # (first install OR a freshly SDK-updated adb), stash it as adb.real — replacing a stale
-  # adb.real is correct, never clobbering the newer binary.
+  # (first install OR a freshly SDK-updated adb), stash it as adb.real. An adb.real already there
+  # is not necessarily ours, so it is parked first under the deterministic backup name below and
+  # never destroyed; the shim still installs, and the summary names the stash.
   if ! grep -q 'corral adb wrapper' "$adb_path" 2>/dev/null; then
+    if [ -e "$adb_path.real" ] || [ -L "$adb_path.real" ]; then
+      SHIM_STASH=$(stash_path_for "$adb_path.real")
+      if ! mv "$adb_path.real" "$SHIM_STASH"; then
+        SHIM_STASH=""
+        echo "ERROR: cannot move the existing $adb_path.real aside to $adb_path.real.corral-backup*;" >&2
+        echo "       the SDK adb shim was NOT installed, and nothing was moved. gradle/AGP absolute-path" >&2
+        echo "       adb calls are NOT lease-gated; fix the SDK path and re-run." >&2
+        exit 1
+      fi
+    fi
     if ! mv "$adb_path" "$adb_path.real"; then
+      # Put the preserved one back where it was: this run changed nothing.
+      if [ -n "$SHIM_STASH" ]; then mv -f "$SHIM_STASH" "$adb_path.real" 2>/dev/null || true; SHIM_STASH=""; fi
       echo "ERROR: cannot move the real adb aside ($adb_path -> $adb_path.real); the SDK adb shim was NOT installed." >&2
       echo "       gradle/AGP absolute-path adb calls are NOT lease-gated; fix the SDK path and re-run." >&2
       exit 1
     fi
-    echo "Stashed real adb as $ADB.real (or replaced a stale one)"
+    echo "Stashed real adb as $adb_path.real"
+    if [ -n "$SHIM_STASH" ]; then
+      echo "  an adb.real already there was NOT overwritten; kept as $SHIM_STASH"
+    fi
   fi
   # Both copies go through replace_file, never a `cp` in place: bash reads a script as it runs and
   # resumes at the same byte offset after each top-level command, so rewriting the wrapper under a
@@ -898,6 +936,9 @@ install_sdk_shim() {
     if [ -e "$adb_path.real" ]; then
       mv -f "$adb_path.real" "$adb_path"
       echo "ERROR: failed to install the SDK adb shim at $adb_path; restored the real adb from $adb_path.real." >&2
+      if [ -n "$SHIM_STASH" ]; then
+        echo "       (the adb.real this run found there is still kept at $SHIM_STASH)" >&2
+      fi
     else
       # No adb.real: the stash mv never ran, so whatever is here now is either a valid wrapper left by a
       # previous install (keep it) or — impossible after replace_file, which leaves the old file whole —
@@ -1752,6 +1793,9 @@ echo "  corral devices | python3 -m json.tool"
 if [[ $SHIM_ACTIVE -eq 1 ]]; then
   echo "SDK adb shim is active — adb reached through the SDK's platform-tools path is lease-gated"
   echo "  (gradle/AGP absolute-path calls to it included). An adb elsewhere on this host is not gated."
+  if [[ -n "$SHIM_STASH" ]]; then
+    echo "  An adb.real already at $ADB was not overwritten; it is kept as $SHIM_STASH"
+  fi
 elif [[ $SHIM -eq 0 ]]; then
   echo "SDK adb shim is off (--no-sdk-shim, as requested) — gradle/AGP absolute-path adb calls are NOT lease-gated."
 else

@@ -1,13 +1,16 @@
 package dev.corral
 
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.PrintStream
+import java.net.ConnectException
 import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -478,5 +481,54 @@ class CorralCliExecTest {
         assertTrue("schtasks /query /tn CorralDaemon" in win, win)
         assertTrue("CorralDaemon" in win, win)
         assertFalse("systemctl" in win, "Windows hint must not name systemd: $win")
+    }
+
+    // --- A8 row 92: a just-restarted daemon refuses connections for ~2 s; the first call waits,
+    // --- then a still-absent daemon fails with the real cause instead of the JDK's `(null)`.
+
+    @Test fun startupGraceRetriesOnlyARefusedConnection() {
+        var attempts = 0
+        val sleeps = mutableListOf<Long>()
+        val result = retryWhileConnecting(
+            delaysMs = listOf(10L, 20L),
+            sleep = { sleeps += it },
+        ) {
+            attempts++
+            if (attempts < 3) throw ConnectException() else "ok"
+        }
+
+        assertEquals("ok", result)
+        assertEquals(3, attempts)
+        assertEquals(listOf(10L, 20L), sleeps)
+    }
+
+    @Test fun startupGraceGivesUpAfterItsBudgetAndKeepsTheRefusal() {
+        val sleeps = mutableListOf<Long>()
+        val e = assertFailsWith<ConnectException> {
+            retryWhileConnecting(delaysMs = listOf(1L, 2L), sleep = { sleeps += it }) {
+                throw ConnectException()
+            }
+        }
+        assertNull(e.message, "the JDK's refusal carries no message; the caller must name it")
+        assertEquals(listOf(1L, 2L), sleeps, "three attempts, two backoffs")
+    }
+
+    @Test fun startupGraceNeverRetriesATimeoutOrARealFailure() {
+        val sleeps = mutableListOf<Long>()
+        val e = assertFailsWith<IOException> {
+            retryWhileConnecting(delaysMs = listOf(1L), sleep = { sleeps += it }) {
+                throw IOException("boom")
+            }
+        }
+        assertEquals("boom", e.message)
+        assertTrue(sleeps.isEmpty(), "only a refused connection may spend the startup budget")
+        assertFalse(isConnectionRefused(IOException("boom")))
+    }
+
+    @Test fun refusedConnectionReadsAsAReasonNotAsNull() {
+        assertEquals("connection refused", unreachableDetail(ConnectException()))
+        assertEquals("boom", unreachableDetail(IOException("boom")))
+        assertTrue(isConnectionRefused(ConnectException()))
+        assertTrue(isConnectionRefused(IOException("wrapper", ConnectException())))
     }
 }

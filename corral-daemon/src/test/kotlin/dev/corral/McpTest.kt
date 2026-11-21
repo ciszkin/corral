@@ -669,4 +669,27 @@ class McpTest {
         assertEquals("2025-11-25", initialize("2026-07-28")["protocolVersion"]?.jsonPrimitive?.content)
         assertEquals("2025-06-18", initialize("2025-06-18")["protocolVersion"]?.jsonPrimitive?.content)
     }
+
+    /** Row 91: the MCP handshake must report the same version `corral status`/`--version` do. */
+    @Test
+    fun initializeReportsTheDaemonsOwnVersion() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val s = server(sessions)
+        val client = harness(sessions, s, "version-harness")
+
+        assertEquals(VersionSource.version, client.serverVersion?.version)
+        client.close(); s.close()
+    }
+
+    /** The version is injected the way config/clock are, so the wiring is pinned without the jar. */
+    @Test
+    fun initializeUsesTheInjectedVersion() = runBlocking {
+        val sessions = ConcurrentHashMap<String, ServerSession>()
+        val s = corralMcpServer(
+            AppEnv({ devices }, LeaseManager({ devices }, null, { now })), sessions, version = "9.9.9-test")
+        val client = harness(sessions, s, "version-harness")
+
+        assertEquals("9.9.9-test", client.serverVersion?.version)
+        client.close(); s.close()
+    }
 }

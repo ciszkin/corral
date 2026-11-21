@@ -12,6 +12,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import java.io.File
 import java.io.IOException
 import java.lang.ProcessHandle
+import java.net.ConnectException
 import java.net.URI
 import java.net.URLEncoder
 import java.net.http.HttpClient
@@ -51,6 +52,42 @@ internal const val EMULATOR_CALL_TIMEOUT_SECONDS = 600L
 internal const val UPDATE_CHECK_TIMEOUT_SECONDS = 15L
 internal const val SCREENSHOT_TIMEOUT_SECONDS = 30L
 internal const val EVENTS_CONNECT_TIMEOUT_SECONDS = 10L
+
+/**
+ * Bounded grace for a daemon that has just been started: the JVM needs ~1.7 s to bind its port and
+ * serve the first pool, while `systemctl --user restart` returns before readiness. Only a refused
+ * connection is retried — a timeout or a real failure is reported at once — so a daemon that is
+ * genuinely down still fails, after this budget, with the underlying cause. [sleep] is injectable
+ * so the bounds are testable without waiting.
+ */
+internal val STARTUP_CONNECT_DELAYS_MS = listOf(100L, 200L, 400L, 800L, 1600L)
+
+internal fun isConnectionRefused(e: Throwable): Boolean =
+    e is ConnectException || e.cause is ConnectException
+
+internal fun <T> retryWhileConnecting(
+    delaysMs: List<Long> = STARTUP_CONNECT_DELAYS_MS,
+    sleep: (Long) -> Unit = { Thread.sleep(it) },
+    send: () -> T,
+): T {
+    var attempt = 0
+    while (true) {
+        try {
+            return send()
+        } catch (e: IOException) {
+            if (!isConnectionRefused(e) || attempt >= delaysMs.size) throw e
+            sleep(delaysMs[attempt++])
+        }
+    }
+}
+
+/**
+ * The JDK's HttpClient raises a [ConnectException] with a null message when the port is closed,
+ * which reached users as the literal `(null)`. Name the refusal; another bare IO failure names its
+ * class rather than printing nothing.
+ */
+internal fun unreachableDetail(e: IOException): String =
+    e.message ?: if (isConnectionRefused(e)) "connection refused" else e.javaClass.simpleName
 
 /** `--repo` is an `owner/name` pair: exactly one slash, no whitespace. */
 internal fun validRepo(repo: String): Boolean {
@@ -126,7 +163,13 @@ internal fun updateLine(info: UpdateInfo?): String = when (info?.state) {
     UpdateState.UNKNOWN -> when (info.reason) {
         UpdateReason.NOT_CHECKED -> "update: unknown (no update check has run yet)"
         UpdateReason.UNREACHABLE -> "update: unknown (could not reach the release feed)"
-        UpdateReason.HTTP_ERROR -> "update: unknown (release feed answered HTTP ${info.httpStatus})"
+        // 403 (and occasionally 429) is GitHub's answer when the unauthenticated 60/h limit is spent;
+        // calling that "unknown" made a rate-limited install read as broken (A8 row 92).
+        UpdateReason.HTTP_ERROR -> when (info.httpStatus) {
+            403, 429 -> "update: rate-limited by GitHub (unauthenticated check answered HTTP " +
+                "${info.httpStatus}; CORRAL_UPDATE_CHECK=off stops it)"
+            else -> "update: unknown (release feed answered HTTP ${info.httpStatus})"
+        }
         UpdateReason.UNPARSEABLE -> "update: unknown (release feed's tag is not a version)"
         null -> "update: unknown (cause not recorded)"
     }
@@ -588,6 +631,9 @@ object CorralCli {
 
     private val http = HttpClient.newHttpClient()
 
+    /** The startup grace is spent on this process's first daemon call; later failures are real. */
+    @Volatile private var startupGraceSpent = false
+
     /**
      * Whether this daemon serves a simulated pool (I7), read once per invocation from
      * `/api/status`. False when it cannot be read — an unreachable daemon reports that itself —
@@ -611,14 +657,25 @@ object CorralCli {
         if (demoDaemon) System.err.println(demoCliLine())
     }
 
-    private fun get(path: String) = http.send(
-        HttpRequest.newBuilder(URI.create("$url$path")).timeout(Duration.ofSeconds(DAEMON_CALL_TIMEOUT_SECONDS)).GET().build(),
-        HttpResponse.BodyHandlers.ofString()).let(::ok).body()
+    private fun get(path: String) = ok(sendGet(path)).body()
+
+    /**
+     * A bounded GET whose first use in the process tolerates the daemon's startup window. The grace
+     * is spent once: if it expires the daemon is not coming back on this command, so later calls in
+     * the same process fail at once rather than waiting the budget again.
+     */
+    private fun sendGet(path: String, timeoutSeconds: Long = DAEMON_CALL_TIMEOUT_SECONDS): HttpResponse<String> {
+        val request = HttpRequest.newBuilder(URI.create("$url$path"))
+            .timeout(Duration.ofSeconds(timeoutSeconds)).GET().build()
+        val send = { http.send(request, HttpResponse.BodyHandlers.ofString()) }
+        if (startupGraceSpent) return send()
+        startupGraceSpent = true
+        return retryWhileConnecting(send = send)
+    }
 
     /** The daemon's cached update check for the plumbing verbs; null when unreachable or non-200. */
     private fun fetchUpdate(): UpdateInfo? = runCatching {
-        val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/update"))
-            .timeout(Duration.ofSeconds(UPDATE_CHECK_TIMEOUT_SECONDS)).GET().build(), HttpResponse.BodyHandlers.ofString())
+        val r = sendGet("/api/update", UPDATE_CHECK_TIMEOUT_SECONDS)
         if (r.statusCode() == 200) corralJson.decodeFromString<UpdateInfo>(r.body()) else null
     }.getOrNull()
 
@@ -814,7 +871,7 @@ object CorralCli {
         try {
             run(args)
         } catch (e: IOException) {
-            System.err.println("corral: daemon unreachable at $url (${e.message})")
+            System.err.println("corral: daemon unreachable at $url (${unreachableDetail(e)})")
             exitProcess(1)
         }
     }
@@ -873,9 +930,7 @@ object CorralCli {
                 var problems = 0
                 labelIfDemo()
                 val pool: List<Device>? = try {
-                    val r = http.send(HttpRequest.newBuilder(URI.create("$url/api/devices"))
-                        .timeout(Duration.ofSeconds(DAEMON_CALL_TIMEOUT_SECONDS)).GET().build(),
-                        HttpResponse.BodyHandlers.ofString())
+                    val r = sendGet("/api/devices")
                     if (r.statusCode() == 200) decodeDeviceList(r.body()) else null
                 } catch (_: Exception) { null }
                 if (pool != null) println("daemon: ok ($url, ${pool.size} device(s))")

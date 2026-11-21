@@ -148,10 +148,18 @@ fun Application.installMcp(env: AppEnv) {
     }
 }
 
-/** sessionId -> session, so handlers can read the client's initialize info. */
-fun corralMcpServer(env: AppEnv, sessions: ConcurrentHashMap<String, ServerSession>): Server {
+/**
+ * sessionId -> session, so handlers can read the client's initialize info. [version] defaults to
+ * the same jar-stamped source `corral status`/`--version` report, so an agent never sees a version
+ * this build did not ship; it is a parameter only so a test can pin a known value.
+ */
+fun corralMcpServer(
+    env: AppEnv,
+    sessions: ConcurrentHashMap<String, ServerSession>,
+    version: String = VersionSource.version,
+): Server {
     val server = Server(
-        serverInfo = Implementation(name = "corral", version = "0.3.0"),
+        serverInfo = Implementation(name = "corral", version = version),
         options = ServerOptions(capabilities = ServerCapabilities(tools = ServerCapabilities.Tools(listChanged = false))),
     )
 

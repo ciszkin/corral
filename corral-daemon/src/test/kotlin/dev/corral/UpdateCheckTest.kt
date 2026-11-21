@@ -275,5 +275,13 @@ class UpdateCheckTest {
             updateLine(UpdateInfo("1.0.0", UpdateState.UNKNOWN, reason = UpdateReason.HTTP_ERROR, httpStatus = 404)))
         assertEquals("update: unknown (release feed's tag is not a version)",
             updateLine(UpdateInfo("1.0.0", UpdateState.UNKNOWN, reason = UpdateReason.UNPARSEABLE)))
+        // A8 row 92: GitHub's unauthenticated limit must read as rate limiting, not a broken install.
+        listOf(403, 429).forEach { status ->
+            val line = updateLine(UpdateInfo("1.0.0", UpdateState.UNKNOWN,
+                reason = UpdateReason.HTTP_ERROR, httpStatus = status))
+            assertTrue(line.contains("rate-limited by GitHub"), line)
+            assertTrue(line.contains("CORRAL_UPDATE_CHECK=off"), line)
+            assertFalse(line.contains("unknown"), line)
+        }
     }
 }

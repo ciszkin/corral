@@ -150,8 +150,8 @@ corral-ui --url http://127.0.0.1:8799
 
 The demo pool is claimable and leasable through the same CLI, HTTP, MCP and console paths as a real
 one. **What it is not:** a real device, a test target, or a security boundary. The default world
-serves three fabricated devices (two ready, one AVD reporting unbooted until it is started) and a
-placeholder screen; running a real build, `adb` call or `connected*AndroidTest` against a demo
+serves three fabricated devices (two ready, one AVD reporting unbooted until it is started), each
+with its own pre-baked screen; running a real build, `adb` call or `connected*AndroidTest` against a demo
 serial proves nothing and is not supported. It installs no `adb` wrapper, SDK shim, Gradle gate,
 systemd unit or Scheduled Task, and it starts no adb, emulator or scrcpy process, makes no update
 check and reads or writes neither `~/.corral` nor `~/.config/corral`.
@@ -778,9 +778,10 @@ template, the agent skill and the docs. The suites (`test_*.sh`), their fake bin
 reported as drift by `--check`.
 
 `scripts/test_wrapper.sh` drives the gate through the bundled wrapper,
-`SLOW=1 scripts/test_e2e.sh` runs the daemon end to end against fake devices, and
-`scripts/test_install.sh` installs into a sandbox home; CI runs all three plus both
-shadow jars and the bundle drift check.
+`SLOW=1 scripts/test_e2e.sh` runs the daemon end to end against fake devices,
+`scripts/test_install.sh` installs into a sandbox home, and `scripts/test_demo.sh`
+exercises the simulated pool and its isolation; CI runs all four plus the module
+tests, both shadow jars and the bundle drift check.
 
 The tree is feature-complete for a first release, and every finding from 52 independent
 review passes is closed.

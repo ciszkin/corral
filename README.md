@@ -118,11 +118,12 @@ inspect; the Gradle gate is the one it cannot see.
 
 | | |
 |---|---|
-| Linux | verified: four Gradle modules, four suites, Linux CI plus a host |
+| Linux | verified: four Gradle modules, five suites (module tests, wrapper, e2e, install, demo), Linux CI plus a host |
 | Windows | host-verified on one box; **two gate layers, not three** ([CUTOVER.md § Windows](CUTOVER.md#windows)) |
 | macOS | **no installer** — the daemon and CLI are portable Java, packaged and verified nowhere |
 | Gate | exec time: a client that bypasses the wrapper, the SDK shim and Gradle is outside it |
 | Identity | cooperative, not authentication: a local process can claim to be anyone |
+| Reviews | 52 independent review passes, all findings closed; the count at the first release, with later gates recorded in corral-docs |
 | Console | Compose Desktop, verified on JDK 17 (Linux) and JDK 25 (Windows, [§ Windows](CUTOVER.md#windows)); other very new JDKs untested |
 | Loopback | the daemon binds `127.0.0.1` and refuses a non-local `Host` header |
 | License | Apache-2.0 |

@@ -2,12 +2,15 @@
 Description=Corral daemon
 
 [Service]
-Environment=PATH=%h/.sdkman/candidates/java/current/bin:%h/bin:/usr/bin:/bin
+# install.sh rewrites both @-placeholders. PATH names the JDK this install verified first, then
+# SDKMAN!'s `current` (a stable symlink a default change or a JDK upgrade re-points), then ~/bin and
+# the system dirs; ExecStart runs `java` through that PATH. A user manager's own PATH has neither
+# ~/.sdkman nor ~/bin, so it is set here explicitly — and no single absolute JDK version is baked in,
+# so a JDK change does not need a reinstall.
+Environment=PATH=@CORRAL_PATH@
 Environment=CORRAL_ADB=%h/Android/Sdk/platform-tools/adb
 EnvironmentFile=-%h/.config/corral/daemon.env
-# The java path below is only a fallback: install.sh rewrites it with the java it actually
-# detected. SDKMAN! is not required -- JAVA_HOME or any java on PATH is fine.
-ExecStart=%h/.sdkman/candidates/java/current/bin/java -Xms24m -Xmx64m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=64m -XX:TieredStopAtLevel=1 -jar %h/.corral/corral-daemon-all.jar
+ExecStart=@CORRAL_ENV@ java -Xms24m -Xmx64m -XX:+UseSerialGC -XX:MaxMetaspaceSize=64m -XX:ReservedCodeCacheSize=64m -XX:TieredStopAtLevel=1 -jar %h/.corral/corral-daemon-all.jar
 Restart=on-failure
 RestartSec=2
 

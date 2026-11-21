@@ -943,7 +943,54 @@ else
   ADB=""
   echo "WARNING: no real adb found — the daemon will have an empty device inventory."
   echo "         Install Android platform-tools or pass --adb PATH, then re-run."
+  echo "         No phone or SDK is needed to see Corral work: 'corral demo' runs a simulated pool."
 fi
+
+# A8 F4 — the one preflight that must run BEFORE the first write. install_sdk_shim REPLACES
+# <dir-of-adb>/adb with the corral wrapper, so the shim can only be installed where that adb is the
+# SDK's and the directory is writable. The v0.1.4 dry run had both wrong: with a JDK but no SDK and
+# the distro's /usr/bin/adb first on PATH, the installer wrote the skill, the console, the launcher
+# and the icons and then died on `mv /usr/bin/adb` — no CLI, no daemon, and no explanation of the
+# half-install. Refusing here leaves the filesystem exactly as it was, and names the path.
+# --no-sdk-shim is the documented way to use an adb as it is, so it never enters this check; on
+# Windows the SDK's adb is never shimmed, so neither does that branch.
+if [[ $SHIM -eq 1 && $IS_WINDOWS -eq 0 && -n "$ADB" ]]; then
+  ADB_DIR=$(dirname "$ADB")
+  ADB_IN_SDK=0
+  if [[ -n "$ADB_ARG" ]]; then
+    ADB_IN_SDK=1                     # an explicit --adb is the operator accepting this path
+  else
+    for root in "$TARGET_HOME/Android/Sdk" "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}"; do
+      [[ -n "$root" ]] || continue
+      root=${root%/}
+      case "$ADB" in "$root"/*) ADB_IN_SDK=1; break;; esac
+    done
+    # An SDK installed outside those three roots (a distro's /usr/lib/android-sdk, a hand-unpacked
+    # /opt/...) is still the SDK: the shim only ever replaces <sdk>/platform-tools/adb, so an adb in a
+    # platform-tools directory is the shape this install may rewrite, and anything else is not.
+    if [[ $ADB_IN_SDK -eq 0 && ${ADB_DIR##*/} = platform-tools ]]; then ADB_IN_SDK=1; fi
+  fi
+  if [[ $ADB_IN_SDK -eq 0 ]]; then
+    echo "ERROR: adb at $ADB is not in an Android SDK (nothing under \$ANDROID_HOME, \$ANDROID_SDK_ROOT" >&2
+    echo "       or $TARGET_HOME/Android/Sdk); refusing to rewrite it. NOTHING was installed." >&2
+    echo "       The install shims the SDK's platform-tools/adb to gate gradle/AGP absolute-path calls," >&2
+    echo "       and an adb that is not the SDK's is the one thing it must not replace. Fix one of these," >&2
+    echo "       then re-run:" >&2
+    echo "         - install Android SDK platform-tools (Android Studio, or: sdkmanager platform-tools)" >&2
+    echo "         - set ANDROID_HOME or ANDROID_SDK_ROOT to your SDK" >&2
+    echo "         - pass --adb PATH pointing at your SDK's platform-tools/adb" >&2
+    echo "         - pass --no-sdk-shim to use $ADB as it is (absolute-path adb calls stay ungated)" >&2
+    exit 1
+  fi
+  if [[ ! -w "$ADB_DIR" ]]; then
+    echo "ERROR: cannot write $ADB_DIR, so the SDK adb shim cannot be installed (it must move adb to" >&2
+    echo "       adb.real there and write the wrapper). NOTHING was installed. Give that directory to" >&2
+    echo "       the user running this install (e.g. sudo chown -R \"\$(id -un)\" \"$ADB_DIR\"), or pass" >&2
+    echo "       --adb PATH into an SDK you own, or --no-sdk-shim, then re-run." >&2
+    exit 1
+  fi
+fi
+
 JAR=$(resolve_jar)
 if [[ -z "$JAR" || ! -f "$JAR" ]]; then echo "ERROR: jar not found at $JAR; pass --jar PATH." >&2; exit 1; fi
 
@@ -1222,6 +1269,27 @@ if [ ! -f "$TARGET_HOME/.config/corral/daemon.env" ]; then
   echo "Created ~/.config/corral/daemon.env (absent-only)"
 fi
 
+# The closing smoke check must probe the port the daemon will really bind, or a non-default
+# CORRAL_PORT sends the operator to a port nothing listens on (A8 F2). The daemon resolves it as
+# daemon.env > inherited env > 8798 (corral-daemon DaemonConfig.get) and only a 1024..65535 value is
+# usable, so this mirrors that order and that range — a file line wins even when this shell exports
+# a different port, because it wins for the daemon too.
+SMOKE_PORT=""
+if [[ -f "$TARGET_HOME/.config/corral/daemon.env" ]]; then
+  SMOKE_PORT=$(sed -n 's/^CORRAL_PORT=\([^#]*\).*/\1/p' "$TARGET_HOME/.config/corral/daemon.env" \
+    | tail -1 | tr -d '[:space:]')
+  SMOKE_PORT=${SMOKE_PORT%\"}; SMOKE_PORT=${SMOKE_PORT#\"}
+  SMOKE_PORT=${SMOKE_PORT%\'}; SMOKE_PORT=${SMOKE_PORT#\'}
+fi
+[[ -n "$SMOKE_PORT" ]] || SMOKE_PORT="${CORRAL_PORT:-}"
+# A value the daemon would reject (non-numeric, blank, outside 1024..65535) is not the port it binds,
+# so the default is the only honest answer. The length guard keeps `test` off integers it cannot hold.
+case "$SMOKE_PORT" in
+  *[!0-9]*|'') SMOKE_PORT=8798;;
+  *) [ "${#SMOKE_PORT}" -le 5 ] && [ "$SMOKE_PORT" -ge 1024 ] && [ "$SMOKE_PORT" -le 65535 ] \
+       || SMOKE_PORT=8798;;
+esac
+
 if [[ $IS_WINDOWS -eq 0 ]]; then
 # Carry an existing observer line verbatim — including an emptied value (observers off); seed
 # corral-ui only when the line is truly absent and the UI installs.
@@ -1235,15 +1303,33 @@ elif want_ui; then
 fi
 
 # Generate the per-host unit from the committed template, keeping the tuned JVM flags.
+# A8 F3: the unit used to bake in the ONE absolute JDK path detected here, so changing the SDKMAN!
+# default or upgrading that JDK left `systemctl --user start corral` broken until a reinstall. It now
+# carries a PATH it sets itself and runs `env java` through it:
+#   the verified JDK's dir first (the java this install checked is 17+, so today's behaviour holds),
+#   then SDKMAN!'s `current` (a stable symlink a default change or upgrade re-points; it is what the
+#   daemon falls back to when the versioned dir is gone),
+#   then ~/bin (the shims) and the system dirs.
+# This is the approach that works under systemd's minimal environment: a user manager's default PATH
+# has neither ~/.sdkman nor ~/bin, so an explicit Environment=PATH= is the only thing `env` can search
+# — and `env` itself is the one executable resolved before that PATH applies, which is why it is
+# named absolutely.
+ENV_BIN=$(command -v env 2>/dev/null || true)
+[[ -n "$ENV_BIN" ]] || ENV_BIN=/usr/bin/env
+JAVA_DIR=$(dirname "$JAVA_BIN")
+UNIT_PATH="$JAVA_DIR"
+SDKMAN_JAVA_DIR="$TARGET_HOME/.sdkman/candidates/java/current/bin"
+[[ "$SDKMAN_JAVA_DIR" = "$JAVA_DIR" ]] || UNIT_PATH="$UNIT_PATH:$SDKMAN_JAVA_DIR"
+UNIT_PATH="$UNIT_PATH:$BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 if [[ -n "$ADB" ]]; then
-  sed -e "s#%h/.sdkman/candidates/java/current/bin/java#$JAVA_BIN#" \
+  sed -e "s#@CORRAL_PATH@#$UNIT_PATH#" \
+      -e "s#@CORRAL_ENV@#$ENV_BIN#" \
       -e "s#Environment=CORRAL_ADB=%h/Android/Sdk/platform-tools/adb#Environment=CORRAL_ADB=$ADB#" \
-      -e "/^Environment=PATH=/d" \
       "$SCRIPT_DIR/corral.service" > "$UNIT_DIR/corral.service"
 else
-  sed -e "s#%h/.sdkman/candidates/java/current/bin/java#$JAVA_BIN#" \
+  sed -e "s#@CORRAL_PATH@#$UNIT_PATH#" \
+      -e "s#@CORRAL_ENV@#$ENV_BIN#" \
       -e "/^Environment=CORRAL_ADB=/d" \
-      -e "/^Environment=PATH=/d" \
       "$SCRIPT_DIR/corral.service" > "$UNIT_DIR/corral.service"
 fi
 # Environment= belongs to [Service]; appending it after [Install] is silently ignored by systemd.
@@ -1260,10 +1346,18 @@ RC_HOME='$HOME'
 if [[ "$TARGET_HOME" != "${HOME:-}" ]]; then RC_HOME="$TARGET_HOME"; fi
 PATH_LINE="export PATH=\"$RC_HOME/bin:\$PATH\""
 ADB_LINE="export CORRAL_REAL_ADB=\"$ADB\""
+# What the closing summary says about PATH comes from here, not from a list assumed above: a rc file
+# that already carried the line is named as one that does, and one this run appended it to is named
+# as what a NEW shell gets. A host with neither ~/.bashrc nor ~/.zshrc is told to add it itself —
+# the installer does not guess a shell's startup file (A8 F1).
+PATH_RCS=""
+PATH_WRITTEN=""
 for rc in "$TARGET_HOME/.bashrc" "$TARGET_HOME/.zshrc"; do
   [[ -f "$rc" ]] || continue
+  PATH_RCS="${PATH_RCS:+$PATH_RCS, }$rc"
   if ! grep -qF "$RC_HOME/bin" "$rc" 2>/dev/null; then
     printf '%s\n' "$PATH_LINE" >> "$rc"
+    PATH_WRITTEN="${PATH_WRITTEN:+$PATH_WRITTEN, }$rc"
     echo "Added PATH export to $rc (reload your shell or log out/in)"
   fi
   if [[ -n "$ADB" ]] && ! grep -q 'CORRAL_REAL_ADB' "$rc" 2>/dev/null; then
@@ -1563,8 +1657,9 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
   fi
   echo
   echo "Smoke-test from cmd.exe/PowerShell — add %USERPROFILE%\\bin to your PATH first (the PATH and"
-  echo "  CORRAL_REAL_ADB exports this install wrote went to .bashrc/.zshrc only; cmd.exe/PowerShell never read them):"
-  echo "  curl -s http://127.0.0.1:8798/api/devices"
+  echo "  CORRAL_REAL_ADB exports this install wrote went to .bashrc/.zshrc only; cmd.exe/PowerShell never read them)."
+  echo "  The daemon's configured port is $SMOKE_PORT:"
+  echo "  curl -s http://127.0.0.1:$SMOKE_PORT/api/devices"
   echo "  corral devices"
   echo
   if [[ $SHIM_ACTIVE -eq 1 ]]; then
@@ -1617,6 +1712,8 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
     echo "This run exits non-zero so a caller cannot read it as a completed upgrade."
   fi
 else
+# want_ui has already succeeded by here on POSIX (a failed console copy exits above), so naming the
+# console in the summary cannot overclaim.
 if [[ $SANDBOX -eq 1 ]]; then
   echo "sandbox: skipping systemctl (--home $TARGET_HOME != \$HOME)"
 elif systemctl --user daemon-reload 2>/dev/null; then
@@ -1629,8 +1726,28 @@ else
 fi
 
 echo
-echo "==> Installed. Smoke-test:"
-echo "  curl -s http://127.0.0.1:8798/api/devices"
+# A8 F1: say exactly what landed, then the one line this shell needs. The dry run's largest
+# untimed cost was a fresh shell finding no `corral` (and, with the SDK first on PATH, an ungated
+# adb) because the installer never said to put ~/bin on PATH.
+echo "==> Installed to $TARGET_HOME:"
+echo "  CLI + adb wrapper: $BIN_DIR/corral, $BIN_DIR/adb"
+if want_ui; then echo "  console: $BIN_DIR/corral-ui (jar in $CORRAL_HOME)"; fi
+echo "  daemon jar: $CORRAL_HOME/corral-daemon-all.jar"
+if [[ ":$PATH:" == *":$BIN_DIR:"* ]]; then
+  echo "PATH: $BIN_DIR is already on this shell's PATH."
+else
+  echo "PATH: put $BIN_DIR ahead of the Android SDK, or 'adb' is the ungated one — one line:"
+  echo "  export PATH=\"$BIN_DIR:\$PATH\""
+  if [[ -n "$PATH_WRITTEN" ]]; then
+    echo "  (appended to $PATH_WRITTEN, so a NEW shell has it; this shell still needs the line)"
+  elif [[ -n "$PATH_RCS" ]]; then
+    echo "  ($PATH_RCS already contain it, so a NEW shell has it; this shell still needs the line)"
+  else
+    echo "  (there is no ~/.bashrc or ~/.zshrc here to append it to — add the line to your shell's startup file)"
+  fi
+fi
+echo "==> Installed. Smoke-test (daemon port $SMOKE_PORT):"
+echo "  curl -s http://127.0.0.1:$SMOKE_PORT/api/devices"
 echo "  corral devices | python3 -m json.tool"
 if [[ $SHIM_ACTIVE -eq 1 ]]; then
   echo "SDK adb shim is active — adb reached through the SDK's platform-tools path is lease-gated"

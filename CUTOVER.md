@@ -89,10 +89,19 @@ scripts/install.sh
 The installer is user-scoped — no root — and idempotent, so it is safe to
 re-run. It:
 
-- detects Java and adb, or takes `--java PATH` / `--adb PATH` explicitly;
-- enables the `corral` systemd **user** service at login and restarts it;
+- detects Java and adb, or takes `--java PATH` / `--adb PATH` explicitly. An adb that
+  is not in an Android SDK — one that only resolves from `PATH`, like the distro's `/usr/bin/adb` —
+  is refused before the first file is written: the installer has to replace the SDK's
+  `platform-tools/adb` with the gating wrapper, and that is the one adb it must not touch.
+  `--no-sdk-shim` is how you say "use this adb as it is"; with no adb at all it warns, installs, and
+  the daemon lists no devices;
+- enables the `corral` systemd **user** service at login and restarts it. The unit sets its own
+  `PATH` and runs `env java`: the JDK the install verified comes first, SDKMAN!'s `current` link
+  next, so changing the SDKMAN! default or upgrading that JDK does not need a reinstall;
 - puts an `adb` wrapper and the `corral` CLI on `~/bin` (which must precede
-  the SDK directory on `PATH`);
+  the SDK directory on `PATH`). The closing summary prints the exact line for the shell in front of
+  you — `export PATH="$HOME/bin:$PATH"` — and names the `~/.bashrc`/`~/.zshrc` it appended it to, if
+  either exists;
 - shims the SDK's `platform-tools/adb` so absolute-path callers are gated too
   (`--no-sdk-shim` to skip);
 - installs a Gradle `init.d` gate that pre-flights device-touching tasks;
@@ -762,6 +771,11 @@ Four Gradle modules, one repository:
 scripts/make-installer.sh             # build both jars and mirror scripts/ + docs into the bundle
 scripts/make-installer.sh --check     # report bundle drift, write nothing
 ```
+
+`scripts/make-installer.sh` builds an OPERATOR bundle: the installer, both jars, the shims, the gate
+template, the agent skill and the docs. The suites (`test_*.sh`), their fake binaries and
+`tests/fixtures/` stay in the source tree — they are not mirrored, and a bundle carrying them is
+reported as drift by `--check`.
 
 `scripts/test_wrapper.sh` drives the gate through the bundled wrapper,
 `SLOW=1 scripts/test_e2e.sh` runs the daemon end to end against fake devices, and

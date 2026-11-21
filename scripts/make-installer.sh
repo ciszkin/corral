@@ -20,7 +20,11 @@ UI_BUNDLE_JAR="$BUNDLE/corral-ui-all.jar"
 #   make-installer.sh  the mirroring tool itself (source-tree only)
 #   cutover.md         the long internal checklist, untracked in git: it stays a source-tree doc, and
 #                      the bundle ships the tracked repo-root CUTOVER.md instead (see below)
-EXCLUDE="make-installer.sh cutover.md"
+# Dev-only artifacts an operator does not need (A8 F5): the four suites, the fake binaries they drive
+# and the test-only fixtures. The published v0.1.4 zip shipped all of them — 28 entries, and unzip
+# printed them onto a stranger's disk. They stay in the repo, where CI and the suites read them.
+DEV_ONLY="test_install.sh test_e2e.sh test_wrapper.sh test_demo.sh fake-adb fake-emulator"
+EXCLUDE="make-installer.sh cutover.md $DEV_ONLY"
 
 CHECK=0
 case "${1:-}" in
@@ -107,29 +111,28 @@ mkdir -p "$BUNDLE/skills/corral"
 mirror "$REPO_ROOT/skills/corral/SKILL.md" "skills/corral/SKILL.md"
 
 # The two legacy SKILL.md fixtures are test-only inputs: test_install.sh reads their bytes, and
-# install.sh only carries their sha256. They used to live in scripts/ and therefore landed at the
-# TOP of the bundle beside README.md and CUTOVER.md, where an agent asked for "the docs" could read
-# one as current guidance (both predate the heartbeat, the TTL knob and the SIGKILL wording fix).
-# They now ship under tests/fixtures/ with a README that says so. The bytes are pinned by
-# LEGACY_SKILL_SHA and must not change — do not add a header to the markdown files.
-FIXTURE_DIR="$REPO_ROOT/tests/fixtures"
-for stale in legacy-skill-pass47.md legacy-skill-pass48.md; do
-  if [ -e "$BUNDLE/$stale" ]; then
-    if [ "$CHECK" = 1 ]; then
-      printf '%s -> STALE (lives under tests/fixtures/ now)\n' "$stale"
-      drift=1
-    else
-      rm -f "$BUNDLE/$stale" || { echo "ERROR: cannot remove $BUNDLE/$stale" >&2; exit 1; }
-      printf '%s -> removed (moved under tests/fixtures/)\n' "$stale"
-    fi
+# install.sh only carries their sha256. They live under tests/fixtures/ with a README that says so,
+# and they are NOT mirrored into the bundle (A8 F5): nothing an operator runs reads them, and a
+# bundle-only reader could mistake one for current guidance (both predate the heartbeat, the TTL knob
+# and the SIGKILL wording fix). The bytes are pinned by LEGACY_SKILL_SHA and must not change — do not
+# add a header to the markdown files.
+# A bundle built before this change carries the suites, the fake binaries and the tests/ tree; a
+# rebuild must leave none of them, and --check must say so instead of silently passing a stale bundle.
+prune() { # prune <name> <why> — remove a dev-only entry (build) or report it (--check)
+  local path="$BUNDLE/$1"
+  [ -e "$path" ] || return 0
+  if [ "$CHECK" = 1 ]; then
+    printf '%s -> STALE (%s)\n' "$1" "$2"
+    drift=1
+  else
+    rm -rf "$path" || { echo "ERROR: cannot remove $path" >&2; exit 1; }
+    printf '%s -> removed (%s)\n' "$1" "$2"
   fi
+}
+for name in $DEV_ONLY legacy-skill-pass47.md legacy-skill-pass48.md; do
+  prune "$name" 'dev-only, not shipped'
 done
-[ "$CHECK" = 1 ] || mkdir -p "$BUNDLE/tests/fixtures" \
-  || { echo "ERROR: cannot create $BUNDLE/tests/fixtures" >&2; exit 1; }
-for fixture in README.md legacy-skill-pass47.md legacy-skill-pass48.md; do
-  [ -f "$FIXTURE_DIR/$fixture" ] || { echo "ERROR: missing $FIXTURE_DIR/$fixture" >&2; exit 1; }
-  mirror "$FIXTURE_DIR/$fixture" "tests/fixtures/$fixture"
-done
+prune tests 'test-only fixtures, not shipped'
 
 # The shipped cutover document is the TRACKED repo-root CUTOVER.md. scripts/cutover.md (the long
 # internal checklist) is NOT in git, so a bundle built from it is empty in CI and in the release

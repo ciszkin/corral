@@ -38,8 +38,11 @@ No clone and no Gradle: the release bundle carries both jars and the installer. 
 against the published checksum, and
 [read the installer first](https://github.com/ciszkin/corral/blob/v0.1.4/scripts/install.sh)
 — it is the same `scripts/install.sh` the source tree uses. You need JDK 17+ and an
-Android SDK with `platform-tools/adb` on `PATH`: the installer stops without usable Java,
-and the tour below lists nothing without adb.
+Android SDK with `platform-tools/adb`. The installer stops without usable Java, and it refuses
+an `adb` that is not the SDK's — one that only resolves from `PATH`, such as the distro's
+`/usr/bin/adb` — before anything is written, because it has to replace the SDK's `adb` with
+the lease-gating wrapper. With no adb at all it installs with a warning and the daemon lists no
+devices; `corral demo` needs no adb, SDK or phone.
 
 ```sh
 curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.4/corral-0.1.4.zip
@@ -63,7 +66,16 @@ and the agent skill, and starts the daemon at login. On Windows the same install
 `install.sh --help` lists the flags; [CUTOVER.md § Windows](CUTOVER.md#windows) has the
 Windows detail.
 
-Then, once `~/bin` (`%USERPROFILE%\bin` on Windows) is ahead of the SDK on `PATH`:
+It ends by listing what it installed and the one line this shell needs: `~/bin` has to be
+ahead of the Android SDK on `PATH` (`%USERPROFILE%\bin` on Windows), or `adb` resolves to the
+ungated one:
+
+```sh
+export PATH="$HOME/bin:$PATH"
+```
+
+The installer appends that line to `~/.bashrc`/`~/.zshrc` when either exists, so a new shell
+already has it; a shell that is already open needs the line once. Then:
 
 ```sh
 corral devices                   # live pool

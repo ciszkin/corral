@@ -117,8 +117,14 @@ check "9.0 install exits 0" test "$rc" -eq 0
 
 # 9.1 unit file
 check "9.1 unit file installed" test -f "$UNIT"
-check "9.1 unit uses the fake java" grep -qF "$FAKE_JAVA" "$UNIT"
-check "9.1 unit has no sdkman path" bash -c "! grep -q sdkman '$UNIT'"
+# A8 F3: the unit no longer names one absolute JDK. It sets PATH (verified JDK first, then SDKMAN!'s
+# stable `current` link, then ~/bin and the system dirs) and ExecStart runs `env java` through it,
+# so changing the SDKMAN! default or upgrading the JDK does not need a reinstall. The F3 rows below
+# pin that shape and the upgrade case; this one pins that the detected java is what PATH starts with.
+check "9.1 unit puts the verified java's dir first on the daemon's PATH" \
+  grep -qF "Environment=PATH=$STUB:" "$UNIT"
+check "9.1 unit does not bake an absolute JDK path into ExecStart" bash -c \
+  "! sed -n 's/^ExecStart=//p' '$UNIT' | grep -qF '$FAKE_JAVA'"
 
 # 9.2 PATH shims
 check "9.2 ~/bin/adb installed + executable" test -x "$TMPHOME/bin/adb"
@@ -580,15 +586,17 @@ dump_on_fail "$rc8" "$TMP/iso-explicit.log"
 check "sandboxed install honours an explicit --adb" bash -c \
   "[ '$rc8' -eq 0 ] && [ -x '$TMPHOME8/bin/adb' ] && grep -q 'explicit-adb8' '$SB8_TOOL/adb.real' && [ \"\$(sha256sum '$DECOY' | cut -d' ' -f1)\" = '$DECOY_SHA' ]"
 
-# 5: regression guard — without --home, adb still resolves from PATH exactly as before and is shimmed.
+# 5: regression guard — without --home, an adb on PATH is still DETECTED (it is named), but it is not
+# an SDK's, so the F4 preflight refuses to rewrite it before any write. Before that preflight existed
+# this run went on and shimmed it — the half-install A8 F4 is about.
 TMPHOME9="$TMP/home9"; PATHDIR="$TMP/path-bin"; mkdir -p "$TMPHOME9" "$PATHDIR"
 printf '%s\n' '#!/bin/sh' 'echo "path-adb9 $@"' > "$PATHDIR/adb"; chmod +x "$PATHDIR/adb"
 : > "$TMPHOME9/.bashrc"
 env HOME="$TMPHOME9" PATH="$PATHDIR:$STUB:$PATH" bash "$SRC/install.sh" \
   --java "$FAKE_JAVA" --jar "$JAR" --no-ui >"$TMP/iso-nohome.log" 2>&1; rc9=$?
 dump_on_fail "$rc9" "$TMP/iso-nohome.log"
-check "a normal install still resolves adb from PATH as before" bash -c \
-  "[ '$rc9' -eq 0 ] && grep -qF 'Using adb: $PATHDIR/adb' '$TMP/iso-nohome.log' && grep -q 'path-adb9' '$PATHDIR/adb.real'"
+check "a normal install detects a PATH adb but refuses to shim one outside an SDK (F4)" bash -c \
+  "[ '$rc9' -ne 0 ] && grep -qF 'Using adb: $PATHDIR/adb' '$TMP/iso-nohome.log' && grep -qF 'is not in an Android SDK' '$TMP/iso-nohome.log' && [ ! -e '$PATHDIR/adb.real' ] && grep -q 'path-adb9' '$PATHDIR/adb'"
 
 # ===== closing protection-state claim: report what is TRUE after the attempt =====
 # The installer must never say "shim is active" unless the adb it resolved really is the wrapper.
@@ -680,6 +688,183 @@ check "failed shim install keeps an existing wrapper with no adb.real byte-for-b
 if [ "$BUILD" = 1 ]; then
   check "tracked .gitignore ignores corral-installer/ and dist/" bash -c \
     "git -C '$ROOT' check-ignore -q corral-installer/x && git -C '$ROOT' check-ignore -q dist/y"
+fi
+
+# ===== A8 (roadmap row 93): the friction the v0.1.4 dry run hit in a clean sandbox =====
+# Every row below is a defect a stranger met with the published zip, and the fix that must stay.
+# The dry-run report is /Documents/Corral/dist/a8-dryrun.md; the fix is the 0.1.5 patch.
+
+# F1 — the installer wrote ~/bin but never said to put it on PATH, so a fresh shell found no
+# `corral`, and an SDK-first PATH left the ungated adb in front. The closing summary must name what
+# it installed (by absolute path) and print the exact one-line export for the shell in front of the
+# operator — never a guessed rc file (the rc it really appended to is named instead).
+check "F1: the summary names the installed CLI and wrapper by absolute path" bash -c \
+  "grep -qF '$TMPHOME/bin/corral' '$TMP/install1.log' && grep -qF '$TMPHOME/bin/adb' '$TMP/install1.log'"
+check "F1: the summary prints the exact one-line PATH export for this install" grep -qxF \
+  "  export PATH=\"$TMPHOME/bin:\$PATH\"" "$TMP/install1.log"
+check "F1: the PATH line says the wrapper has to precede the SDK (or adb is the ungated one)" \
+  grep -qF 'ahead of the Android SDK' "$TMP/install1.log"
+check "F1: the summary names the rc file it really appended the line to" grep -qF \
+  "appended to $TMPHOME/.bashrc" "$TMP/install1.log"
+
+# F2 — the closing smoke check hardcoded 8798, so a daemon on another CORRAL_PORT was probed on a
+# port nothing listens on. The daemon resolves CORRAL_PORT as daemon.env > inherited env > 8798, so
+# the smoke check mirrors that order; the line also announces the port it is about to curl.
+check "F2: the default smoke check names 8798" grep -qF \
+  'curl -s http://127.0.0.1:8798/api/devices' "$TMP/install1.log"
+check "F2: the smoke line announces the port it probes" grep -qF '(daemon port 8798)' "$TMP/install1.log"
+
+F2_HOME="$TMP/home-f2"; F2_SDK="$F2_HOME/Android/Sdk/platform-tools"
+mkdir -p "$F2_SDK" "$F2_HOME/bin" "$F2_HOME/.config/corral"; : > "$F2_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "f2-adb $@"' > "$F2_SDK/adb"; chmod +x "$F2_SDK/adb"
+printf 'CORRAL_PORT=9123\n' > "$F2_HOME/.config/corral/daemon.env"
+# The installing shell exports a DIFFERENT port on purpose: daemon.env wins for the daemon
+# (DaemonConfig.get), so it has to win for the smoke check too or the message is a guess.
+env HOME="$F2_HOME" PATH="$STUB:$PATH" CORRAL_PORT=9126 bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$F2_SDK/adb" --jar "$JAR" --no-ui --home "$F2_HOME" >"$TMP/f2-file.log" 2>&1; rcf2=$?
+dump_on_fail "$rcf2" "$TMP/f2-file.log"
+check "F2: daemon.env's CORRAL_PORT is the port the smoke check probes (it beats the shell)" bash -c \
+  "[ '$rcf2' -eq 0 ] && grep -qF 'curl -s http://127.0.0.1:9123/api/devices' '$TMP/f2-file.log' && grep -qF '(daemon port 9123)' '$TMP/f2-file.log' && ! grep -q '9126' '$TMP/f2-file.log'"
+F2B_HOME="$TMP/home-f2b"; F2B_SDK="$F2B_HOME/Android/Sdk/platform-tools"
+mkdir -p "$F2B_SDK" "$F2B_HOME/bin"; : > "$F2B_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "f2b-adb $@"' > "$F2B_SDK/adb"; chmod +x "$F2B_SDK/adb"
+env HOME="$F2B_HOME" PATH="$STUB:$PATH" CORRAL_PORT=9125 bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+  --adb "$F2B_SDK/adb" --jar "$JAR" --no-ui --home "$F2B_HOME" >"$TMP/f2-env.log" 2>&1; rcf2b=$?
+dump_on_fail "$rcf2b" "$TMP/f2-env.log"
+check "F2: with no daemon.env value, the shell's CORRAL_PORT is the one the smoke check probes" bash -c \
+  "[ '$rcf2b' -eq 0 ] && grep -qF 'curl -s http://127.0.0.1:9125/api/devices' '$TMP/f2-env.log' && grep -qF '(daemon port 9125)' '$TMP/f2-env.log'"
+
+# F3 — the unit pinned the absolute JDK path detected at install time, so changing the SDKMAN!
+# default or upgrading that JDK broke `systemctl --user start corral` until a reinstall. The unit
+# now sets PATH itself (the verified JDK first, SDKMAN!'s stable `current` link next, then ~/bin and
+# the system dirs) and ExecStart runs `env java` through it. `unit_java` runs exactly what systemd
+# would exec, resolved against the unit's own PATH — and the fake java says which FILE ran, so the
+# row cannot be satisfied by the host's /usr/bin/java further down that PATH.
+unit_java() { # unit_java <unit> — run the java the unit would exec, with the unit's own PATH
+  local ex path word
+  ex=$(sed -n 's/^ExecStart=//p' "$1")
+  path=$(sed -n 's/^Environment=PATH=//p' "$1")
+  word=${ex%% *}
+  case "$word" in */env|env) word=${ex#* }; word=${word%% *};; esac
+  env -i PATH="$path" "$word" -version 2>&1
+}
+f3_java() { # f3_java <file> <tag> — a Java 17 that says which file answered
+  printf '%s\n' '#!/bin/sh' 'echo "openjdk version \"17.0.12\" 2024-07-16" >&2' \
+    "echo \"a8-f3-java-$2\" >&2" 'exit 0' > "$1"
+  chmod +x "$1"
+}
+F3_HOME="$TMP/home-f3"; F3_SDK="$F3_HOME/Android/Sdk/platform-tools"
+F3_JAVA="$F3_HOME/.sdkman/candidates/java"; F3_OLD="$F3_JAVA/17.0.13-tem"; F3_NEW="$F3_JAVA/21.0.1-tem"
+mkdir -p "$F3_SDK" "$F3_HOME/bin" "$F3_OLD/bin" "$F3_NEW/bin"; : > "$F3_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "f3-adb $@"' > "$F3_SDK/adb"; chmod +x "$F3_SDK/adb"
+f3_java "$F3_OLD/bin/java" old; f3_java "$F3_NEW/bin/java" new
+ln -s "$F3_OLD" "$F3_JAVA/current" 2>/dev/null || true   # what a SDKMAN! host looks like
+env HOME="$F3_HOME" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$F3_OLD/bin/java" \
+  --adb "$F3_SDK/adb" --jar "$JAR" --no-ui --home "$F3_HOME" >"$TMP/f3-install.log" 2>&1; rcf3=$?
+dump_on_fail "$rcf3" "$TMP/f3-install.log"
+F3_UNIT="$F3_HOME/.config/systemd/user/corral.service"
+check "F3: the sandbox installs against a SDKMAN! version dir" test "$rcf3" -eq 0
+check "F3: ExecStart runs java through the unit's PATH, not one absolute JDK path" bash -c \
+  "grep -qE '^ExecStart=([^ ]*/)?env java -Xms24m' '$F3_UNIT' && ! sed -n 's/^ExecStart=//p' '$F3_UNIT' | grep -qF '$F3_OLD/bin/java'"
+check "F3: the unit's PATH starts with the JDK this install verified" grep -qF \
+  "Environment=PATH=$F3_OLD/bin:$F3_HOME/.sdkman/candidates/java/current/bin:" "$F3_UNIT"
+check "F3: that PATH carries SDKMAN!'s stable current link (a default change is followed)" \
+  grep -qF "$F3_HOME/.sdkman/candidates/java/current/bin" "$F3_UNIT"
+unit_java "$F3_UNIT" >"$TMP/f3-before.log" 2>&1
+check "F3: the unit's java resolves now — the verified JDK answers" grep -q 'a8-f3-java-old' "$TMP/f3-before.log"
+# `sdk upgrade`: the default moves to the new version and the old version dir is deleted — the dry
+# run's exact F3 (the unit kept naming the deleted dir, so the service would not start).
+if ln -sfn "$F3_NEW" "$F3_JAVA/current" 2>/dev/null && [ -e "$F3_JAVA/current/bin/java" ]; then
+  rm -rf "$F3_OLD"
+  unit_java "$F3_UNIT" >"$TMP/f3-after.log" 2>&1
+  check "F3: after the upgrade deleted the pinned JDK, the unit's java still resolves — the new one, no reinstall" \
+    grep -q 'a8-f3-java-new' "$TMP/f3-after.log"
+  sed -n 's/^ExecStart=//p' "$F3_UNIT" > "$TMP/f3-exec.log"
+  check "F3: the upgrade did not leave the unit naming a dead java as its exec" bash -c \
+    "! grep -qF '$F3_OLD/bin/java' '$TMP/f3-exec.log'"
+else
+  echo "skip F3: this host cannot re-point the SDKMAN! current symlink; the upgrade row has no case here" >&2
+fi
+
+# F4 — with a JDK but no SDK, a foreign /usr/bin/adb first on PATH made the install write the skill,
+# console, launcher and icons and then die on `mv /usr/bin/adb`. The preflight must refuse BEFORE the
+# first write and name the path. HOME here IS the sandbox ($F4_HOME): the fall-through to PATH only
+# happens without --home, and its systemctl is the stub — the real home is never addressed.
+F4_HOME="$TMP/home-f4"; F4_STUB="$TMP/f4stub"
+mkdir -p "$F4_HOME" "$F4_STUB"
+printf '%s\n' '#!/bin/sh' 'echo "foreign-adb $@"' > "$F4_STUB/adb"; chmod +x "$F4_STUB/adb"
+f4_sha=$(sha256sum "$F4_STUB/adb" | cut -d' ' -f1)
+env HOME="$F4_HOME" PATH="$F4_STUB:$CORETOOLS:$STUB" \
+  "$BASH_BIN" "$SRC/install.sh" --java "$FAKE_JAVA" --jar "$JAR" --no-ui >"$TMP/f4-foreign.log" 2>&1; rcf4=$?
+dump_on_fail "$rcf4" "$TMP/f4-foreign.log"
+check "F4: an adb outside the SDK is refused (non-zero) instead of half-installing" test "$rcf4" -ne 0
+check "F4: the refusal names the path it will not rewrite" grep -qF "$F4_STUB/adb" "$TMP/f4-foreign.log"
+check "F4: the refusal says that adb is not an SDK's and offers both ways out" bash -c \
+  "grep -q 'is not in an Android SDK' '$TMP/f4-foreign.log' && grep -q -- '--adb' '$TMP/f4-foreign.log' && grep -q -- '--no-sdk-shim' '$TMP/f4-foreign.log'"
+check "F4: the refusal states plainly that nothing was installed" grep -qF 'NOTHING was installed' "$TMP/f4-foreign.log"
+check "F4: nothing was written — no ~/bin, no ~/.corral, no skill, no gate, no config" bash -c \
+  "[ ! -e '$F4_HOME/bin' ] && [ ! -e '$F4_HOME/.corral' ] && [ ! -e '$F4_HOME/.agents' ] && [ ! -e '$F4_HOME/.gradle' ] && [ ! -e '$F4_HOME/.config' ] && [ ! -e '$F4_HOME/.local' ]"
+check "F4: the foreign adb is byte-for-byte untouched (never moved aside)" bash -c \
+  "[ \"\$(sha256sum '$F4_STUB/adb' | cut -d' ' -f1)\" = '$f4_sha' ] && [ ! -e '$F4_STUB/adb.real' ]"
+check "F4: the run never printed the install banner" bash -c \
+  "! grep -q 'Installing to' '$TMP/f4-foreign.log'"
+
+# F4b: an SDK adb the install cannot write is the same half-install one step later, so it is refused
+# by the same preflight. Skipped LOUDLY when the chmod does not bite (root): a root run would prove
+# nothing about the refusal.
+F4B_HOME="$TMP/home-f4b"; F4B_SDK="$F4B_HOME/Android/Sdk/platform-tools"
+mkdir -p "$F4B_SDK" "$F4B_HOME/bin"; : > "$F4B_HOME/.bashrc"
+printf '%s\n' '#!/bin/sh' 'echo "f4b-adb $@"' > "$F4B_SDK/adb"; chmod +x "$F4B_SDK/adb"
+chmod a-w "$F4B_SDK"
+if [ -w "$F4B_SDK" ]; then
+  echo "skip F4b: $F4B_SDK is still writable (running as root?); the unwritable-SDK row has no case here" >&2
+else
+  env HOME="$F4B_HOME" PATH="$STUB:$PATH" bash "$SRC/install.sh" --java "$FAKE_JAVA" \
+    --adb "$F4B_SDK/adb" --jar "$JAR" --no-ui --home "$F4B_HOME" >"$TMP/f4b-unwritable.log" 2>&1; rcf4b=$?
+  chmod u+w "$F4B_SDK"
+  dump_on_fail "$rcf4b" "$TMP/f4b-unwritable.log"
+  check "F4b: an unwritable SDK dir is refused before any write" bash -c \
+    "[ '$rcf4b' -ne 0 ] && grep -q 'cannot write' '$TMP/f4b-unwritable.log' && grep -qF '$F4B_SDK' '$TMP/f4b-unwritable.log' && ! grep -q 'Installing to' '$TMP/f4b-unwritable.log' && [ ! -e '$F4B_HOME/.corral' ]"
+fi
+
+# F5 — the published zip shipped its own suites, their fake binaries and the test-only fixtures:
+# unzip printed 28 dev-shaped entries onto a stranger's disk. make-installer.sh must assemble an
+# operator-only bundle. The real script is driven against a synthetic repo whose scripts/ dir holds
+# a dev file: --check copies nothing and needs no Gradle build, so it exercises the real copy list.
+if [ "$BUILD" != 1 ]; then
+  echo "skip F5: the bundle builder is source-tree only (a deployed bundle ships no make-installer.sh)" >&2
+else
+  MI="$TMP/mini"; MI_B="$MI/corral-installer"
+  mkdir -p "$MI/scripts" "$MI/skills/corral" "$MI_B/skills/corral"
+  cp "$SRC/make-installer.sh" "$SRC/install.sh" "$MI/scripts/"
+  for dev in test_install.sh test_e2e.sh test_wrapper.sh test_demo.sh fake-adb fake-emulator; do
+    printf '#!/bin/sh\n# dev-only\n' > "$MI/scripts/$dev"; chmod +x "$MI/scripts/$dev"
+  done
+  cp "$ROOT/README.md" "$ROOT/SECURITY.md" "$ROOT/CUTOVER.md" "$MI/"
+  cp "$ROOT/skills/corral/SKILL.md" "$MI/skills/corral/"
+  cp "$MI/scripts/install.sh" "$MI/README.md" "$MI/SECURITY.md" "$MI/CUTOVER.md" "$MI_B/"
+  cp "$MI/skills/corral/SKILL.md" "$MI_B/skills/corral/"
+  cp "$JAR" "$MI_B/corral-daemon-all.jar"; cp "$UI_JAR" "$MI_B/corral-ui-all.jar"
+  bash "$MI/scripts/make-installer.sh" --check >"$TMP/f5-clean.log" 2>&1; clean_rc=$?
+  check "F5: a clean synthetic bundle (no dev files) passes --check" bash -c \
+    "[ '$clean_rc' -eq 0 ] && grep -q 'bundle up to date' '$TMP/f5-clean.log'"
+  printf '#!/bin/sh\n' > "$MI_B/test_install.sh"
+  printf '#!/bin/sh\n' > "$MI_B/fake-adb"
+  mkdir -p "$MI_B/tests/fixtures"; printf '# stale\n' > "$MI_B/tests/fixtures/legacy-skill-pass47.md"
+  bash "$MI/scripts/make-installer.sh" --check >"$TMP/f5-dirty.log" 2>&1; dirty_rc=$?
+  check "F5: dev-only suites, fake binaries and fixtures in a bundle fail --check, named" bash -c \
+    "[ '$dirty_rc' -ne 0 ] && grep -q 'test_install.sh -> STALE' '$TMP/f5-dirty.log' && grep -q 'fake-adb -> STALE' '$TMP/f5-dirty.log' && grep -q 'tests -> STALE' '$TMP/f5-dirty.log'"
+  if [ -d "$ROOT/corral-installer" ]; then
+    # The bundle this machine actually built: no dev-shaped entry may be in it.
+    stale=""
+    for dev in test_install.sh test_e2e.sh test_wrapper.sh test_demo.sh fake-adb fake-emulator; do
+      [ -e "$ROOT/corral-installer/$dev" ] && stale="$stale $dev"
+    done
+    [ -d "$ROOT/corral-installer/tests" ] && stale="$stale tests/"
+    check "F5: the built bundle carries no dev-only entry$stale" test -z "$stale"
+  else
+    echo "skip F5: no corral-installer/ built here yet; run scripts/make-installer.sh and the bundle is re-checked" >&2
+  fi
 fi
 
 # ===== Windows platform: install .bat shims, skip systemd, report honestly =====
@@ -1185,7 +1370,13 @@ else
     # ~/.agents and ~/.claude are this change's deliberate POSIX delta — a fresh host now gets the
     # skill and the Claude Code link — and are pinned by the row-90 rows above, so they are the one
     # thing this guard does not compare. Everything else must still match byte for byte.
-    ( cd "$CMP_HOME" && find . -type f | sort | grep -vE '^\./(\.agents|\.claude)/' | xargs sha256sum ) > "$TMP/$2.files"
+    # A8 F3 is the second deliberate delta: the generated unit used to bake in one absolute JDK path,
+    # and now carries a PATH plus `env java` — a shape the pre-change installer CANNOT produce from the
+    # same template, so a byte comparison of that one file compares nothing. The new shape and the
+    # upgrade case are pinned by the F3 rows above instead.
+    ( cd "$CMP_HOME" && find . -type f | sort \
+        | grep -vE '^\./(\.agents|\.claude)/|^\./\.config/systemd/user/corral\.service$' \
+        | xargs sha256sum ) > "$TMP/$2.files"
   }
   posix_snapshot "$TMP/posix-pre-bundle" posix-pre
   posix_snapshot "$TMP/posix-new-bundle" posix-new
@@ -1197,9 +1388,16 @@ else
   # unpinned. The same for the agent-skill block: row 90 deliberately flipped it on POSIX (a fresh
   # host now gets the skill and the ~/.claude link instead of the old honesty line), so those lines
   # are deleted from both sides and pinned by the row-90 rows above; every other line must match.
-  drop_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\|Agent skill not installed: no ~\|Installed the corral agent skill (\|Linked the corral agent skill for Claude Code (\|Left alone (not a symlink into ~\)'
+  # A8 F1/F2 add the "what landed + the PATH line" block and the port-bearing smoke header; they are
+  # deleted from both sides here and pinned by the F1/F2 rows above, which read the same emitter.
+  # No alternative may contain the sed address delimiter `/`: a `/` ends the address early, sed then
+  # fails on BOTH sides and two empty files compare equal — the guard would pass vacuously (the
+  # non-empty check below is what makes that loud instead).
+  drop_re='^\(Cutover checklist (\|then verify a gradle installDebug\|Adoption guide (\|Then verify: corral doctor\|Agent skill not installed: no ~\|Installed the corral agent skill (\|Linked the corral agent skill for Claude Code (\|Left alone (not a symlink into ~\|==> Installed to \|  CLI + adb wrapper: \|  console: \|  daemon jar: \|PATH: put \|  export PATH=\|  (appended to \|  ([^ ]* already contain it\|  (there is no \|==> Installed. Smoke-test\)'
   sed -e "/$drop_re/d" "$TMP/posix-pre.log" > "$TMP/posix-pre.log.cmp"
   sed -e "/$drop_re/d" "$TMP/posix-new.log" > "$TMP/posix-new.log.cmp"
+  check "POSIX: the filtered logs both have content (a broken filter cannot pass the next row vacuously)" \
+    bash -c "[ -s '$TMP/posix-pre.log.cmp' ] && [ -s '$TMP/posix-new.log.cmp' ]"
   check "POSIX: every message matches the pre-change installer (byte-for-byte, minus the rewritten guide hint)" \
     cmp -s "$TMP/posix-pre.log.cmp" "$TMP/posix-new.log.cmp"
   check "POSIX: installed files + contents match the pre-change installer" cmp -s "$TMP/posix-pre.files" "$TMP/posix-new.files"
@@ -3149,6 +3347,18 @@ check "63 docs: CUTOVER gives the un-translated ownership rule and the nested-in
 # rather than a routine step after every SDK update.
 check "80 docs: the README says when the SDK shim heals and that reinstall is the fallback" bash -c \
   "grep -qF 'checks the SDK adb shim every 10 seconds' '$DOCDIR/README.md' && grep -qF 'heals at the next start' '$DOCDIR/README.md' && grep -qF 'keeping the updated binary as \`adb.real\`' '$DOCDIR/README.md' && grep -qF 'manual fallback' '$DOCDIR/README.md'"
+# A8 F1: the install section must not leave the PATH step implicit ("once ~/bin ... is ahead of the
+# SDK") — that sentence was the friction. It prints the same one-line export the installer prints.
+check "F1 docs: the README's install section prints the one-line PATH export" bash -c \
+  "grep -qF 'export PATH=\"\$HOME/bin:\$PATH\"' '$DOCDIR/README.md'"
+check "F1 docs: the README still says the wrapper has to precede the SDK on PATH" bash -c \
+  "grep -qF 'ahead of the Android SDK on `PATH`' '$DOCDIR/README.md'"
+# A8 F4: a refusal a README reader can avoid — an adb outside the SDK stops the install before any
+# write, and the no-adb path points at the demo pool rather than leaving an empty daemon.
+check "F4 docs: the README says an adb outside the SDK is refused before anything is written" bash -c \
+  "grep -qF 'is not the SDK' '$DOCDIR/README.md' && grep -qF 'before anything is written' '$DOCDIR/README.md'"
+check "F4 docs: CUTOVER names the preflight refusal and the --no-sdk-shim way through it" bash -c \
+  "grep -qF 'is not in an Android SDK' '$DOCDIR/CUTOVER.md' && grep -qF -- '--no-sdk-shim' '$DOCDIR/CUTOVER.md'"
 # The listing, not the path: on a case-insensitive filesystem (macOS) `cutover.md` IS `CUTOVER.md`,
 # so `test ! -e` fails there — the one platform where a name mismatch is invisible. An exact-name
 # listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.

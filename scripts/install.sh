@@ -1233,11 +1233,22 @@ if want_ui && [[ $IS_WINDOWS -eq 1 ]]; then
 elif want_ui; then
   replace_file "$UI_JAR" "$CORRAL_HOME/corral-ui-all.jar" "corral-ui-all.jar" \
     || { echo "ERROR: cannot copy $UI_JAR to $CORRAL_HOME" >&2; exit 1; }
-  install -m 755 "$SCRIPT_DIR/corral-ui" "$BIN_DIR/corral-ui" || { echo "ERROR: cannot install $BIN_DIR/corral-ui" >&2; exit 1; }
+  # The app-grid launcher runs this script (see Exec below), so it must run the JDK verified here:
+  # `java` from a graphical session's PATH is a different JDK or none. Substitute that absolute path
+  # into the installed copy; scripts/corral-ui keeps @CORRAL_JAVA@ as the source-checkout fallback.
+  JAVA_SED=${JAVA_BIN//\\/\\\\}; JAVA_SED=${JAVA_SED//&/\\&}; JAVA_SED=${JAVA_SED//#/\\#}
+  UI_SHIM_TMP="$BIN_DIR/.corral-ui.new.$$"
+  sed "s#@CORRAL_JAVA@#$JAVA_SED#g" "$SCRIPT_DIR/corral-ui" > "$UI_SHIM_TMP" \
+    && replace_file "$UI_SHIM_TMP" "$BIN_DIR/corral-ui" "the corral-ui shim" 755
+  ui_shim_rc=$?
+  rm -f "$UI_SHIM_TMP"
+  [ "$ui_shim_rc" -eq 0 ] || { echo "ERROR: cannot install $BIN_DIR/corral-ui" >&2; exit 1; }
   echo "Installed: corral-ui (~/bin/corral-ui, jar in ~/.corral)"
-  # Launcher for the app grid/dock. Exec uses the detected java + fat jar (not the shim) so a
-  # GUI session without the login shell's PATH/JDK still starts it. Icon is the Corral mark: a
-  # hash sidecar lets us refresh it on upgrade while never clobbering a user's own replacement.
+  # Launcher for the app grid/dock. Exec names our own absolute script — never `java`, or task
+  # managers that group apps by executable name count every JVM on the host as Corral (0.1.7 §1);
+  # absolute because the graphical session's PATH need not carry ~/bin. The script runs the JDK
+  # detected above. Icon is the Corral mark: a hash sidecar lets us refresh it on upgrade while
+  # never clobbering a user's own replacement.
   # Write the sidecar only when we installed/refreshed the icon, or when an existing icon already
   # equals the shipped one (adopting a pre-sidecar install) — never for an icon we left alone.
   ICON_DIR="$TARGET_HOME/.local/share/icons"
@@ -1260,7 +1271,7 @@ elif want_ui; then
 Type=Application
 Name=Corral
 Comment=Lease Android devices to coding agents — operator console
-Exec="$JAVA_BIN" -jar "$CORRAL_HOME/corral-ui-all.jar"
+Exec="$BIN_DIR/corral-ui"
 Icon=$TARGET_HOME/.local/share/icons/corral.png
 Terminal=false
 Categories=Development;

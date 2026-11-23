@@ -1,2 +1,7 @@
 #!/usr/bin/env bash
-exec java -cp "${CORRAL_UI_JAR:-$HOME/.corral/corral-ui-all.jar}" dev.corral.ui.CorralUiKt "$@"
+# The installer rewrites the default below to the absolute JDK it verified: the app-grid launcher
+# runs this script, and a graphical session's PATH may resolve a different `java` (or none). A
+# source checkout, or a JDK since removed, falls back to the bare `java`.
+CORRAL_JAVA="${CORRAL_JAVA:-@CORRAL_JAVA@}"
+[ -x "$CORRAL_JAVA" ] || CORRAL_JAVA=java
+exec "$CORRAL_JAVA" -cp "${CORRAL_UI_JAR:-$HOME/.corral/corral-ui-all.jar}" dev.corral.ui.CorralUiKt "$@"

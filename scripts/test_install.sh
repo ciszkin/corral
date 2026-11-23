@@ -453,10 +453,24 @@ check "ui jar + shim installed with --ui" bash -c \
 check "observer line seeded in [Service] when ui installs" obs_is "$UNIT3" corral-ui
 check "generated unit passes systemd-analyze verify" verify_unit "$UNIT3"
 check "Corral launcher installed with --ui" bash -c \
-  "[ -f '$DESKTOP3' ] && grep -q '^Name=Corral' '$DESKTOP3' && grep -q '^StartupWMClass=dev-corral-ui-CorralUiKt' '$DESKTOP3' && grep -q 'corral-ui-all.jar' '$DESKTOP3'"
+  "[ -f '$DESKTOP3' ] && grep -q '^Name=Corral' '$DESKTOP3' && grep -q '^StartupWMClass=dev-corral-ui-CorralUiKt' '$DESKTOP3'"
 check "launcher icon installed and referenced" bash -c \
   "[ -f '$TMPHOME3/.local/share/icons/corral.png' ] && grep -qF 'Icon=$TMPHOME3/.local/share/icons/corral.png' '$DESKTOP3'"
 check "launcher passes desktop-file-validate" verify_desktop "$DESKTOP3"
+
+# §1 of the 0.1.7 live report: Exec used to be `"$JAVA_BIN" -jar …`, so GNOME Resources and any
+# task manager that groups apps by executable NAME attributed every JVM on the host to Corral (7 GB
+# of Gradle daemons shown under an idle 87 MB Corral). Exec must name our own script instead — an
+# ABSOLUTE path, because the graphical session's PATH need not carry ~/bin.
+check "launcher Exec is the absolute ~/bin/corral-ui script, not a java binary" bash -c \
+  "[ \"\$(sed -n 's/^Exec=//p' '$DESKTOP3')\" = '\"$TMPHOME3/bin/corral-ui\"' ] && ! grep -q '^Exec=.*java' '$DESKTOP3'"
+# …and that script must run the JDK install.sh verified, not whichever `java` the session PATH
+# resolves (a silent regression: the installer pins a JDK for a reason).
+check "installed corral-ui shim names the detected java" bash -c \
+  "grep -qF '\${CORRAL_JAVA:-$FAKE_JAVA}' '$TMPHOME3/bin/corral-ui' && ! grep -q '@CORRAL_JAVA@' '$TMPHOME3/bin/corral-ui'"
+mkdir -p "$TMP/no-java"
+check "installed corral-ui shim runs with the sandbox HOME and no java on PATH" bash -c \
+  "env HOME='$TMPHOME3' PATH='$TMP/no-java' '${BASH:-/bin/bash}' '$TMPHOME3/bin/corral-ui' 2>&1 | grep -q 'openjdk version'"
 
 # simulate a user edit, then reinstall --ui: the edit must survive verbatim, once, in [Service]
 grep -v '^Environment=CORRAL_SCREENSHOT_OBSERVERS=' "$UNIT3" > "$UNIT3.tmp"; mv "$UNIT3.tmp" "$UNIT3"
@@ -486,6 +500,7 @@ dump_on_fail "$rcui" "$TMP/ui-uninstall.log"
 check "uninstall removes ui artifacts" bash -c \
   "[ ! -e '$TMPHOME3/.corral/corral-ui-all.jar' ] && [ ! -e '$TMPHOME3/bin/corral-ui' ]"
 check "uninstall removes the launcher" test ! -e "$DESKTOP3"
+check "uninstall removes the shim the launcher's Exec ran" test ! -e "$TMPHOME3/bin/corral-ui"
 check "uninstall removes the launcher icon" test ! -e "$TMPHOME3/.local/share/icons/corral.png"
 check "uninstall removes client prefs ui.conf" test ! -e "$TMPHOME3/.config/corral/ui.conf"
 

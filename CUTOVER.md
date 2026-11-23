@@ -120,9 +120,11 @@ The installer's own flags: `--java PATH`, `--adb PATH`, `--jar PATH`, `--ui` / `
 them. Re-running it is also the upgrade path — `corral update --apply` downloads a release bundle
 and runs this same script from it.
 
-The installed `corral` and `corral-ui` shims are two lines each: they run `java` on
-`$CORRAL_JAR` (default `~/.corral/corral-daemon-all.jar`) and `$CORRAL_UI_JAR` (default
-`~/.corral/corral-ui-all.jar`), so a jar built elsewhere can be tried without reinstalling.
+The installed `corral` shim is two lines: it runs `java` on `$CORRAL_JAR` (default
+`~/.corral/corral-daemon-all.jar`), so a jar built elsewhere can be tried without reinstalling.
+The installed `corral-ui` shim runs the JDK the installer detected (or `$CORRAL_JAVA`), because the
+desktop launcher starts it by absolute path from a graphical session whose `PATH` may not contain
+that JDK. Its `$CORRAL_UI_JAR` (default `~/.corral/corral-ui-all.jar`) can still be overridden.
 
 Reload your shell, then check that everything came up:
 

@@ -115,7 +115,7 @@ fun main(args: Array<String>) {
     // Loading it before anything else means a broken world fails before a single write.
     val world = if (demo) DemoWorld.load(scope) else null
     val emulators: EmulatorHost = world ?: Emulators(adb, { Emulators.resolveEmulatorPath(adb = adb) },
-        launcherFor(override = config.get("CORRAL_EMULATOR_LAUNCHER")))
+        launcherFor(override = config.get("CORRAL_EMULATOR_LAUNCHER"), adbPath = adb))
     // A graceful stop ends direct children; a SIGKILL can still orphan them.
     Runtime.getRuntime().addShutdownHook(Thread { runCatching { emulators.shutdown() } })
 

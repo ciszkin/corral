@@ -15,7 +15,8 @@ class EmulatorAlreadyRunning : Exception()
 
 /** Spawns an emulator and reports whether a spawn for an AVD is still live. */
 interface EmulatorLauncher {
-    /** Spawns `bin -avd avd` with output in [log]; throws [EmulatorException] when it dies instantly. */
+    /** Spawns `bin -avd avd` (plus the real adb, when the launcher has one) with output in [log];
+     *  throws [EmulatorException] when it dies instantly. */
     fun start(bin: String, avd: String, log: Path)
     /** True while a spawn for [avd] is known live; dead tracked processes are reaped. */
     fun isRunning(avd: String): Boolean
@@ -58,13 +59,28 @@ private fun writeExitSidecar(path: Path, code: Int) {
     }
 }
 
+/**
+ * `emulator` argv for [avd]. [adbPath] is the daemon's resolved real adb: the emulator runs its own
+ * adb housekeeping (boot poll, MeterService) for this serial, and without this it picks an adb off
+ * PATH — the Corral wrapper — so the gate refuses every call as "no live lease".
+ */
+internal fun emulatorArgv(bin: String, avd: String, adbPath: String?): List<String> = buildList {
+    add(bin)
+    add("-avd")
+    add(avd)
+    if (!adbPath.isNullOrBlank()) {
+        add("-adb-path")
+        add(adbPath)
+    }
+}
+
 /** Child of this JVM: fine outside systemd, dies with `corral.service`'s cgroup under it. */
-class DefaultLauncher : EmulatorLauncher {
+class DefaultLauncher(private val adbPath: String? = null) : EmulatorLauncher {
     private val processes = ConcurrentHashMap<String, Process>()
 
     override fun start(bin: String, avd: String, log: Path) {
         val p = try {
-            ProcessBuilder(bin, "-avd", avd)
+            ProcessBuilder(emulatorArgv(bin, avd, adbPath))
                 .redirectOutput(log.toFile())
                 .redirectErrorStream(true)
                 .start()
@@ -117,12 +133,13 @@ class SystemdLauncher(
     private val env: Map<String, String> = System.getenv(),
     private val resetFailed: (String) -> Unit = ::runResetFailed,
     private val listFailed: () -> List<String> = ::readFailedUnits,
+    private val adbPath: String? = null,
     private val systemctlShow: (String) -> String? = ::readUnitState,
 ) : EmulatorLauncher {
     override fun start(bin: String, avd: String, log: Path) {
         val unit = systemdUnitName(avd)
         val p = try {
-            ProcessBuilder(systemdRunCommand(bin, avd, log, env)).redirectErrorStream(true).start()
+            ProcessBuilder(systemdRunCommand(bin, avd, log, env, adbPath)).redirectErrorStream(true).start()
         } catch (e: IOException) {
             throw EmulatorException("cannot run systemd-run for $avd: ${e.message}")
         }
@@ -221,7 +238,13 @@ class SystemdLauncher(
  * is read back from the unit with `systemctl show` (see [SystemdLauncher.lastExit]), so no `--collect`
  * or `ExecStopPost` sidecar is needed.
  */
-fun systemdRunCommand(bin: String, avd: String, log: Path, env: Map<String, String>): List<String> =
+fun systemdRunCommand(
+    bin: String,
+    avd: String,
+    log: Path,
+    env: Map<String, String>,
+    adbPath: String? = null,
+): List<String> =
     buildList {
         add("systemd-run")
         add("--user")
@@ -230,9 +253,7 @@ fun systemdRunCommand(bin: String, avd: String, log: Path, env: Map<String, Stri
         add("--property=StandardError=file:$log")
         env.filterKeys { it.startsWith("ANDROID_") }.toSortedMap().forEach { (k, v) -> add("--setenv=$k=$v") }
         add("--")
-        add(bin)
-        add("-avd")
-        add(avd)
+        addAll(emulatorArgv(bin, avd, adbPath))
     }
 
 /** `systemctl show` for the four state properties; null when the unit is unloaded or the command fails. */
@@ -298,10 +319,12 @@ fun launcherFor(
     env: Map<String, String> = System.getenv(),
     cgroup: () -> String? = { runCatching { Files.readString(Path.of("/proc/self/cgroup")) }.getOrNull() },
     override: String? = env["CORRAL_EMULATOR_LAUNCHER"],
+    adbPath: String? = null,
 ): EmulatorLauncher = when (override?.trim()?.lowercase()) {
-    "systemd" -> SystemdLauncher(env)
-    "direct" -> DefaultLauncher()
-    else -> if (cgroup()?.contains("corral.service") == true) SystemdLauncher(env) else DefaultLauncher()
+    "systemd" -> SystemdLauncher(env, adbPath = adbPath)
+    "direct" -> DefaultLauncher(adbPath)
+    else -> if (cgroup()?.contains("corral.service") == true) SystemdLauncher(env, adbPath = adbPath)
+    else DefaultLauncher(adbPath)
 }
 
 private val ACTIVE_STATES = setOf("active", "activating", "reloading")
@@ -348,7 +371,7 @@ interface EmulatorHost {
 class Emulators(
     private val adbPath: String,
     private val emulatorPath: () -> String?,
-    private val launcher: EmulatorLauncher = launcherFor(),
+    private val launcher: EmulatorLauncher = launcherFor(adbPath = adbPath),
     private val now: () -> Long = { System.currentTimeMillis() },
 ) : EmulatorHost {
     private val locks = ConcurrentHashMap<String, Any>()

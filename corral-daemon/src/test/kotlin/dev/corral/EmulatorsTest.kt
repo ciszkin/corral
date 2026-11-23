@@ -411,6 +411,50 @@ class EmulatorsTest {
         assertEquals(listOf("/sdk/emulator", "-avd", "Pixel6AVD"), cmd.takeLast(3))
     }
 
+    @Test fun systemdRunCommandTellsTheEmulatorWhichAdbToUse() {
+        val realAdb = "/home/u/Android/Sdk/platform-tools/adb.real"
+        val cmd = systemdRunCommand("/sdk/emulator", "Pixel6AVD", Path.of("/tmp/emu.log"), emptyMap(), realAdb)
+        assertEquals(listOf("/sdk/emulator", "-avd", "Pixel6AVD", "-adb-path", realAdb), cmd.takeLast(5))
+    }
+
+    @Test fun defaultLauncherTellsTheEmulatorWhichAdbToUse() {
+        val dir = createTempDirectory("emu")
+        val argvFile = dir.resolve("argv")
+        val emu = scriptEmulator(dir, "printf '%s\\n' \"${'$'}@\" > '$argvFile'\nexec sleep 300")
+        val realAdb = "/home/u/Android/Sdk/platform-tools/adb.real"
+        val launcher = DefaultLauncher(realAdb)
+        try {
+            launcher.start(emu.toString(), "Pixel6AVD", dir.resolve("out.log"))
+            assertTrue(waitUntil(2_000) { Files.exists(argvFile) }, "emulator never recorded its argv")
+            assertEquals(listOf("-avd", "Pixel6AVD", "-adb-path", realAdb), Files.readAllLines(argvFile))
+        } finally {
+            launcher.destroyAll()
+        }
+    }
+
+    /** A daemon-launched AVD must hand the emulator the resolved real adb, so its own
+     *  `getprop`/`am start-foreground-service` housekeeping never goes through the Corral wrapper. */
+    @Test fun daemonStartForwardsTheResolvedAdbNotTheWrapper() {
+        val dir = createTempDirectory("emu")
+        val argvFile = dir.resolve("argv")
+        val emu = scriptEmulator(dir, "printf '%s\\n' \"${'$'}@\" > '$argvFile'\nexec sleep 300")
+        val home = createTempDirectory("home")
+        val realAdb = "/home/u/Android/Sdk/platform-tools/adb.real"
+        val wrapper = "/home/u/bin/adb"
+        val launcher = launcherFor(emptyMap(), cgroup = { null }, override = "direct", adbPath = realAdb)
+        val emulators = Emulators(realAdb, { emu.toString() }, launcher)
+        withUserHome(home) { emulators.start("Pixel6AVD") }
+        try {
+            assertTrue(waitUntil(2_000) { Files.exists(argvFile) }, "emulator never recorded its argv")
+            val argv = Files.readAllLines(argvFile)
+            assertTrue("-adb-path" in argv, argv.toString())
+            assertEquals(realAdb, argv[argv.indexOf("-adb-path") + 1], argv.toString())
+            assertFalse(wrapper in argv, argv.toString())
+        } finally {
+            emulators.shutdown()
+        }
+    }
+
     @Test fun systemdLastExitIsZeroForSuccess() {
         withUserHome(createTempDirectory("home")) {
             val launcher = SystemdLauncher(emptyMap()) { "ActiveState=inactive\nResult=success\nExecMainStatus=0\n" }

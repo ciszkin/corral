@@ -57,6 +57,24 @@ internal fun resolveAdb(config: DaemonConfig): String {
 internal fun demoMode(config: DaemonConfig): Boolean =
     config.get("CORRAL_DEMO").trim().lowercase() in setOf("1", "true")
 
+/**
+ * `--stdio` serves the same MCP surface on stdin/stdout instead of the loopback HTTP listener —
+ * the transport a container host (Glama) runs, with no TCP port at all. Opt-in: no args means the
+ * shipped HTTP daemon, unchanged.
+ */
+internal fun stdioMode(args: Array<String>): Boolean = args.contains("--stdio")
+
+/** The one listener address the daemon ever binds; loopback-only is a shipped security property. */
+internal const val DAEMON_HOST = "127.0.0.1"
+
+/** The default daemon: loopback-only HTTP/WS plus `/mcp`, byte-for-byte what `--stdio` never changes. */
+internal fun daemonServer(port: Int, env: AppEnv) =
+    embeddedServer(CIO, port = port, host = DAEMON_HOST) {
+        guardLocalHost()
+        corralModule(env)
+        installMcp(env)
+    }
+
 /** A file value the API wrote that the daemon had to reject: say so, then the effective value shows in GET. */
 private fun warnRejectedFileValue(config: DaemonConfig, key: String) {
     val file = config.fileValue(key)?.takeIf { it.isNotBlank() } ?: return
@@ -64,7 +82,10 @@ private fun warnRejectedFileValue(config: DaemonConfig, key: String) {
         System.err.println("corral: $key '$file' in ${DaemonConfig.defaultPath()} is unusable; using '${config.get(key)}'")
 }
 
-fun main() {
+fun main(args: Array<String>) {
+    // `--stdio` is a child process serving MCP on its own pipe: no port, no db lock, no HOME
+    // writes, no update check. Everything below that would do those is gated on this one value.
+    val stdio = stdioMode(args)
     val config = DaemonConfig()
     warnRejectedFileValue(config, "CORRAL_PORT")
     warnRejectedFileValue(config, "CORRAL_DB")
@@ -73,19 +94,22 @@ fun main() {
     warnRejectedFileValue(config, "CORRAL_EMULATOR_LAUNCHER")
     // Demo mode is decided once, here, and every host-write gate below reads this value.
     val demo = demoMode(config)
-    val port = resolvePort(config)
-    val dbPath = resolveDbPath(config)
-    dbPath.parent?.let { Files.createDirectories(it) }
+    val port = if (stdio) 0 else resolvePort(config)
+    val dbPath = if (stdio) null else resolveDbPath(config)
+    dbPath?.parent?.let { Files.createDirectories(it) }
     // Refuse a second daemon on the same DB: each would keep its own in-memory leases over one
     // SQLite file and double-lease. The OS drops the lock on crash, so a dead daemon never blocks.
     // Keep the returned reference for the process lifetime — an unreferenced FileLock can be
     // collected, which would release it.
-    val dbLock = DbLock.acquire(dbPath) ?: run {
-        System.err.println("corral: another daemon already holds $dbPath — refusing to start (two daemons must not share one CORRAL_DB)")
-        exitProcess(1)
+    val dbLock = dbPath?.let { path ->
+        DbLock.acquire(path) ?: run {
+            System.err.println("corral: another daemon already holds $path — refusing to start (two daemons must not share one CORRAL_DB)")
+            exitProcess(1)
+        }
     }
     val adb = resolveAdb(config)
-    val db = Db(dbPath)
+    // A stdio server is one client on one pipe: leases live with the process, so no file backs them.
+    val db = dbPath?.let { Db(it) }
     val scope = CoroutineScope(Dispatchers.IO)
     // The demo's world is the whole device side: pool, screenshots and emulator host, in-JVM (I1).
     // Loading it before anything else means a broken world fails before a single write.
@@ -114,7 +138,7 @@ fun main() {
     val wrapperSource = Path.of(System.getProperty("user.home"), "bin", "adb")
     var lastShimStatus: String? = null
     fun selfHealSdkShim() {
-        if (demo) return
+        if (demo || stdio) return
         val status = runCatching { SdkShim.ensure(adbPath, wrapperSource) }.getOrNull() ?: return
         if (status != lastShimStatus) { println("corral: $status"); lastShimStatus = status }
     }
@@ -122,7 +146,7 @@ fun main() {
 
     var lastRulesStatus: String? = null
     fun selfHealRules() {
-        if (demo) return
+        if (demo || stdio) return
         val status = runCatching { RulesFile.ensure() }.getOrNull() ?: return
         if (status != lastRulesStatus) { println("corral: $status"); lastRulesStatus = status }
     }
@@ -139,7 +163,7 @@ fun main() {
     // `daemon.env`, so handing it over would freeze the kill-switch until a restart — `PUT
     // /api/config` writes the file, and only a fresh instance sees that write.
     val updateCheck = UpdateCheck(config = { if (demo) demoUpdateOff() else DaemonConfig() })
-    if (!demo) scope.launch {
+    if (!demo && !stdio) scope.launch {
         delay(5_000)
         while (true) {
             runCatching { updateCheck.checkNow() }
@@ -148,16 +172,17 @@ fun main() {
     }
     if (demo) watchSupervisor(scope)
 
-    val events = Events(
+    // SSE is an HTTP route; a stdio server has no stream for it and no page to keep current.
+    val events = if (stdio) null else Events(
         { pool().map { DeviceStatus(it.serial, leases.snapshot[it.serial], it.booted) } },
         { leases.queueSnapshot() },
         scope, demo = demo)
     val env = AppEnv(pool, leases, adb, world ?: Screenshotter(pool, adb), screenshotPolicy(config), events,
         config, emulators, updateCheck, demo)
-    events.start()
-    embeddedServer(CIO, port = port, host = "127.0.0.1") {
-        guardLocalHost()
-        corralModule(env)
-        installMcp(env)
-    }.start(wait = true)
+    events?.start()
+    if (stdio) {
+        serveStdio(env)
+    } else {
+        daemonServer(port, env).start(wait = true)
+    }
 }

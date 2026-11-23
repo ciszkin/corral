@@ -3,6 +3,7 @@ package dev.corral
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
+import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -71,5 +72,24 @@ class MainTest {
         val dir = createTempDirectory("db")
         assertFalse(dbPathUsable(dir.toString()))          // existing directory, not a DB file
         assertTrue(dbPathUsable(dir.resolve("nested/corral.db").toString()))
+    }
+
+    @Test fun stdioIsOptInOnly() {
+        assertFalse(stdioMode(emptyArray()))
+        assertFalse(stdioMode(arrayOf("--port=9000")))
+        assertTrue(stdioMode(arrayOf("--stdio")))
+    }
+
+    /** The shipped default: the HTTP listener is loopback-only, and stays so. */
+    @Test fun defaultServerBindsLoopbackOnAnEphemeralPort() = runBlocking {
+        val env = AppEnv({ emptyList() }, LeaseManager({ emptyList() }, null))
+        val server = daemonServer(0, env).start(wait = false)
+        try {
+            val connectors = server.engine.resolvedConnectors()
+            assertEquals(listOf("127.0.0.1"), connectors.map { it.host }.distinct())
+            assertTrue(connectors.all { it.port > 0 })
+        } finally {
+            server.stop(0, 0)
+        }
     }
 }

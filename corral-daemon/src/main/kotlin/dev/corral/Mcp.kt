@@ -20,6 +20,7 @@ import io.modelcontextprotocol.kotlin.sdk.server.ClientConnection
 import io.modelcontextprotocol.kotlin.sdk.server.Server
 import io.modelcontextprotocol.kotlin.sdk.server.ServerOptions
 import io.modelcontextprotocol.kotlin.sdk.server.ServerSession
+import io.modelcontextprotocol.kotlin.sdk.server.StdioServerTransport
 import io.modelcontextprotocol.kotlin.sdk.server.StreamableHttpServerTransport
 import io.modelcontextprotocol.kotlin.sdk.types.CallToolResult
 import io.modelcontextprotocol.kotlin.sdk.types.ImageContent
@@ -31,7 +32,12 @@ import io.modelcontextprotocol.kotlin.sdk.types.TextContent
 import io.modelcontextprotocol.kotlin.sdk.types.ToolAnnotations
 import io.modelcontextprotocol.kotlin.sdk.types.ToolSchema
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.io.asSink
+import kotlinx.io.asSource
+import kotlinx.io.buffered
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -40,6 +46,8 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
+import java.io.FileDescriptor
+import java.io.FileOutputStream
 import java.nio.charset.Charset
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
@@ -146,6 +154,26 @@ fun Application.installMcp(env: AppEnv) {
             get { call.respondText("streaming not supported", status = HttpStatusCode.MethodNotAllowed) }
         }
     }
+}
+
+/**
+ * `--stdio`: the same [corralMcpServer] the `/mcp` route builds, served on the process's own
+ * stdin/stdout. No listener and no localhost gate; the pipe's EOF closes the session, which
+ * returns from here so `main` can exit.
+ */
+fun serveStdio(env: AppEnv) = runBlocking {
+    // fd1 is the JSON-RPC channel. Take the real stdout for the transport and point System.out at
+    // stderr, so a stray library println (kotlin-logging announces itself at class init) cannot
+    // corrupt the protocol stream.
+    val output = FileOutputStream(FileDescriptor.out).asSink().buffered()
+    System.setOut(System.err)
+    val sessions = ConcurrentHashMap<String, ServerSession>()
+    val session = corralMcpServer(env, sessions).createSession(
+        StdioServerTransport(System.`in`.asSource().buffered(), output))
+    sessions[session.sessionId] = session
+    val done = CompletableDeferred<Unit>()
+    session.onClose { done.complete(Unit) }
+    done.await()
 }
 
 /**

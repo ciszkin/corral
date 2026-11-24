@@ -12,6 +12,8 @@ two forms that work.
 
 ![Two agents, one device: lease, denial, queue](https://raw.githubusercontent.com/ciszkin/corral/main/docs/demo.gif)
 
+[![ciszkin/corral MCP server](https://glama.ai/mcp/servers/ciszkin/corral/badges/score.svg)](https://glama.ai/mcp/servers/ciszkin/corral)
+
 [Adopting Corral](CUTOVER.md) · [Security policy and threat model](SECURITY.md) ·
 [Agent skill](skills/corral/SKILL.md) · Apache-2.0 ([LICENSE](LICENSE), [NOTICE](NOTICE))
 

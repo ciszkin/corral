@@ -137,6 +137,58 @@ internal fun updateRepoText(loaded: ConfigResponse, unknown: String): String =
  */
 internal fun updateControlsAvailable(demo: Boolean): Boolean = !demo
 
+/**
+ * The update row's pill tone. [POSITIVE] is an up-to-date console (green); [PATCH], [MINOR] and
+ * [MAJOR] say how far behind an available release the installed build is (yellow, orange, red);
+ * [PLAIN] leaves the row's own sentence uncoloured, which is what DISABLED, every UNKNOWN cause and
+ * demo mode need — none of them is staleness.
+ */
+internal enum class UpdateTone { POSITIVE, PATCH, MINOR, MAJOR, PLAIN }
+
+private data class Semver(val major: Int, val minor: Int, val patch: Int)
+
+/**
+ * `v0.10.0-rc1+build` -> (0, 10, 0). The core must be exactly three numeric segments: a short
+ * (`1.2`), long (`1.2.3.4`) or non-numeric (`nightly`) tag is not comparable (null), so the row
+ * falls back to its plain tone rather than guessing or throwing.
+ */
+private fun parseSemver(raw: String): Semver? {
+    val core = raw.trim().removePrefix("v").removePrefix("V").substringBefore('+').substringBefore('-')
+    val parts = core.split('.')
+    if (parts.size != 3) return null
+    val major = parts[0].toIntOrNull() ?: return null
+    val minor = parts[1].toIntOrNull() ?: return null
+    val patch = parts[2].toIntOrNull() ?: return null
+    return Semver(major, minor, patch)
+}
+
+/**
+ * How far [current] trails [latest], by SemVer precedence over the numeric major/minor/patch triple
+ * — never string order, so "0.9.0" behind "0.10.0" is a minor gap. A patch-only gap is the mildest
+ * tone. [UpdateTone.PLAIN] when either tag is not a comparable version, or when the installed build
+ * is level with or ahead of the feed: there is no staleness to claim.
+ */
+internal fun stalenessTone(current: String, latest: String?): UpdateTone {
+    val installed = parseSemver(current) ?: return UpdateTone.PLAIN
+    val published = parseSemver(latest.orEmpty()) ?: return UpdateTone.PLAIN
+    return when {
+        published.major != installed.major ->
+            if (published.major > installed.major) UpdateTone.MAJOR else UpdateTone.PLAIN
+        published.minor != installed.minor ->
+            if (published.minor > installed.minor) UpdateTone.MINOR else UpdateTone.PLAIN
+        published.patch > installed.patch -> UpdateTone.PATCH
+        else -> UpdateTone.PLAIN
+    }
+}
+
+/** The tone the row shows for [info]; a demo never colours it, it says why instead (I5). */
+internal fun updateTone(info: UpdateInfo?, demo: Boolean): UpdateTone = when {
+    demo -> UpdateTone.PLAIN
+    info?.state == UpdateState.CURRENT -> UpdateTone.POSITIVE
+    info?.state == UpdateState.UPDATE_AVAILABLE -> stalenessTone(info.currentVersion, info.latestVersion)
+    else -> UpdateTone.PLAIN
+}
+
 @Composable
 fun SettingsSection(
     state: ConfigState,
@@ -335,12 +387,17 @@ private fun UpdateGroup(
                 )
             }
         }
+        val tone = updateTone(info, demo)
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                if (demo) stringResource(Res.string.demo_update_disabled) else updateStateText(info),
-                style = MaterialTheme.typography.body2,
-                color = if (available && !demo) colors.positive else colors.onSurfaceVariant,
-            )
+            if (tone == UpdateTone.PLAIN) {
+                Text(
+                    if (demo) stringResource(Res.string.demo_update_disabled) else updateStateText(info),
+                    style = MaterialTheme.typography.body2,
+                    color = colors.onSurfaceVariant,
+                )
+            } else {
+                UpdateStatePill(tone)
+            }
             // The daemon's own release page (row 101): its `html_url` for an available update, verbatim.
             // Absent — not fabricated from the version — for every other state, and in a demo.
             val releaseUrl = releaseNotesUrl(info, demo)
@@ -390,6 +447,37 @@ private fun UpdateGroup(
                 style = MaterialTheme.typography.caption, color = MaterialTheme.colors.error,
             )
         }
+    }
+}
+
+/**
+ * The row's state as a pill instead of a sentence: green when the console is current, then yellow,
+ * orange and red as the available release is a patch, minor or major jump away. The wording is the
+ * existing one — only the tone is new — so the versions above and the "available" claim stay
+ * truthful. Tokens come from [LocalExtendedColors]; the orange middle step is the brand primary,
+ * the one orange container/content pair the theme already defines.
+ */
+@Composable
+private fun UpdateStatePill(tone: UpdateTone) {
+    val colors = LocalExtendedColors.current
+    when (tone) {
+        UpdateTone.POSITIVE -> CorralPill(
+            stringResource(Res.string.update_state_current),
+            colors.positiveContainer, colors.onPositiveContainer, icon = Icons.CheckCircle,
+        )
+        UpdateTone.PATCH -> CorralPill(
+            stringResource(Res.string.update_state_available),
+            colors.warningContainer, colors.onWarningContainer, icon = Icons.Clock,
+        )
+        UpdateTone.MINOR -> CorralPill(
+            stringResource(Res.string.update_state_available),
+            MaterialTheme.colors.primary, MaterialTheme.colors.onPrimary, icon = Icons.AlertTriangle,
+        )
+        UpdateTone.MAJOR -> CorralPill(
+            stringResource(Res.string.update_state_available),
+            colors.errorContainer, colors.onErrorContainer, icon = Icons.AlertTriangle,
+        )
+        UpdateTone.PLAIN -> Unit
     }
 }
 

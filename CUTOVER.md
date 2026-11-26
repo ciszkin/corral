@@ -453,8 +453,8 @@ save. `shell_skip` / `init_floor` are file-only, so edit `~/.config/corral/rules
 
 The status bar carries the connection state with the last event `seq` and the daemon's version
 (`0.0.0-dev` only when no version could be derived — no tag and no `CORRAL_VERSION` — and
-shown as-is); an update pill appears when a newer release is known,
-and Settings shows the console's own version beside the daemon's. Settings also holds the update
+shown as-is); an update pill appears when a newer release is known, and tapping it opens Settings
+on the update row. Settings shows the console's own version beside the daemon's and holds the update
 row: the last check's honest state, a check-now that asks the daemon for a fresh check, and an
 install that confirms first and then starts `corral update --apply` as a **detached** process;
 the console itself runs no applier. It polls until the daemon reports the new version, then — when

@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
 import dev.corral.UpdateInfo
 import dev.corral.UpdateState
 import dev.corral.ui.config.ConfigEffect
@@ -149,6 +150,32 @@ internal fun updatePillVersion(update: UpdateInfo?): String? =
         null
     }
 
+/** A programmatic move of the section list: which section to show, and how far to scroll into it. */
+internal data class SectionScroll(val sectionIndex: Int, val offsetPx: Int)
+
+/**
+ * A forward scroll past any real section height. The list clamps it to its own end, so one request
+ * covers both shapes: a section that fits the viewport lands whole, and a taller one lands with its
+ * last blocks on screen — never with its header alone. (Kept well below `Int.MAX_VALUE`, which would
+ * overflow once the list adds the section's own offset.)
+ */
+internal const val SCROLL_TO_SECTION_END: Int = 1_000_000
+
+/**
+ * Where tapping the status-bar update pill sends the console, or null when there is no pill to tap.
+ *
+ * The update block is Settings' last body block — client/daemon groups, then the update group, then
+ * the footer (`SettingsSection`) — so the scroll runs to the end of that section rather than stopping
+ * at its header, which would leave "Check now" and "Install" below the fold. The same gate as the
+ * pill itself (`updatePillVersion`) means a tap can never navigate away from a pill nobody saw.
+ */
+internal fun updatePillScroll(update: UpdateInfo?): SectionScroll? =
+    if (updatePillVersion(update) == null) {
+        null
+    } else {
+        SectionScroll(AppSections.indexOf(AppSection.Settings), SCROLL_TO_SECTION_END)
+    }
+
 @Composable
 fun AppScreen(
     app: AppViewModel,
@@ -210,6 +237,14 @@ fun AppScreen(
     }
 
     val stale = state.connection is Connection.Disconnected
+    // The status-bar pill is the update entry point above the fold: tapping it opens Settings and
+    // runs that section's scroll to its end, where the update block ("Check now" / "Install") sits.
+    val openUpdateBlock: () -> Unit = {
+        updatePillScroll(configState.update)?.let { target ->
+            expandedSections[AppSection.Settings] = true
+            scope.launch { listState.animateScrollToItem(target.sectionIndex, target.offsetPx) }
+        }
+    }
     val doctorFailed = poolState.doctor?.layers?.any { it.status == "fail" } == true
     val updatedAt = remember(state.lastUpdatedMs) {
         Instant.ofEpochMilli(state.lastUpdatedMs).atZone(ZoneId.systemDefault())
@@ -249,7 +284,13 @@ fun AppScreen(
                 ) { confirmQuit = true }
             }
             Column(Modifier.weight(1f)) {
-                StatusBar(state, configState.update, state.demo) { mode -> app.onIntent(AppIntent.SetTheme(mode)) }
+                StatusBar(
+                    state = state,
+                    update = configState.update,
+                    demo = state.demo,
+                    onTheme = { mode -> app.onIntent(AppIntent.SetTheme(mode)) },
+                    onOpenUpdate = openUpdateBlock,
+                )
                 // The persistent DEMO banner: top of the content area, above every other banner, so
                 // no screen of a simulated pool can be read as a real one (I7).
                 if (state.demo) {
@@ -333,6 +374,9 @@ fun AppScreen(
                             AppSection.Settings -> Box(
                                 Modifier.onSizeChanged { lastSectionHeightPx = it.height },
                             ) {
+                                // The update block is this section's last body block, which is what
+                                // lets the status-bar pill scroll to it (updatePillScroll). Keep the
+                                // update group last in SettingsSection.
                                 SettingsSection(
                                     configState, state, config::onIntent, app::onIntent, expanded, toggle,
                                 )
@@ -514,7 +558,13 @@ private fun RailItem(
 }
 
 @Composable
-private fun StatusBar(state: AppState, update: UpdateInfo?, demo: Boolean, onTheme: (ThemeMode) -> Unit) {
+private fun StatusBar(
+    state: AppState,
+    update: UpdateInfo?,
+    demo: Boolean,
+    onTheme: (ThemeMode) -> Unit,
+    onOpenUpdate: () -> Unit,
+) {
     val colors = LocalExtendedColors.current
     val status = when (val connection = state.connection) {
         is Connection.Connected -> stringResource(Res.string.status_connected, connection.seq)
@@ -543,7 +593,7 @@ private fun StatusBar(state: AppState, update: UpdateInfo?, demo: Boolean, onThe
                 modifier = Modifier.padding(end = Dimens.space8),
             )
         }
-        UpdatePill(update)
+        UpdatePill(update, onOpenUpdate)
         Row(
             Modifier.clip(RoundedCornerShape(Dimens.radiusPill))
                 .background(colors.containerLow)
@@ -563,17 +613,27 @@ private fun StatusBar(state: AppState, update: UpdateInfo?, demo: Boolean, onThe
     }
 }
 
+/**
+ * The status-bar half of the update surface: a button, not a badge. Tapping it opens the Settings
+ * section on its update block (see [updatePillScroll]); the DEMO pill beside it stays static, because
+ * a demo has nothing to install (I5/I7).
+ */
 @Composable
-private fun UpdatePill(update: UpdateInfo?) {
+private fun UpdatePill(update: UpdateInfo?, onOpen: () -> Unit) {
     val version = updatePillVersion(update) ?: return
     val colors = LocalExtendedColors.current
-    CorralPill(
-        text = stringResource(Res.string.update_pill, version),
-        container = colors.tertiaryContainer,
-        content = colors.onTertiaryContainer,
-        icon = Icons.RefreshCw,
-        modifier = Modifier.padding(end = Dimens.space8),
-    )
+    Box(
+        Modifier.padding(end = Dimens.space8)
+            .clip(RoundedCornerShape(Dimens.radiusPill))
+            .clickable(role = Role.Button, onClick = onOpen),
+    ) {
+        CorralPill(
+            text = stringResource(Res.string.update_pill, version),
+            container = colors.tertiaryContainer,
+            content = colors.onTertiaryContainer,
+            icon = Icons.RefreshCw,
+        )
+    }
 }
 
 @Composable

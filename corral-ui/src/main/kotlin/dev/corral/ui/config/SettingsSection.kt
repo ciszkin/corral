@@ -89,6 +89,7 @@ import dev.corral.ui.resources.update_install_failed
 import dev.corral.ui.resources.update_installed
 import dev.corral.ui.resources.update_installing
 import dev.corral.ui.resources.update_latest
+import dev.corral.ui.resources.update_release_notes
 import dev.corral.ui.resources.update_section
 import dev.corral.ui.resources.update_source
 import dev.corral.ui.resources.update_source_desc
@@ -334,11 +335,26 @@ private fun UpdateGroup(
                 )
             }
         }
-        Text(
-            if (demo) stringResource(Res.string.demo_update_disabled) else updateStateText(info),
-            style = MaterialTheme.typography.body2,
-            color = if (available && !demo) colors.positive else colors.onSurfaceVariant,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (demo) stringResource(Res.string.demo_update_disabled) else updateStateText(info),
+                style = MaterialTheme.typography.body2,
+                color = if (available && !demo) colors.positive else colors.onSurfaceVariant,
+            )
+            // The daemon's own release page (row 101): its `html_url` for an available update, verbatim.
+            // Absent — not fabricated from the version — for every other state, and in a demo.
+            val releaseUrl = releaseNotesUrl(info, demo)
+            if (releaseUrl != null) {
+                Spacer(Modifier.width(Dimens.space4))
+                val opener = remember { ReleaseNotesOpener() }
+                TextButton(onClick = { opener.open(releaseUrl) }, enabled = opener.available()) {
+                    AppIcon(Icons.FileText, contentDescription = null, modifier = Modifier.size(Dimens.iconMd))
+                    Spacer(Modifier.width(Dimens.space8))
+                    Text(stringResource(Res.string.update_release_notes), maxLines = 1, softWrap = false,
+                        overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
         if (updateControlsAvailable(demo)) {
             Row(horizontalArrangement = Arrangement.spacedBy(Dimens.space8)) {
                 val idle = !state.updateChecking && !state.installing

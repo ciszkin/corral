@@ -49,10 +49,11 @@ the lease-gating wrapper. With no adb at all it installs with a warning and the 
 devices; `corral demo` needs no adb, SDK or phone.
 
 ```sh
-curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.8/corral-0.1.8.zip
-curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.8/corral-0.1.8.zip.sha256
-sha256sum -c corral-0.1.8.zip.sha256
-unzip corral-0.1.8.zip -d corral-0.1.8 && cd corral-0.1.8 && ./install.sh --ui
+curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.8/corral-0.1.8.zip &&
+curl -fsSLO https://github.com/ciszkin/corral/releases/download/v0.1.8/corral-0.1.8.zip.sha256 &&
+sha256sum -c corral-0.1.8.zip.sha256 &&
+unzip corral-0.1.8.zip -d corral-0.1.8 &&
+(cd corral-0.1.8 && ./install.sh --ui)
 ```
 
 From a source checkout instead:

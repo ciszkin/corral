@@ -3415,6 +3415,32 @@ check "F4 docs: the README says an adb outside the SDK is refused before anythin
   "grep -qF 'is not the SDK' '$DOCDIR/README.md' && grep -qF 'before anything is written' '$DOCDIR/README.md'"
 check "F4 docs: CUTOVER names the preflight refusal and the --no-sdk-shim way through it" bash -c \
   "grep -qF 'is not in an Android SDK' '$DOCDIR/CUTOVER.md' && grep -qF -- '--no-sdk-shim' '$DOCDIR/CUTOVER.md'"
+# 97: an operator copies this block as one paste. A failed download or a checksum mismatch must stop
+# the run before extraction and install, so every step but the last ends in && and the checksum
+# precedes unzip. The row reads the fenced block under "## Install", so a version bump does not
+# break it; it asserts the chain, not the tag.
+README_INSTALL="$TMP/readme-install-block"
+awk '/^## Install/{f=1} f && /^```sh$/{b=1;next} b && /^```$/{exit} b' "$DOCDIR/README.md" \
+  | sed -e '/^[[:space:]]*$/d' -e '/^[[:space:]]*#/d' > "$README_INSTALL"
+check "97 docs: the README install block chains download -> checksum -> unzip -> install with &&" \
+  bash -c '
+    block=$1
+    [ -s "$block" ] || { echo "no install block found"; exit 1; }
+    if head -n -1 "$block" | grep -qv "&&$"; then
+      echo "an unchained command would run after a failed step:"
+      head -n -1 "$block" | grep -v "&&$"
+      exit 1
+    fi
+    case "$(head -1 "$block")" in
+      *"curl "*".zip"*"&&") ;;
+      *) echo "the chain does not start with the zip download"; exit 1;;
+    esac
+    tail -1 "$block" | grep -q "install\.sh" || { echo "the chain does not end in install.sh"; exit 1; }
+    sha=$(grep -n "sha256sum -c" "$block" | cut -d: -f1)
+    unzip=$(grep -n "^unzip" "$block" | cut -d: -f1)
+    inst=$(grep -n "install\.sh" "$block" | cut -d: -f1)
+    [ -n "$sha" ] && [ -n "$unzip" ] && [ -n "$inst" ] && [ "$sha" -lt "$unzip" ] && [ "$unzip" -lt "$inst" ]
+  ' _ "$README_INSTALL"
 # The listing, not the path: on a case-insensitive filesystem (macOS) `cutover.md` IS `CUTOVER.md`,
 # so `test ! -e` fails there — the one platform where a name mismatch is invisible. An exact-name
 # listing prints the name as stored, so a real lowercase copy still fails and this passes anywhere.
